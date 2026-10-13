@@ -33,6 +33,7 @@ const C_AQ_LOCK = 25,
 const C_HOSTS = 29,
   C_DRAFTS = 30; // workers that host async threads, and idle workers asked to
 const C_PEND_MIN = 31; // the oldest epoch on the C_PEND list (see reclaim)
+const C_NUDGED = 38; // a nudge is on its way to the page (see nudgePage)
 // free list heads: C_FREE + n for blocks of n * 8 bytes (n <= 256), C_FREE for
 // larger
 const C_FREE = 1100;
@@ -425,22 +426,24 @@ function nudgeHosts() {
 // between the tasks it runs: when it is the thread that holds up freeing, a
 // worker posts it a nudge, and it passes one as it gets the message, and
 // frees what that makes safe (a message, unlike a timer, is not throttled on
-// a hidden page). one nudge per point the page is at: until it has handled
-// one, it will see what is queued meanwhile, as its reclaim comes after its
-// point, so none is lost, and none sent twice
-let nudgedAt = -1; // the page's point at the last nudge
+// a hidden page). one nudge at a time, between all workers: until the page
+// has handled it, it will see what is queued meanwhile, as its reclaim comes
+// after it takes the nudge, so none is lost, and none sent twice
 function nudgePage() {
   const e = C_THREADS + T_ENTRY;
-  if (e === ME || Atomics.load(I32, e + T_ALIVE) !== 1) return;
-  const qs = Atomics.load(I32, e + T_QS);
-  if (qs >= Atomics.load(I32, C_EPOCH) || qs === nudgedAt) return;
-  nudgedAt = qs;
-  post({type: 'nudge'});
+  if (
+    e === ME ||
+    Atomics.load(I32, e + T_ALIVE) !== 1 ||
+    Atomics.load(I32, e + T_QS) >= Atomics.load(I32, C_EPOCH)
+  )
+    return;
+  if (Atomics.compareExchange(I32, C_NUDGED, 0, 1) === 0) post({type: 'nudge'});
 }
 // what a page does with a nudge (browser.ts): it passes a quiescent point,
 // and works off what is safe now of the shared list, where a worker put its
 // queue as its thread ended, before it went idle
 export function $nudged() {
+  Atomics.store(I32, C_NUDGED, 0); // first: the next nudge is for what comes
   $quiescent();
   reclaim();
 }
@@ -859,6 +862,8 @@ const HEAP_FULL = () => `RangeError: ${heapFullMessage()}`;
 export function threadBegin(tid: number) {
   if (tid >= MAX_THREADS) throw new RangeError('threads: out of thread ids');
   ME = C_THREADS + tid * T_ENTRY;
+  // thread 1, a page's: no nudge is on its way to it as it begins
+  if (tid === 1) Atomics.store(I32, C_NUDGED, 0);
   Atomics.store(I32, ME + T_QS, Atomics.load(I32, C_EPOCH));
   Atomics.store(I32, ME + T_ALIVE, 1);
 }
