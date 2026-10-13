@@ -1180,19 +1180,18 @@ export function shutdown(sab: SharedArrayBuffer) {
 // and the epoch are kept, and thread ids go on from where they were, so that
 // no old worker's entry is a new worker's. a terminated worker may run on
 // (see stale): first a new generation, after which none of them begins a pool
-// operation or takes a lock, then the operations and the locks begun before
-// end, as a worker that runs on ends them, then the reset. one that does not
-// run on would hold the reset up: after a second it goes on regardless, and
-// what that worker was changing may be half changed
+// operation, then the operations begun before end, as a worker that runs on
+// ends them, then the reset. one that does not run on would hold the reset
+// up: after a second it goes on regardless, and what that worker was
+// changing may be half changed. the heap's locks (the string table's, the
+// free lists', the shared list of decrements') are not the pool's: a worker
+// that runs on takes and releases them as before, and excludes the new pool's
+// workers as it should, so they are left alone; the async queue's lock is
+// taken in pool operations only, so none holds it now
 export function resetPool(sab: SharedArrayBuffer) {
-  const i32 = new Int32Array(sab),
-    locks = [C_AQ_LOCK, C_STR_LOCK, C_FREE_LOCK, C_PEND_LOCK];
+  const i32 = new Int32Array(sab);
   Atomics.add(i32, C_POOL_GEN, 1);
-  for (
-    const until = performance.now() + 1000;
-    Atomics.load(i32, C_BUSY) !== 0 ||
-    locks.some(l => Atomics.load(i32, l) !== 0);
-  )
+  for (const until = performance.now() + 1000; Atomics.load(i32, C_BUSY) !== 0;)
     if (performance.now() > until) {
       console.warn(
         'threads: a worker of the pool that was stopped is still at work: the pool starts regardless',
@@ -1207,12 +1206,12 @@ export function resetPool(sab: SharedArrayBuffer) {
     C_IDLE,
     C_LIVE,
     C_BUSY,
+    C_AQ_LOCK,
     C_AQ_HEAD,
     C_AQ_TAIL,
     C_AQ_LEN,
     C_HOSTS,
     C_DRAFTS,
-    ...locks,
   ])
     Atomics.store(i32, c, 0);
   i32.fill(0, C_RING, C_RING + RING);
