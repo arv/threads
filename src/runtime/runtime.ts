@@ -718,7 +718,14 @@ function enqueue(t: number) {
     if (CAN_BLOCK) Atomics.wait(PRIV, 0, 0, 0.01);
   const pending = Atomics.add(I32, C_PENDING, 1) + 1;
   Atomics.notify(I32, C_PENDING, 1);
-  if (Atomics.load(I32, C_IDLE) < pending) post({type: 'grow'});
+  // queued now, for good: should asking for one more worker fail, the thread
+  // waits for one that is, rather than be taken back from under a worker
+  if (Atomics.load(I32, C_IDLE) < pending)
+    try {
+      post({type: 'grow'});
+    } catch (e) {
+      console.warn(`threads: could not ask for a worker: ${String(e)}`);
+    }
 }
 // wait for thread block a to finish: its result, or what it threw thrown. the
 // caller checks that it may block before it commits to the join (own.ts)
