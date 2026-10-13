@@ -32,6 +32,9 @@ const C_AQ_LOCK = 25,
   C_AQ_LEN = 28; // async threads waiting for a host (see spawnAsync)
 const C_HOSTS = 29,
   C_DRAFTS = 30; // workers that host async threads, and idle workers asked to
+// one more each time the pool is reset (resetPool): a worker of a pool that
+// was stopped finds out as it wakes, and leaves (see stale)
+const C_POOL_GEN = 36;
 // free list heads: C_FREE + n for blocks of n * 8 bytes (n <= 256), C_FREE for
 // larger
 const C_FREE = 1100;
@@ -111,6 +114,15 @@ export type Message =
 let CHECK = false;
 // the runtime's check option: slower, stricter (poisons freed blocks)
 export const $checking = () => CHECK;
+// the pool this worker belongs to, and whether that pool was stopped since. a
+// page's stop() terminates its workers, but a terminated worker runs on until
+// it yields to its event loop: one blocked in a wait, or computing, finishes
+// its thread, goes idle on the next pool's words, takes a thread of the next
+// pool and never runs it (its event loop is gone). so a worker checks, as it
+// wakes, that its pool is still the one running, and leaves if not
+let myGen = 0;
+const STOPPED = 'threads: the pool was stopped';
+const stale = () => Atomics.load(I32, C_POOL_GEN) !== myGen;
 
 // ---- allocation: bump, per-thread chunks. only blocks own.ts counts are freed
 // ($freeBlock) ----
@@ -685,12 +697,14 @@ function retire(p: number) {
 // ---- the pool's threads ----
 // queue a thread block for the pool (own.ts __start makes them)
 export function spawnThread(t: number) {
+  if (stale()) throw new Error(STOPPED);
   Atomics.add(I32, C_LIVE, 1);
   enqueue(t);
 }
 // queue a thread block, or a DRAFT, for an idle worker; with none idle, ask the
 // page for one more
 function enqueue(t: number) {
+  if (stale()) throw new Error(STOPPED);
   const tail = Atomics.add(I32, C_RING_TAIL, 1);
   if (tail - Atomics.load(I32, C_RING_HEAD) >= RING)
     throw new RangeError('threads: too many threads waiting to start');
@@ -763,6 +777,7 @@ export function attach(
     throw new Error('threads: attach to the heap the worker was started with');
   post = postMessage;
   write = writeOut;
+  myGen = Atomics.load(I32, C_POOL_GEN);
   CHECK = !!opts.check;
   // so that a thread can report a full heap without allocating
   $intern(HEAP_FULL());
@@ -875,7 +890,9 @@ function endThread(
     Atomics.store(I32, (t + 8) >> 2, 1);
     Atomics.notify(I32, (t + 8) >> 2);
     if (detached) $freeBlock(t, 32);
-    if (Atomics.sub(I32, C_LIVE, 1) === 1) Atomics.notify(I32, C_LIVE);
+    // a thread of a pool that was stopped is not counted in the next pool
+    if (!stale() && Atomics.sub(I32, C_LIVE, 1) === 1)
+      Atomics.notify(I32, C_LIVE);
   }
 }
 
@@ -892,6 +909,10 @@ function endThread(
 const DRAFT = -1;
 // ms: how often an idle worker with handles to finalize lets V8 finalize them
 const FINALIZE = 50;
+// ms: how long an idle worker waits for work before it looks for itself. new
+// work wakes it at once; this is for a wake-up that went to a worker of a pool
+// that was stopped (see stale), should that worker not pass it on
+const POLL = 100;
 const HOSTS = Math.max(1, globalThis.navigator?.hardwareConcurrency ?? 8);
 const LINGER = 10,
   // ms: how long a host with no async threads waits for more; between a waiting
@@ -918,6 +939,7 @@ export const $resumed = () => {
 };
 // queue an async thread for a host
 export function spawnAsync(t: number) {
+  if (stale()) throw new Error(STOPPED);
   Atomics.add(I32, C_LIVE, 1);
   mlock(C_AQ_LOCK);
   I32[(t + 24) >> 2] = 0; // the queue links blocks through their result words
@@ -987,6 +1009,10 @@ const keepAlive: (ms: number) => ReturnType<typeof setTimeout> = ms =>
 // one turn of a host: start the next queued async thread, or wait for one (or
 // for one of its own to end)
 async function hostTurn() {
+  if (stale()) {
+    unhost();
+    return;
+  }
   const bell = ME + T_BELL,
     b = Atomics.load(I32, bell);
   const t = takeAsync();
@@ -1035,7 +1061,7 @@ export async function poolLoop() {
       await hostTurn();
       continue;
     }
-    if (Atomics.load(I32, C_SHUTDOWN)) return;
+    if (Atomics.load(I32, C_SHUTDOWN) || stale()) return;
     // idle first: a thread queued meanwhile waits for this worker rather than
     // asking for one more
     Atomics.add(I32, C_IDLE, 1);
@@ -1046,6 +1072,14 @@ export async function poolLoop() {
     let p: number;
     for (;;) {
       if (Atomics.load(I32, C_SHUTDOWN)) return;
+      if (stale()) {
+        // woken on a pool this worker is no longer part of: it was terminated
+        // in its wait, which Chrome's terminate() does not interrupt, and it
+        // slipped into the wait as its pool shut down. the wake-up was meant
+        // for a worker of the pool that runs now: pass it on, and leave
+        Atomics.notify(I32, C_PENDING, 1);
+        return;
+      }
       p = Atomics.load(I32, C_PENDING);
       if (p === 0) {
         if (afterTask()) {
@@ -1056,7 +1090,7 @@ export async function poolLoop() {
             await eventLoopTurn();
             flushCounts();
           }
-        } else Atomics.wait(I32, C_PENDING, 0);
+        } else Atomics.wait(I32, C_PENDING, 0, POLL);
         continue;
       }
       if (Atomics.compareExchange(I32, C_PENDING, p, p - 1) === p) break;
@@ -1104,6 +1138,45 @@ export function shutdown(sab: SharedArrayBuffer) {
   Atomics.store(i32, C_SHUTDOWN, 1);
   Atomics.notify(i32, C_PENDING);
 }
+// after a shutdown, once its workers are terminated (browser.ts stop): the
+// pool's words as they were before a worker started, so that a pool starts
+// again on the same heap, and a new generation, which a worker of the old pool
+// that runs on finds as it wakes (see stale). the threads that were queued or
+// running are lost, and their blocks stay; the heap, its strings, the shared
+// list of decrements and the epoch are kept, and thread ids go on from where
+// they were, so that no old worker's entry is a new worker's. a worker
+// terminated while it held a lock may have left what the lock guards half
+// changed; the locks are freed all the same
+export function resetPool(sab: SharedArrayBuffer) {
+  const i32 = new Int32Array(sab);
+  for (const c of [
+    C_SHUTDOWN,
+    C_RING_HEAD,
+    C_RING_TAIL,
+    C_PENDING,
+    C_IDLE,
+    C_LIVE,
+    C_AQ_LOCK,
+    C_AQ_HEAD,
+    C_AQ_TAIL,
+    C_AQ_LEN,
+    C_HOSTS,
+    C_DRAFTS,
+    C_STR_LOCK,
+    C_FREE_LOCK,
+    C_PEND_LOCK,
+  ])
+    Atomics.store(i32, c, 0);
+  i32.fill(0, C_RING, C_RING + RING);
+  // every worker's entry in the thread table; thread 1, the page's, stays
+  i32.fill(0, C_THREADS + 2 * T_ENTRY, C_THREADS + i32[C_NEXT_TID] * T_ENTRY);
+  Atomics.add(i32, C_POOL_GEN, 1);
+  // a worker of the old pool that still waits for work (see stale) leaves now
+  Atomics.notify(i32, C_PENDING);
+}
+// the counters, and the pool's state: threads live (spawned and not
+// finished), queued (waiting for a worker), workers idle, and whether the
+// pool was shut down
 export function counters(sab: SharedArrayBuffer) {
   const i32 = new Int32Array(sab),
     out: Record<string, number> = {};
@@ -1111,6 +1184,10 @@ export function counters(sab: SharedArrayBuffer) {
     out[n] = i32[C_CNT + i];
   });
   out.heapBytes = i32[C_ALLOC] - CTRL_BYTES;
+  out.live = i32[C_LIVE];
+  out.queued = i32[C_PENDING];
+  out.idle = i32[C_IDLE];
+  out.shutdown = i32[C_SHUTDOWN];
   return out;
 }
 
