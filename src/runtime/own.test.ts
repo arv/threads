@@ -197,27 +197,41 @@ describe('reference counts', () => {
 
   it('a worker nudges a page that holds up freeing', () => {
     // a page (browser.ts) passes a quiescent point when a worker posts it a
-    // nudge, which one does once the page holds up freeing. this test is
-    // thread 2 meanwhile; thread 1, the page, stays at its last point
+    // nudge, and frees what that makes safe. this test is the worker, thread
+    // 2, and the page, thread 1, in turn
     const posted: unknown[] = [];
+    const nudges = () =>
+      posted.filter(m => (m as {type: string}).type === 'nudge').length;
     runtime.attach(
       globalThis.__escapeSab!,
       {nudge: true},
       m => posted.push(m),
       text => logged.push(text),
     );
+    runtime.$nudged(); // the page is at a point of its own
+    // the worker: a decrement held up by the page's point, and its thread ends
     runtime.threadBegin(2);
     const a = own.newStruct(N),
       b = own.newStruct(N);
     own.store(next(a), b); // a.next = b
     own.store(next(a), 0); // b's decrement waits for every thread's next point
-    for (let i = 0; i < 64; i++) own.quiescent(); // the 64th reclaims
-    expect(posted).toContainEqual({type: 'nudge'});
+    runtime.threadEnd(); // held up: one nudge, and the queue to the shared list
+    expect(nudges()).toBe(1);
     expect(runtime.I32[b >> 2]).toBe(N.kind); // not freed
-    runtime.threadEnd(); // what thread 2 queued goes to the shared list; idle
+    // the page gets the nudge: a point, and b is freed from the shared list
     runtime.threadBegin(1);
-    runtime.$nudged(); // the page gets the nudge: a quiescent point, and frees
+    runtime.$nudged();
     expect(runtime.I32[b >> 2]).toBe(runtime.K_FREE);
+    // more, after the page's point: a nudge of its own, not dropped for the last
+    runtime.threadBegin(2);
+    const c = own.newStruct(N);
+    own.store(next(a), c);
+    own.store(next(a), 0);
+    runtime.threadEnd();
+    expect(nudges()).toBe(2);
+    runtime.threadBegin(1);
+    runtime.$nudged();
+    expect(runtime.I32[c >> 2]).toBe(runtime.K_FREE);
     own.release(a);
     runtime.attach(
       globalThis.__escapeSab!,

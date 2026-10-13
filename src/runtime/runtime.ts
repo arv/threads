@@ -401,7 +401,9 @@ function reclaim() {
     else if (list[k + 1] < 0) retire(-list[k + 1]);
     else deferHandler!(list[k + 1]); // may queue more, in pend
   }
+  // some are held up still, by the page perhaps
   if (pend.length >= 4096) nudgeHosts();
+  if (NUDGE && pend.length !== 0) nudgePage();
 }
 // a host whose async threads all wait passes no quiescent point until one
 // resumes: ring the bells of those behind, so that each passes one (see
@@ -421,28 +423,23 @@ function nudgeHosts() {
 }
 // a page (browser.ts) is thread 1, and passes no quiescent point of its own
 // between the tasks it runs: when it is the thread that holds up freeing, a
-// worker posts it a nudge, and it passes one as it gets the message (a
-// message, unlike a timer, is not throttled on a hidden page). at least 2 ms
-// apart: one is enough, and the page needs a moment to answer it (the first
-// goes whenever it comes)
-let lastNudge = -Infinity;
+// worker posts it a nudge, and it passes one as it gets the message, and
+// frees what that makes safe (a message, unlike a timer, is not throttled on
+// a hidden page). one nudge per point the page is at: until it has handled
+// one, it will see what is queued meanwhile, as its reclaim comes after its
+// point, so none is lost, and none sent twice
+let nudgedAt = -1; // the page's point at the last nudge
 function nudgePage() {
   const e = C_THREADS + T_ENTRY;
-  if (
-    e === ME ||
-    Atomics.load(I32, e + T_ALIVE) !== 1 ||
-    Atomics.load(I32, e + T_QS) >= Atomics.load(I32, C_EPOCH)
-  )
-    return;
-  const now = performance.now();
-  if (now - lastNudge < 2) return;
-  lastNudge = now;
+  if (e === ME || Atomics.load(I32, e + T_ALIVE) !== 1) return;
+  const qs = Atomics.load(I32, e + T_QS);
+  if (qs >= Atomics.load(I32, C_EPOCH) || qs === nudgedAt) return;
+  nudgedAt = qs;
   post({type: 'nudge'});
 }
 // what a page does with a nudge (browser.ts): it passes a quiescent point,
-// and works off what is safe now of the shared list, where the worker that
-// nudged may have put its queue as its thread ended, before it went idle: it
-// would not look again until it runs another thread
+// and works off what is safe now of the shared list, where a worker put its
+// queue as its thread ended, before it went idle
 export function $nudged() {
   $quiescent();
   reclaim();
@@ -849,6 +846,9 @@ export function threadBegin(tid: number) {
 export function threadEnd() {
   reclaim();
   handOffPending();
+  // what the shared list holds now is the page's to free, should it hold
+  // them up: this worker, idle, will not look again until its next thread
+  if (NUDGE && Atomics.load(I32, C_PEND_LEN) !== 0) nudgePage();
   flushCounts();
   Atomics.store(I32, ME + T_ALIVE, 0);
 }
