@@ -83,6 +83,7 @@ export async function run<A extends unknown[], R>(
 export function stop() {
   shutdown(sab!);
   for (const w of workers.splice(0)) w.terminate();
-  $waitBegin(); // nothing runs now: quiescent until start() again
+  // the page's thread, if start() began it: quiescent until start() again
+  if (started !== null) $waitBegin();
   started = null;
 }
