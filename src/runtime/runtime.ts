@@ -701,7 +701,8 @@ export function spawnThread(t: number) {
 function enqueue(t: number) {
   let tail = Atomics.load(I32, C_RING_TAIL);
   for (;;) {
-    if (tail - Atomics.load(I32, C_RING_HEAD) >= RING)
+    // the counters wrap (i32): their difference as an i32 is the distance
+    if (((tail - Atomics.load(I32, C_RING_HEAD)) | 0) >= RING)
       throw new RangeError('threads: too many threads waiting to start');
     const seen = Atomics.compareExchange(I32, C_RING_TAIL, tail, tail + 1);
     if (seen === tail) break;
@@ -953,13 +954,35 @@ export function spawnAsync(t: number) {
     try {
       enqueue(DRAFT);
     } catch (e) {
-      // the ring is full: no draft. the thread stays queued, for a host that
-      // is there, or comes later, when it is lost (nothing joins it)
+      // the ring is full: no draft. the thread, queued already, is taken back
+      // and refused, unless a host has taken it meanwhile: then it runs
       Atomics.sub(I32, C_DRAFTS, 1);
-      ringHost();
-      throw e;
+      if (unqueueAsync(t)) {
+        if (Atomics.sub(I32, C_LIVE, 1) === 1) Atomics.notify(I32, C_LIVE);
+        throw e;
+      }
     }
   } else ringHost();
+}
+// takes thread block t off the queue of async threads, if it is still there
+function unqueueAsync(t: number) {
+  mlock(C_AQ_LOCK);
+  let found = false;
+  for (
+    let link = C_AQ_HEAD, prev = 0, q = I32[link];
+    q !== 0;
+    prev = q, link = (q + 24) >> 2, q = I32[link]
+  )
+    if (q === t) {
+      const next = I32[(t + 24) >> 2];
+      I32[link] = next;
+      if (next === 0) I32[C_AQ_TAIL] = prev;
+      Atomics.sub(I32, C_AQ_LEN, 1);
+      found = true;
+      break;
+    }
+  munlock(C_AQ_LOCK);
+  return found;
 }
 function takeAsync() {
   if (Atomics.load(I32, C_AQ_LEN) === 0) return 0;
