@@ -875,7 +875,9 @@ const workerTid = () => {
 // entry back, for a worker to come. one that does not leave, terminated and
 // not run on, keeps it: nothing it writes may land in another worker's
 function freeTid() {
-  if (myTid !== 0) Atomics.store(I32, C_THREADS + myTid * T_ENTRY + T_FREE, 1);
+  if (myTid === 0) return;
+  Atomics.store(I32, C_THREADS + myTid * T_ENTRY + T_FREE, 1);
+  myTid = 0; // once: a worker to come may have the entry by now
 }
 function runThread(t: number) {
   if (!hosting) threadBegin(workerTid());
@@ -1080,6 +1082,12 @@ async function hostTurn() {
   const t = takeAsync();
   if (t !== 0) {
     if (beforeTask !== null) await beforeTask(t);
+    // the pool may have been stopped during the wait: its thread is lost
+    if (stale()) {
+      hosting = false;
+      freeTid();
+      return;
+    }
     runThread(t);
     $quiescent();
     // resumed threads run between new ones
@@ -1198,6 +1206,11 @@ export async function poolLoop() {
       continue;
     }
     if (beforeTask !== null) await beforeTask(t);
+    // the pool may have been stopped during the wait: its thread is lost
+    if (stale()) {
+      freeTid();
+      return;
+    }
     runThread(t);
   }
 }
@@ -1248,11 +1261,30 @@ export function shutdown(sab: SharedArrayBuffer) {
 export function resetPool(sab: SharedArrayBuffer) {
   const i32 = new Int32Array(sab);
   Atomics.add(i32, C_POOL_GEN, 1);
-  for (const until = performance.now() + 1000; Atomics.load(i32, C_BUSY) !== 0;)
+  // a worker of the old pool still in a thread (alive, and not in a wait)
+  // runs on until the thread ends, reading the heap meanwhile: its entry
+  // holds up freeing until then, as any thread's does, and it ends it itself
+  const running = () => {
+    for (let t = 2, n = Atomics.load(i32, C_NEXT_TID); t < n; t++) {
+      const e = C_THREADS + t * T_ENTRY;
+      if (
+        Atomics.load(i32, e + T_ALIVE) === 1 &&
+        Atomics.load(i32, e + T_QS) !== IDLE
+      )
+        return true;
+    }
+    return false;
+  };
+  let late = false;
+  for (
+    const until = performance.now() + 1000;
+    Atomics.load(i32, C_BUSY) !== 0 || running();
+  )
     if (performance.now() > until) {
       console.warn(
         'threads: a worker of the pool that was stopped is still at work: the pool starts regardless',
       );
+      late = true;
       break;
     }
   for (const c of [
@@ -1262,7 +1294,6 @@ export function resetPool(sab: SharedArrayBuffer) {
     C_PENDING,
     C_IDLE,
     C_LIVE,
-    C_BUSY,
     C_AQ_LOCK,
     C_AQ_HEAD,
     C_AQ_TAIL,
@@ -1272,12 +1303,15 @@ export function resetPool(sab: SharedArrayBuffer) {
   ])
     Atomics.store(i32, c, 0);
   i32.fill(0, C_RING, C_RING + RING);
-  // every worker's entry in the thread table is neither alive nor a host now;
-  // thread 1, the page's, stays, and an entry given back (T_FREE) stays so
+  // no old worker is a host now (thread 1, the page's, stays as it is, and an
+  // entry given back stays so). one still in a thread after the second was
+  // not run on: its entry is taken for dead, or it would hold up freeing for
+  // good. the busy count is not reset: a late probe of a stale worker takes
+  // its own increment back
   for (let t = 2, n = i32[C_NEXT_TID]; t < n; t++) {
     const e = C_THREADS + t * T_ENTRY;
-    Atomics.store(i32, e + T_ALIVE, 0);
     Atomics.store(i32, e + T_HOST, 0);
+    if (late) Atomics.store(i32, e + T_ALIVE, 0);
   }
   // a worker of the old pool that still waits for work (see stale) leaves now
   Atomics.notify(i32, C_PENDING);
