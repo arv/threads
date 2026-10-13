@@ -339,6 +339,32 @@ function append(m: number, w: number, h: number, l: number, how: number) {
   I32[(m >> 2) + SIZE] = size + 1;
   return e;
 }
+// append, for the key l, h held as how says (or a pending string s, counted
+// now), when the heap may be full: a bigger table, or the key's string, may
+// not fit, and then nothing holds the counts the key, and a map's value (vl,
+// vh, vhow), came with. they are given back, and the error goes on
+function appendOrGiveBack(
+  m: number,
+  w: number,
+  h: number,
+  l: number,
+  how: number,
+  s: string | null,
+  vl = 0,
+  vh = 0,
+  vhow = 0,
+) {
+  let kl = l,
+    khow = how;
+  try {
+    [kl, khow] = counted(l, how, s);
+    return append(m, w, h, kl, khow);
+  } catch (e) {
+    unheld(kl, h, khow);
+    unheld(vl, vh, vhow);
+    throw e;
+  }
+}
 // deletes the entry whose key is the word lo, hi, if there is one
 function remove(m: number, w: number, l: number, h: number) {
   const t = I32[(m >> 2) + TABLE],
@@ -539,7 +565,7 @@ export class SharedMap<K = unknown, V = unknown> {
         e = entriesAt(t) + i * MAP_ENTRY;
         drop(e, MAP_ENTRY, 8, VALUE_HELD);
         unheld(l, h, how);
-      } else e = append(m, MAP_ENTRY, h, ...counted(l, how, s));
+      } else e = appendOrGiveBack(m, MAP_ENTRY, h, l, how, s, vl, vh, vhow);
       store(e, MAP_ENTRY, 8, vl, vh, vhow, VALUE_HELD);
     } finally {
       $unlock((m >> 2) + LOCK);
@@ -572,7 +598,7 @@ export class SharedMap<K = unknown, V = unknown> {
         unheld(l, h, how);
         unheld(vl, vh, vhow);
       } else {
-        e = append(m, MAP_ENTRY, h, ...counted(l, how, s));
+        e = appendOrGiveBack(m, MAP_ENTRY, h, l, how, s, vl, vh, vhow);
         store(e, MAP_ENTRY, 8, vl, vh, vhow, VALUE_HELD);
       }
       wf = F64[(e + 8) >> 3];
@@ -687,7 +713,7 @@ export class SharedSet<T = unknown> {
     $lock((m >> 2) + LOCK);
     try {
       if (absent || find(I32[(m >> 2) + TABLE], SET_ENTRY, l, h) < 0)
-        append(m, SET_ENTRY, h, ...counted(l, how, s));
+        appendOrGiveBack(m, SET_ENTRY, h, l, how, s);
       else unheld(l, h, how);
     } finally {
       $unlock((m >> 2) + LOCK);
