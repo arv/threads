@@ -395,20 +395,23 @@ function nudgeHosts() {
 function handOffPending() {
   if (pend.length === 0) return;
   mlock(C_PEND_LOCK);
-  const n = I32[C_PEND_LEN],
-    want = n + pend.length / 2;
-  if (want > I32[C_PEND_CAP]) {
-    const cap = Math.max(1024, want * 2),
-      nb = $alloc(cap * 8),
-      ob = I32[C_PEND];
-    for (let k = 0; k < 2 * n; k++) I32[(nb >> 2) + k] = I32[(ob >> 2) + k];
-    I32[C_PEND] = nb;
-    I32[C_PEND_CAP] = cap;
+  try {
+    const n = I32[C_PEND_LEN],
+      want = n + pend.length / 2;
+    if (want > I32[C_PEND_CAP]) {
+      const cap = Math.max(1024, want * 2),
+        nb = $alloc(cap * 8), // throws when the heap is full
+        ob = I32[C_PEND];
+      for (let k = 0; k < 2 * n; k++) I32[(nb >> 2) + k] = I32[(ob >> 2) + k];
+      I32[C_PEND] = nb;
+      I32[C_PEND_CAP] = cap;
+    }
+    const b = I32[C_PEND] >> 2;
+    for (let k = 0; k < pend.length; k++) I32[b + 2 * n + k] = pend[k];
+    Atomics.store(I32, C_PEND_LEN, want);
+  } finally {
+    munlock(C_PEND_LOCK);
   }
-  const b = I32[C_PEND] >> 2;
-  for (let k = 0; k < pend.length; k++) I32[b + 2 * n + k] = pend[k];
-  Atomics.store(I32, C_PEND_LEN, want);
-  munlock(C_PEND_LOCK);
   pend = [];
 }
 // work off every queued decrement this thread can: when no other thread is
@@ -601,12 +604,15 @@ function intern(s: string, add: number) {
     // not there, or about to leave: under the lock, a string in the table is
     // alive or at 0, which counting again brings back
     mlock(C_STR_LOCK);
-    const t = Atomics.load(I32, C_STR_TABLE);
-    a = strFind(t, s, h);
-    if (a < 0) a = strAdd(t, a, s, h, add);
-    else if (add !== PIN || Atomics.load(I32, (a >> 2) + 1) < PIN)
-      Atomics.add(I32, (a >> 2) + 1, add);
-    munlock(C_STR_LOCK);
+    try {
+      const t = Atomics.load(I32, C_STR_TABLE);
+      a = strFind(t, s, h);
+      if (a < 0) a = strAdd(t, a, s, h, add); // throws when the heap is full
+      else if (add !== PIN || Atomics.load(I32, (a >> 2) + 1) < PIN)
+        Atomics.add(I32, (a >> 2) + 1, add);
+    } finally {
+      munlock(C_STR_LOCK);
+    }
   }
   remember(s, a);
   return a;
