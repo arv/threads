@@ -425,21 +425,29 @@ function nudgeHosts() {
 function handOffPending() {
   if (pend.length === 0) return;
   mlock(C_PEND_LOCK);
-  const n = I32[C_PEND_LEN],
-    want = n + pend.length / 2;
-  if (want > I32[C_PEND_CAP]) {
-    const cap = Math.max(1024, want * 2),
-      nb = $alloc(cap * 8),
-      ob = I32[C_PEND];
-    for (let k = 0; k < 2 * n; k++) I32[(nb >> 2) + k] = I32[(ob >> 2) + k];
-    I32[C_PEND] = nb;
-    I32[C_PEND_CAP] = cap;
+  try {
+    const n = I32[C_PEND_LEN],
+      want = n + pend.length / 2;
+    if (want > I32[C_PEND_CAP]) {
+      const cap = Math.max(1024, want * 2),
+        nb = $alloc(cap * 8), // throws when the heap is full
+        ob = I32[C_PEND];
+      for (let k = 0; k < 2 * n; k++) I32[(nb >> 2) + k] = I32[(ob >> 2) + k];
+      I32[C_PEND] = nb;
+      I32[C_PEND_CAP] = cap;
+    }
+    const b = I32[C_PEND] >> 2;
+    for (let k = 0; k < pend.length; k++) I32[b + 2 * n + k] = pend[k];
+    Atomics.store(I32, C_PEND_LEN, want);
+    pend = [];
+  } catch (e) {
+    // a full heap: the queue stays this worker's, to work off at its next
+    // quiescent point (a pool worker runs more threads). the thread's end
+    // goes on: one recorded alive for good would hold up freeing for good
+    if (!(e instanceof RangeError)) throw e;
+  } finally {
+    munlock(C_PEND_LOCK);
   }
-  const b = I32[C_PEND] >> 2;
-  for (let k = 0; k < pend.length; k++) I32[b + 2 * n + k] = pend[k];
-  Atomics.store(I32, C_PEND_LEN, want);
-  munlock(C_PEND_LOCK);
-  pend = [];
 }
 // work off every queued decrement this thread can: when no other thread is
 // running, all of them
@@ -593,7 +601,15 @@ function strResize(t: number) {
 // a new string in table t's empty slot -1 - at, with count count
 function strAdd(t: number, at: number, s: string, h: number, count: number) {
   // under C_STR_LOCK
-  // a pinned string stays: bump-allocated, as nothing will free it
+  // a table the string would fill past half is replaced first: the new table
+  // may not fit (a full heap), and then nothing has changed yet
+  if ((I32[(t >> 2) + 2] + 1) * 2 > I32[(t >> 2) + 1]) {
+    strResize(t);
+    t = Atomics.load(I32, C_STR_TABLE);
+    at = strFind(t, s, h); // the new table's empty slot for s
+  }
+  // a pinned string stays: bump-allocated, as nothing will free it. the block
+  // may not fit either: nothing has changed yet then
   const ascii = $isAscii(s),
     bytes = STR_HEAD + s.length * (ascii ? 1 : 2),
     a = count >= PIN ? $alloc(bytes) : $allocBlock(bytes, false);
@@ -610,7 +626,7 @@ function strAdd(t: number, at: number, s: string, h: number, count: number) {
       U16[u + k] = s.charCodeAt(k);
   Atomics.store(I32, (t >> 2) + 4 + (-1 - at), a);
   I32[(t >> 2) + 3]++;
-  if (++I32[(t >> 2) + 2] * 2 > I32[(t >> 2) + 1]) strResize(t);
+  I32[(t >> 2) + 2]++;
   return a;
 }
 // adds add to string a's count if it is alive, or at 0 and not yet DEAD (the
@@ -638,12 +654,15 @@ function intern(s: string, add: number) {
     // not there, or about to leave: under the lock, a string in the table is
     // alive or at 0, which counting again brings back
     mlock(C_STR_LOCK);
-    const t = Atomics.load(I32, C_STR_TABLE);
-    a = strFind(t, s, h);
-    if (a < 0) a = strAdd(t, a, s, h, add);
-    else if (add !== PIN || Atomics.load(I32, (a >> 2) + 1) < PIN)
-      Atomics.add(I32, (a >> 2) + 1, add);
-    munlock(C_STR_LOCK);
+    try {
+      const t = Atomics.load(I32, C_STR_TABLE);
+      a = strFind(t, s, h);
+      if (a < 0) a = strAdd(t, a, s, h, add); // throws when the heap is full
+      else if (add !== PIN || Atomics.load(I32, (a >> 2) + 1) < PIN)
+        Atomics.add(I32, (a >> 2) + 1, add);
+    } finally {
+      munlock(C_STR_LOCK);
+    }
   }
   remember(s, a);
   return a;
@@ -723,21 +742,45 @@ export function spawnThread(t: number) {
   if (!busy()) throw new Error(STOPPED);
   try {
     Atomics.add(I32, C_LIVE, 1);
-    enqueue(t);
+    try {
+      enqueue(t);
+    } catch (e) {
+      if (Atomics.sub(I32, C_LIVE, 1) === 1) Atomics.notify(I32, C_LIVE);
+      throw e;
+    }
   } finally {
     done();
   }
 }
 // queue a thread block, or a DRAFT, for an idle worker; with none idle, ask the
-// page for one more. in a pool operation (busy)
+// page for one more. in a pool operation (busy). a full ring refuses it and is
+// left as it was: a slot claimed and never written would stop the worker that
+// takes it for good. a worker takes a slot after it moved the head past it, so
+// the slot the tail comes round to may still be being taken: the producer
+// waits a moment for it
 function enqueue(t: number) {
-  const tail = Atomics.add(I32, C_RING_TAIL, 1);
-  if (tail - Atomics.load(I32, C_RING_HEAD) >= RING)
-    throw new RangeError('threads: too many threads waiting to start');
-  Atomics.store(I32, C_RING + (tail % RING), t);
+  let tail = Atomics.load(I32, C_RING_TAIL);
+  for (;;) {
+    // the counters wrap (i32): their difference as an i32 is the distance
+    if (((tail - Atomics.load(I32, C_RING_HEAD)) | 0) >= RING)
+      throw new RangeError('threads: too many threads waiting to start');
+    const seen = Atomics.compareExchange(I32, C_RING_TAIL, tail, tail + 1);
+    if (seen === tail) break;
+    tail = seen;
+  }
+  const q = C_RING + (tail & (RING - 1));
+  while (Atomics.compareExchange(I32, q, 0, t) !== 0)
+    if (CAN_BLOCK) Atomics.wait(PRIV, 0, 0, 0.01);
   const pending = Atomics.add(I32, C_PENDING, 1) + 1;
   Atomics.notify(I32, C_PENDING, 1);
-  if (Atomics.load(I32, C_IDLE) < pending) post({type: 'grow'});
+  // queued now, for good: should asking for one more worker fail, the thread
+  // waits for one that is, rather than be taken back from under a worker
+  if (Atomics.load(I32, C_IDLE) < pending)
+    try {
+      post({type: 'grow'});
+    } catch (e) {
+      console.warn(`threads: could not ask for a worker: ${String(e)}`);
+    }
 }
 // wait for thread block a to finish: its result, or what it threw thrown. the
 // caller checks that it may block before it commits to the join (own.ts)
@@ -1013,8 +1056,38 @@ function spawnAsyncBusy(t: number) {
     (hosts < HOSTS && Atomics.load(I32, C_IDLE) > Atomics.load(I32, C_PENDING))
   ) {
     Atomics.add(I32, C_DRAFTS, 1);
-    enqueue(DRAFT);
+    try {
+      enqueue(DRAFT);
+    } catch (e) {
+      // the ring is full: no draft. the thread, queued already, is taken back
+      // and refused, unless a host has taken it meanwhile: then it runs
+      Atomics.sub(I32, C_DRAFTS, 1);
+      if (unqueueAsync(t)) {
+        if (Atomics.sub(I32, C_LIVE, 1) === 1) Atomics.notify(I32, C_LIVE);
+        throw e;
+      }
+    }
   } else ringHost();
+}
+// takes thread block t off the queue of async threads, if it is still there
+function unqueueAsync(t: number) {
+  mlock(C_AQ_LOCK);
+  let found = false;
+  for (
+    let link = C_AQ_HEAD, prev = 0, q = I32[link];
+    q !== 0;
+    prev = q, link = (q + 24) >> 2, q = I32[link]
+  )
+    if (q === t) {
+      const next = I32[(t + 24) >> 2];
+      I32[link] = next;
+      if (next === 0) I32[C_AQ_TAIL] = prev;
+      Atomics.sub(I32, C_AQ_LEN, 1);
+      found = true;
+      break;
+    }
+  munlock(C_AQ_LOCK);
+  return found;
 }
 function takeAsync() {
   if (Atomics.load(I32, C_AQ_LEN) === 0 || !busy()) return 0;
@@ -1188,7 +1261,7 @@ export async function poolLoop() {
     }
     // a thread taken: the pool operation goes on to the slot
     Atomics.sub(I32, C_IDLE, 1);
-    const q = C_RING + (Atomics.add(I32, C_RING_HEAD, 1) % RING);
+    const q = C_RING + (Atomics.add(I32, C_RING_HEAD, 1) & (RING - 1));
     let t: number;
     while ((t = Atomics.load(I32, q)) === 0) Atomics.wait(PRIV, 0, 0, 0.01);
     Atomics.store(I32, q, 0);
