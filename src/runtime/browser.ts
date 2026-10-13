@@ -4,14 +4,7 @@ import type {SpawnArgs} from './own.ts';
 // threads/heap made, and run(f, ...args) runs f on a thread and resolves with
 // its result. the page's own thread never blocks (it cannot: Atomics.wait is
 // not allowed there), so it waits for threads asynchronously
-import {
-  attach,
-  threadBegin,
-  shutdown,
-  $nudged,
-  $quiescent,
-  $waitBegin,
-} from './runtime.ts';
+import {attach, threadBegin, shutdown, $nudged, $waitBegin} from './runtime.ts';
 import type {Message} from './runtime.ts';
 
 const sab = globalThis.__escapeSab;
@@ -66,8 +59,10 @@ export function start({
   // any thread does (a handle's reference field, a map's value, a result's
   // struct), so what it may have read uncounted is not freed until it passes
   // the next one (REFCOUNT.md). it passes one when it spawns or joins, and
-  // whenever a worker nudges it (above): between tasks, with nothing uncounted
-  $quiescent();
+  // whenever a worker nudges it (above): between tasks, with nothing uncounted.
+  // as it starts, as if nudged: a worker of a pool stopped before may have
+  // handed its queue to the shared list while the page was waiting
+  $nudged();
   started = Promise.all(Array.from({length: count}, add)).then(() => {});
   return started;
 }
