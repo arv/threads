@@ -686,15 +686,30 @@ function retire(p: number) {
 // queue a thread block for the pool (own.ts __start makes them)
 export function spawnThread(t: number) {
   Atomics.add(I32, C_LIVE, 1);
-  enqueue(t);
+  try {
+    enqueue(t);
+  } catch (e) {
+    if (Atomics.sub(I32, C_LIVE, 1) === 1) Atomics.notify(I32, C_LIVE);
+    throw e;
+  }
 }
 // queue a thread block, or a DRAFT, for an idle worker; with none idle, ask the
-// page for one more
+// page for one more. a full ring refuses it and is left as it was: a slot
+// claimed and never written would stop the worker that takes it for good. a
+// worker takes a slot after it moved the head past it, so the slot the tail
+// comes round to may still be being taken: the producer waits a moment for it
 function enqueue(t: number) {
-  const tail = Atomics.add(I32, C_RING_TAIL, 1);
-  if (tail - Atomics.load(I32, C_RING_HEAD) >= RING)
-    throw new RangeError('threads: too many threads waiting to start');
-  Atomics.store(I32, C_RING + (tail % RING), t);
+  let tail = Atomics.load(I32, C_RING_TAIL);
+  for (;;) {
+    if (tail - Atomics.load(I32, C_RING_HEAD) >= RING)
+      throw new RangeError('threads: too many threads waiting to start');
+    const seen = Atomics.compareExchange(I32, C_RING_TAIL, tail, tail + 1);
+    if (seen === tail) break;
+    tail = seen;
+  }
+  const q = C_RING + (tail & (RING - 1));
+  while (Atomics.compareExchange(I32, q, 0, t) !== 0)
+    if (CAN_BLOCK) Atomics.wait(PRIV, 0, 0, 0.01);
   const pending = Atomics.add(I32, C_PENDING, 1) + 1;
   Atomics.notify(I32, C_PENDING, 1);
   if (Atomics.load(I32, C_IDLE) < pending) post({type: 'grow'});
@@ -935,7 +950,15 @@ export function spawnAsync(t: number) {
     (hosts < HOSTS && Atomics.load(I32, C_IDLE) > Atomics.load(I32, C_PENDING))
   ) {
     Atomics.add(I32, C_DRAFTS, 1);
-    enqueue(DRAFT);
+    try {
+      enqueue(DRAFT);
+    } catch (e) {
+      // the ring is full: no draft. the thread stays queued, for a host that
+      // is there, or comes later, when it is lost (nothing joins it)
+      Atomics.sub(I32, C_DRAFTS, 1);
+      ringHost();
+      throw e;
+    }
   } else ringHost();
 }
 function takeAsync() {
@@ -1062,7 +1085,7 @@ export async function poolLoop() {
       if (Atomics.compareExchange(I32, C_PENDING, p, p - 1) === p) break;
     }
     Atomics.sub(I32, C_IDLE, 1);
-    const q = C_RING + (Atomics.add(I32, C_RING_HEAD, 1) % RING);
+    const q = C_RING + (Atomics.add(I32, C_RING_HEAD, 1) & (RING - 1));
     let t: number;
     while ((t = Atomics.load(I32, q)) === 0) Atomics.wait(PRIV, 0, 0, 0.01);
     Atomics.store(I32, q, 0);
