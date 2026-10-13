@@ -36,6 +36,21 @@ describe('programs on threads', () => {
     ]);
   });
 
+  it('join() in an async function throws before it commits to anything', () => {
+    expect(run('join-on-host', '--threads=1').trim().split('\n')).toEqual([
+      'join() in an async function: throws',
+      'joinAsync() after it: 9',
+      'another thread: 25',
+    ]);
+  });
+
+  it('a key another thread interned again is found by the thread that knew it', () => {
+    expect(run('intern-stale', '--threads=1').trim().split('\n')).toEqual([
+      'y: [[true,2,1],1]',
+      'entries: [["k",9]] size 1',
+    ]);
+  });
+
   it('reference counting under a race reads no freed memory', () => {
     const out = run('refcount-hand', '--threads=2');
     expect(out).toMatch(/bad reads 0/);

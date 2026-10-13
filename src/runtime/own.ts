@@ -474,10 +474,16 @@ function maker(base: number, shape: number, frozen: boolean) {
   }
   const keys = Array.from({length: n}, (_, k) => I32[k0 + k * 2]),
     serials = keys.map(serialOf);
-  const fields = keys.map(
-    (a, k) =>
-      `${JSON.stringify(strAt(a))}: (v = F64[(base >> 3) + at + ${k}]) === v ? v : get(base, at + ${k}, frozen)`,
-  );
+  // each key quoted in the literal, but "__proto__", which quoted would set the
+  // object's prototype rather than a property: computed, it is a property
+  const fields = keys.map((a, k) => {
+    const name = strAt(a),
+      key =
+        name === '__proto__'
+          ? `[${JSON.stringify(name)}]`
+          : JSON.stringify(name);
+    return `${key}: (v = F64[(base >> 3) + at + ${k}]) === v ? v : get(base, at + ${k}, frozen)`;
+  });
   const make = new Function(
     'F64',
     'get',
@@ -1385,6 +1391,9 @@ class Thread<R = unknown> {
     this.joined = false;
   }
   join(): R {
+    // first: a host must not block, and the thread goes on, so nothing below
+    // may have happened (the finally would free the block of a running thread)
+    $mustNotBlock('join()', 'await joinAsync()');
     if (this.joined)
       throw new TypeError(
         'own: a thread is joined once (its result moves out)',
