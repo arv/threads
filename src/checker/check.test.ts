@@ -16,6 +16,12 @@ afterAll(() => api.close());
 const lines = (text: string) => text.split('\n').filter(l => l !== '');
 
 describe('threads-check', () => {
+  it('refuses a runtime no file imports: a mistyped --runtime', () => {
+    expect(() =>
+      check(join(cases, 'channels/tsconfig.json'), {runtime: 'thread', api}),
+    ).toThrow(/no file of the project imports the runtime as 'thread'/);
+  });
+
   for (const name of readdirSync(cases).sort()) {
     it(`reports what the fork does on ${name}`, () => {
       const dir = join(cases, name);
@@ -29,4 +35,18 @@ describe('threads-check', () => {
       expect([...actual].sort()).toEqual([...expected].sort());
     });
   }
+});
+
+// What threads-check reports and the fork does not, yet (compare.ts compares
+// the two on test/cases alone): programs in test/diverging, each with what it
+// should report
+describe('threads-check, where it differs from the fork', () => {
+  it("reports no blocking call on a Channel that is not the runtime's", () => {
+    const dir = join(checker, 'test/diverging/ambient-channel');
+    expect(
+      check(join(dir, 'tsconfig.json'), {runtime: 'threads', api}).map(d =>
+        formatDiagnostic(d, dir),
+      ),
+    ).toEqual([]);
+  });
 });
