@@ -185,6 +185,38 @@ describe('reference counts', () => {
     expect(T.heapStats().freed - before.freed).toBe(1);
   });
 
+  it('a worker nudges a page that holds up freeing', () => {
+    // a page (browser.ts) passes a quiescent point when a worker posts it a
+    // nudge, which one does once the page holds up freeing. this test is
+    // thread 2 meanwhile; thread 1, the page, stays at its last point
+    const posted: unknown[] = [];
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {nudge: true},
+      m => posted.push(m),
+      text => logged.push(text),
+    );
+    runtime.threadBegin(2);
+    const a = own.newStruct(N),
+      b = own.newStruct(N);
+    own.store(next(a), b); // a.next = b
+    own.store(next(a), 0); // b's decrement waits for every thread's next point
+    for (let i = 0; i < 64; i++) own.quiescent(); // the 64th reclaims
+    expect(posted).toContainEqual({type: 'nudge'});
+    expect(runtime.I32[b >> 2]).toBe(N.kind); // not freed
+    runtime.threadEnd(); // what thread 2 queued goes to the shared list
+    runtime.threadBegin(1); // the page passes a quiescent point
+    own.__collect();
+    expect(runtime.I32[b >> 2]).toBe(runtime.K_FREE);
+    own.release(a);
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {},
+      () => {},
+      text => logged.push(text),
+    );
+  });
+
   it('intern strings: one copy each', () => {
     expect(runtime.$internRef('abc')).toBe(runtime.$internRef('abc'));
     expect(own.strAt(runtime.$internFind('abc'))).toBe('abc');

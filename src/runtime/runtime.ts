@@ -32,6 +32,7 @@ const C_AQ_LOCK = 25,
   C_AQ_LEN = 28; // async threads waiting for a host (see spawnAsync)
 const C_HOSTS = 29,
   C_DRAFTS = 30; // workers that host async threads, and idle workers asked to
+const C_PEND_MIN = 31; // the oldest epoch on the C_PEND list (see reclaim)
 // free list heads: C_FREE + n for blocks of n * 8 bytes (n <= 256), C_FREE for
 // larger
 const C_FREE = 1100;
@@ -101,14 +102,17 @@ export const CAN_BLOCK = (() => {
   }
 })();
 
-// what a pool worker posts to the page (browser.ts)
+// what a pool worker posts to the page (browser.ts). a nudge: the page, thread
+// 1, holds up freeing, and passes a quiescent point when it gets the message
 export type Message =
   | {type: 'out'; text: string}
   | {type: 'grow'}
   | {type: 'ready'}
-  | {type: 'crash'; message: string};
+  | {type: 'crash'; message: string}
+  | {type: 'nudge'};
 
-let CHECK = false;
+let CHECK = false,
+  NUDGE = false;
 // the runtime's check option: slower, stricter (poisons freed blocks)
 export const $checking = () => CHECK;
 
@@ -307,7 +311,10 @@ const IDLE = 0x7fffffff;
 // address -p is a block to free, see retire)
 let pend: number[] = [];
 let deferHandler: ((p: number) => void) | null = null,
-  qsTick = 0;
+  qsTick = 0,
+  // the queue's length at which a quiescent point reclaims: 4096, or twice
+  // what a reclaim found held up (see reclaim)
+  pendLimit = 4096;
 export const setDeferHandler: (f: (p: number) => void) => void = f => {
   deferHandler = f;
 };
@@ -317,7 +324,7 @@ export function $defer(p: number) {
 }
 export function $quiescent() {
   Atomics.store(I32, ME + T_QS, Atomics.load(I32, C_EPOCH));
-  if ((++qsTick & 63) === 0 || pend.length >= 4096) reclaim();
+  if ((++qsTick & 63) === 0 || pend.length >= pendLimit) reclaim();
 }
 // around a blocking wait: quiescent throughout
 export function $waitBegin() {
@@ -347,6 +354,24 @@ function reclaim() {
   Atomics.add(I32, C_EPOCH, 1);
   Atomics.store(I32, ME + T_QS, Atomics.load(I32, C_EPOCH));
   const min = oldestEpoch();
+  // this thread's queue is in epoch order, and the shared list's oldest epoch
+  // is kept: when neither has a decrement that is safe yet, a thread that has
+  // yet to pass a quiescent point holds them all up (a page between tasks, a
+  // host computing). looking at each one again at every quiescent point, which
+  // a loop that stores references reaches at every iteration, would cost that
+  // loop a walk of the queue per iteration: nudge the thread instead, and look
+  // again once the queue has doubled
+  if (
+    (pend.length === 0 || pend[0] >= min) &&
+    (Atomics.load(I32, C_PEND_LEN) === 0 ||
+      Atomics.load(I32, C_PEND_MIN) >= min)
+  ) {
+    pendLimit = Math.max(4096, pend.length * 2);
+    nudgeHosts();
+    if (NUDGE) nudgePage();
+    return;
+  }
+  pendLimit = 4096;
   const list = pend;
   pend = [];
   if (Atomics.load(I32, C_PEND_LEN) !== 0) {
@@ -354,7 +379,8 @@ function reclaim() {
     mlock(C_PEND_LOCK);
     const b = I32[C_PEND] >> 2,
       n = I32[C_PEND_LEN];
-    let kept = 0;
+    let kept = 0,
+      keptMin = IDLE;
     for (let k = 0; k < n; k++) {
       const g = I32[b + 2 * k],
         p = I32[b + 2 * k + 1];
@@ -363,9 +389,11 @@ function reclaim() {
         I32[b + 2 * kept] = g;
         I32[b + 2 * kept + 1] = p;
         kept++;
+        if (g < keptMin) keptMin = g;
       }
     }
     Atomics.store(I32, C_PEND_LEN, kept);
+    Atomics.store(I32, C_PEND_MIN, keptMin);
     munlock(C_PEND_LOCK);
   }
   for (let k = 0; k < list.length; k += 2) {
@@ -391,6 +419,25 @@ function nudgeHosts() {
       ring(e);
   }
 }
+// a page (browser.ts) is thread 1, and passes no quiescent point of its own
+// between the tasks it runs: when it is the thread that holds up freeing, a
+// worker posts it a nudge, and it passes one as it gets the message (a
+// message, unlike a timer, is not throttled on a hidden page). a few ms apart
+// at most: the page needs a moment to answer one
+let lastNudge = 0;
+function nudgePage() {
+  const e = C_THREADS + T_ENTRY;
+  if (
+    e === ME ||
+    Atomics.load(I32, e + T_ALIVE) !== 1 ||
+    Atomics.load(I32, e + T_QS) >= Atomics.load(I32, C_EPOCH)
+  )
+    return;
+  const now = performance.now();
+  if (now - lastNudge < 2) return;
+  lastNudge = now;
+  post({type: 'nudge'});
+}
 // at a thread's end: hand the queued decrements to the shared list
 function handOffPending() {
   if (pend.length === 0) return;
@@ -407,26 +454,31 @@ function handOffPending() {
   }
   const b = I32[C_PEND] >> 2;
   for (let k = 0; k < pend.length; k++) I32[b + 2 * n + k] = pend[k];
+  // the queue is in epoch order: its first epoch is its oldest
+  if (n === 0 || pend[0] < I32[C_PEND_MIN]) I32[C_PEND_MIN] = pend[0];
   Atomics.store(I32, C_PEND_LEN, want);
   munlock(C_PEND_LOCK);
   pend = [];
 }
-// work off every queued decrement this thread can: when no other thread is
-// running, all of them
+// work off every queued decrement this thread can: all of them, once every
+// other running thread has passed a quiescent point, which a page (browser.ts)
+// or a host does on its own every WAKE ms at most: when a round frees nothing,
+// it waits a millisecond for them, up to a second in all
+const pendingCount = () => pend.length / 2 + Atomics.load(I32, C_PEND_LEN);
 export function $drain() {
-  for (
-    let round = 0;
-    round < 1000 && (pend.length !== 0 || Atomics.load(I32, C_PEND_LEN) !== 0);
-    round++
-  )
+  for (let round = 0; round < 1000; round++) {
+    const before = pendingCount();
+    if (before === 0) return;
     reclaim();
+    if (pendingCount() === before && CAN_BLOCK) Atomics.wait(PRIV, 0, 0, 1);
+  }
 }
 export function $heapStats() {
   return {
     heapBytes: Atomics.load(I32, C_ALLOC) - CTRL_BYTES,
     allocated: Atomics.load(I32, C_CNT + N_BALLOC) + LC[N_BALLOC],
     freed: Atomics.load(I32, C_CNT + N_BFREE) + LC[N_BFREE],
-    pending: pend.length / 2 + Atomics.load(I32, C_PEND_LEN),
+    pending: pendingCount(),
   };
 }
 // ---- text in shared memory: a string is stored a byte per char when it is
@@ -753,9 +805,11 @@ export function initShared(sab: SharedArrayBuffer) {
   i32[C_NEXT_TID] = 2; // the program's main thread is 1
   i32[C_EPOCH] = 1;
 }
+// opts: check, the runtime's check option; nudge, in a page's pool worker:
+// post the page a nudge when it holds up freeing (see nudgePage)
 export function attach(
   sab: SharedArrayBuffer,
-  opts: {check?: boolean},
+  opts: {check?: boolean; nudge?: boolean},
   postMessage: (message: Message) => void,
   writeOut: (text: string) => void,
 ) {
@@ -764,6 +818,7 @@ export function attach(
   post = postMessage;
   write = writeOut;
   CHECK = !!opts.check;
+  NUDGE = !!opts.nudge;
   // so that a thread can report a full heap without allocating
   $intern(HEAP_FULL());
 }
