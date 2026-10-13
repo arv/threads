@@ -1474,6 +1474,9 @@ class Scope {
   }
 }
 export function scope<R>(body: (s: Scope) => R): R {
+  // first, before a thread is spawned: joining would block a worker that runs
+  // async functions, and a thread spawned here could then not be joined
+  $mustNotBlock('scope()');
   const s = new Scope();
   // every thread is joined, whatever the body or a join threw: none outlives
   // the scope, and each one's block and result are freed. the body's error is
