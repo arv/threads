@@ -1467,14 +1467,35 @@ class Scope {
     return th;
   }
 }
-export function scope<R>(body: (s: Scope) => R) {
+export function scope<R>(body: (s: Scope) => R): R {
   const s = new Scope();
-  try {
-    return body(s);
-  } finally {
-    for (const th of s.threads) if (!th.joined) th.join();
+  // every thread is joined, whatever the body or a join threw: none outlives
+  // the scope, and each one's block and result are freed. the body's error is
+  // the one thrown; else the first join's, or all of them if several
+  const errors: unknown[] = [];
+  const joinAll = () => {
+    for (const th of s.threads)
+      if (!th.joined)
+        try {
+          th.join();
+        } catch (e) {
+          errors.push(e);
+        }
     $quiescent();
+  };
+  let result: R;
+  try {
+    result = body(s);
+  } catch (e) {
+    joinAll();
+    throw e;
   }
+  joinAll();
+  if (errors.length !== 0)
+    throw errors.length === 1
+      ? errors[0]
+      : new AggregateError(errors, 'threads: more than one thread threw');
+  return result;
 }
 
 // `parts` owned, disjoint chunks of nearly equal size (the checker trusts this)
