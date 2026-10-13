@@ -439,6 +439,14 @@ function nudgePage() {
   lastNudge = now;
   post({type: 'nudge'});
 }
+// what a page does with a nudge (browser.ts): it passes a quiescent point,
+// and works off what is safe now of the shared list, where the worker that
+// nudged may have put its queue as its thread ended, before it went idle: it
+// would not look again until it runs another thread
+export function $nudged() {
+  $quiescent();
+  reclaim();
+}
 // at a thread's end: hand the queued decrements to the shared list
 function handOffPending() {
   if (pend.length === 0) return;
@@ -455,8 +463,10 @@ function handOffPending() {
   }
   const b = I32[C_PEND] >> 2;
   for (let k = 0; k < pend.length; k++) I32[b + 2 * n + k] = pend[k];
-  // the queue is in epoch order: its first epoch is its oldest
-  if (n === 0 || pend[0] < I32[C_PEND_MIN]) I32[C_PEND_MIN] = pend[0];
+  // the queue is in epoch order: its first epoch is its oldest. atomic, as
+  // reclaim reads it outside the lock
+  if (n === 0 || pend[0] < Atomics.load(I32, C_PEND_MIN))
+    Atomics.store(I32, C_PEND_MIN, pend[0]);
   Atomics.store(I32, C_PEND_LEN, want);
   munlock(C_PEND_LOCK);
   pend = [];

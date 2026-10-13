@@ -214,9 +214,9 @@ describe('reference counts', () => {
     for (let i = 0; i < 64; i++) own.quiescent(); // the 64th reclaims
     expect(posted).toContainEqual({type: 'nudge'});
     expect(runtime.I32[b >> 2]).toBe(N.kind); // not freed
-    runtime.threadEnd(); // what thread 2 queued goes to the shared list
-    runtime.threadBegin(1); // the page passes a quiescent point
-    own.__collect();
+    runtime.threadEnd(); // what thread 2 queued goes to the shared list; idle
+    runtime.threadBegin(1);
+    runtime.$nudged(); // the page gets the nudge: a quiescent point, and frees
     expect(runtime.I32[b >> 2]).toBe(runtime.K_FREE);
     own.release(a);
     runtime.attach(

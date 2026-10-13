@@ -8,6 +8,7 @@ import {
   attach,
   threadBegin,
   shutdown,
+  $nudged,
   $quiescent,
   $waitBegin,
 } from './runtime.ts';
@@ -39,8 +40,9 @@ export function start({
     // every pool thread is busy: one more worker
     else if (m.type === 'grow') add();
     // the page holds up freeing: between tasks, as now, it holds no uncounted
-    // address (REFCOUNT.md)
-    else if (m.type === 'nudge') $quiescent();
+    // address (REFCOUNT.md), so it passes a quiescent point, and frees what
+    // that makes safe
+    else if (m.type === 'nudge') $nudged();
     else if (m.type === 'crash')
       console.error(`threads: a worker crashed: ${m.message}`);
   };
