@@ -241,6 +241,104 @@ describe('reference counts', () => {
     );
   });
 
+  it('a thread ending nudges a page that is not behind, for what it hands off', () => {
+    // the page passes a point between the worker's reclaim and its hand-off
+    // (here: as it gets the nudge of the reclaim, in the message callback):
+    // what the worker then hands off is safe already, and the page's to free,
+    // though it is not behind. one nudge more, for that
+    const posted: unknown[] = [];
+    const nudges = () =>
+      posted.filter(m => (m as {type: string}).type === 'nudge').length;
+    let asPage: (() => void) | null = null;
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {nudge: true},
+      m => {
+        posted.push(m);
+        if (m.type === 'nudge' && asPage !== null) {
+          const f = asPage;
+          asPage = null;
+          f();
+        }
+      },
+      text => logged.push(text),
+    );
+    runtime.$nudged(); // the page is at a point of its own
+    runtime.threadBegin(2);
+    const a = own.newStruct(N),
+      b = own.newStruct(N);
+    own.store(next(a), b);
+    own.store(next(a), 0); // b's decrement waits for every thread's next point
+    asPage = () => {
+      // the page's point, its word alone: a reclaim of its own here, on the
+      // test's one thread, would work off the worker's queue as the page's
+      runtime.threadBegin(1);
+      runtime.threadBegin(2);
+    };
+    runtime.threadEnd(); // a nudge for the reclaim, and one for the hand-off
+    expect(nudges()).toBe(2);
+    expect(runtime.I32[b >> 2]).toBe(N.kind); // handed off after the point
+    runtime.threadBegin(1);
+    runtime.$nudged();
+    expect(runtime.I32[b >> 2]).toBe(runtime.K_FREE);
+    own.release(a);
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {},
+      () => {},
+      text => logged.push(text),
+    );
+  });
+
+  it('a nudge that gets to a stopped page leaves it waiting', () => {
+    // browser.ts stop(): the page waits, for good or until start(). a nudge a
+    // worker posted before gets there after: the page frees what is safe of
+    // the shared list, and waits on, as a thread that holds nothing up
+    const QS_1 = 2048 + 8 + 5, // thread 1's quiescent state (T_QS of its entry)
+      QS_3 = 2048 + 3 * 8 + 5,
+      EPOCH = 17, // C_EPOCH
+      NEXT_TID = 4, // C_NEXT_TID
+      IDLE = 0x7fffffff;
+    // threads 2 and 3 are to count as running: the tests' threadBegin(n) does
+    // not claim n as a worker does, from the counter the scan goes up to
+    if (Atomics.load(runtime.I32, NEXT_TID) < 4)
+      Atomics.store(runtime.I32, NEXT_TID, 4);
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {nudge: true},
+      () => {},
+      text => logged.push(text),
+    );
+    runtime.$nudged(); // the page is at a point of its own
+    runtime.threadBegin(3); // a worker in a long thread, at this point
+    runtime.threadBegin(2);
+    const a = own.newStruct(N),
+      b = own.newStruct(N);
+    own.store(next(a), b);
+    own.store(next(a), 0);
+    runtime.threadEnd(); // b's decrement to the shared list, held up by 3
+    runtime.threadBegin(1);
+    runtime.$waitBegin(); // stop()
+    expect(runtime.I32[QS_1]).toBe(IDLE);
+    expect(runtime.I32[b >> 2]).toBe(N.kind);
+    // thread 3 passes a point (one that reclaims nothing), and the nudge of
+    // thread 2's end gets to the page
+    Atomics.store(runtime.I32, QS_3, Atomics.load(runtime.I32, EPOCH));
+    runtime.$nudged();
+    expect(runtime.I32[b >> 2]).toBe(runtime.K_FREE);
+    expect(runtime.I32[QS_1]).toBe(IDLE); // waiting still
+    runtime.threadBegin(3);
+    runtime.threadEnd();
+    runtime.threadBegin(1);
+    own.release(a);
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {},
+      () => {},
+      text => logged.push(text),
+    );
+  });
+
   it('frees, and boxes, a struct whose type another thread declared', () => {
     // its type is not declared here (a worker that never loaded its module):
     // the kind is the address of the layout the declaring thread pinned

@@ -428,22 +428,28 @@ function nudgeHosts() {
 // frees what that makes safe (a message, unlike a timer, is not throttled on
 // a hidden page). one nudge at a time, between all workers: until the page
 // has handled it, it will see what is queued meanwhile, as its reclaim comes
-// after it takes the nudge, so none is lost, and none sent twice
-function nudgePage() {
+// after it takes the nudge, so none is lost, and none sent twice. a page that
+// waits (stop(), browser.ts) is not nudged. `safe`: nudge a page that is not
+// behind as well, as the shared list holds decrements that are safe now,
+// which no thread but the page is about to free (threadEnd)
+function nudgePage(safe = false) {
   const e = C_THREADS + T_ENTRY;
-  if (
-    e === ME ||
-    Atomics.load(I32, e + T_ALIVE) !== 1 ||
-    Atomics.load(I32, e + T_QS) >= Atomics.load(I32, C_EPOCH)
-  )
-    return;
+  if (e === ME || Atomics.load(I32, e + T_ALIVE) !== 1) return;
+  const q = Atomics.load(I32, e + T_QS);
+  if (q === IDLE || (!safe && q >= Atomics.load(I32, C_EPOCH))) return;
   if (Atomics.compareExchange(I32, C_NUDGED, 0, 1) === 0) post({type: 'nudge'});
 }
 // what a page does with a nudge (browser.ts): it passes a quiescent point,
 // and works off what is safe now of the shared list, where a worker put its
-// queue as its thread ended, before it went idle
+// queue as its thread ended, before it went idle. a page that stopped (stop(),
+// browser.ts: it waits, for good or until start()) gets one that a worker
+// posted before it stopped: it works the list off, and waits on
 export function $nudged() {
   Atomics.store(I32, C_NUDGED, 0); // first: the next nudge is for what comes
+  if (Atomics.load(I32, ME + T_QS) === IDLE) {
+    $waitBegin();
+    return;
+  }
   $quiescent();
   reclaim();
 }
@@ -482,14 +488,24 @@ function handOffPending() {
 // work off every queued decrement this thread can: all of them, once every
 // other running thread has passed a quiescent point, which a host does on its
 // own every WAKE ms at most, and a page when nudged: when a round frees
-// nothing, it waits a millisecond for them, up to a second in all
+// nothing, it waits a millisecond for them, up to a second in all, waiting as
+// a thread that holds nothing (so as to hold up no other's). a host does not
+// wait, as its other async threads need its event loop: one round, then. a
+// page cannot: it tries again at once
 const pendingCount = () => pend.length / 2 + Atomics.load(I32, C_PEND_LEN);
 export function $drain() {
   for (let round = 0; round < 1000; round++) {
     const before = pendingCount();
     if (before === 0) return;
     reclaim();
-    if (pendingCount() === before && CAN_BLOCK) Atomics.wait(PRIV, 0, 0, 1);
+    if (pendingCount() === before) {
+      if (hosting) return;
+      if (CAN_BLOCK) {
+        Atomics.store(I32, ME + T_QS, IDLE);
+        Atomics.wait(PRIV, 0, 0, 1);
+        $waitEnd();
+      }
+    }
   }
 }
 export function $heapStats() {
@@ -870,11 +886,15 @@ export function threadBegin(tid: number) {
 export function threadEnd() {
   reclaim();
   handOffPending();
-  // what the shared list holds now is the page's to free, should it hold
-  // them up: this worker, idle, will not look again until its next thread
-  if (NUDGE && Atomics.load(I32, C_PEND_LEN) !== 0) nudgePage();
   flushCounts();
+  // dead first: the page, nudged below, is to see a thread that holds nothing
   Atomics.store(I32, ME + T_ALIVE, 0);
+  // what the shared list holds now is the page's to free: should it hold them
+  // up, or should they be safe already, every other thread's point past them
+  // (the page's too, passed between the reclaim and the hand-off, say). this
+  // worker, idle, will not look again until its next thread
+  if (NUDGE && Atomics.load(I32, C_PEND_LEN) !== 0)
+    nudgePage(Atomics.load(I32, C_PEND_MIN) < oldestEpoch());
 }
 // what a thread's function returns: its result's message address (own.ts), or
 // an async function's promise of one
