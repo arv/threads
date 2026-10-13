@@ -109,6 +109,13 @@ let repeats = 0; // the blob's repeated strings so far
 const shapes = new Map<string, (string[] | number)[]>();
 let lastKeys: string[] | null = null,
   lastShape = 0;
+// the counts the blob being written has taken, on strings and on cells: given
+// back if the write fails (see write)
+const takenStrings: number[] = [],
+  takenCells: number[] = [];
+// the objects a share writes, frozen once the blob is written, and not if it
+// is not
+const frozen: object[] = [];
 function shapeOf(keys: string[]) {
   const n = keys.length;
   if (lastKeys !== null && sameKeys(lastKeys, keys)) return lastShape;
@@ -126,7 +133,11 @@ function shapeOf(keys: string[]) {
     shape = wn;
     wn += 1 + n;
     wi[shape * 2] = n;
-    for (let k = 0; k < n; k++) wi[(shape + 1 + k) * 2] = $internRef(keys[k]);
+    for (let k = 0; k < n; k++) {
+      const a = $internRef(keys[k]);
+      takenStrings.push(a);
+      wi[(shape + 1 + k) * 2] = a;
+    }
     list.push(keys, shape);
   }
   lastKeys = keys;
@@ -224,10 +235,12 @@ function put(
       const interned = $internedHere(v);
       if (interned !== 0 && $retainString(interned)) {
         written.set(v, -interned);
+        takenStrings.push(interned);
         return boxWord(at, T_ISTR, interned);
       }
     } else if (body < 0) {
       $retainString(-body);
+      takenStrings.push(-body);
       return boxWord(at, T_ISTR, -body);
     } else {
       if (wi[body * 2 + 1] >>> 2 === 0) wi[body * 2 + 1] |= ++repeats << 2;
@@ -285,6 +298,7 @@ function put(
       // back once it has a handle of its own; a shared value keeps it
       if (!counted(I32[v.$cell >> 2])) return boxWord(at, T_CELL, v.$cell);
       retain(v.$cell);
+      takenCells.push(v.$cell);
       return boxWord(at, freeze ? T_CELL : T_CELL_COUNTED, v.$cell);
     }
     if (!Array.isArray(v))
@@ -316,23 +330,34 @@ function put(
     for (let k = 0; k < n; k++)
       put(body + 1 + k, values[k], moved, freeze, depth + 1);
   }
-  if (freeze) Object.freeze(v);
+  if (freeze) frozen.push(v);
   return boxWord(at, Array.isArray(v) ? T_ARR : T_OBJ, body);
 }
 // a blob of v in the shared heap; its address
+// a blob of v in the shared heap; its address. all or nothing: when the blob
+// does not fit (a full heap), or v cannot be sent, the counts taken for it go
+// back and nothing is frozen
 function write(v: Sent, moved: Moved | null, freeze: boolean, alloc = $alloc) {
   wn = 1;
   try {
     put(0, v, moved, freeze, 0);
+    const a = alloc(wn * 8);
+    U8.set(new Uint8Array(wf.buffer, 0, wn * 8), a);
+    for (const o of frozen) Object.freeze(o);
+    return a;
+  } catch (e) {
+    for (const p of takenStrings) $releaseString(p);
+    for (const p of takenCells) release(p);
+    throw e;
   } finally {
     written.clear();
     shapes.clear();
     lastKeys = null;
     repeats = 0;
+    takenStrings.length = 0;
+    takenCells.length = 0;
+    frozen.length = 0;
   }
-  const a = alloc(wn * 8);
-  U8.set(new Uint8Array(wf.buffer, 0, wn * 8), a);
-  return a;
 }
 
 // reading: a blob is immutable once written, so its words are read without care
@@ -1509,14 +1534,38 @@ class Scope {
     return th;
   }
 }
-export function scope<R>(body: (s: Scope) => R) {
+export function scope<R>(body: (s: Scope) => R): R {
+  // first, before a thread is spawned: joining would block a worker that runs
+  // async functions, and a thread spawned here could then not be joined
+  $mustNotBlock('scope()');
   const s = new Scope();
-  try {
-    return body(s);
-  } finally {
-    for (const th of s.threads) if (!th.joined) th.join();
+  // every thread is joined, whatever the body or a join threw: none outlives
+  // the scope, and each one's block and result are freed. the body's error is
+  // the one thrown; else the first join's, or all of them if several
+  const errors: unknown[] = [];
+  const joinAll = () => {
+    for (const th of s.threads)
+      if (!th.joined)
+        try {
+          th.join();
+        } catch (e) {
+          errors.push(e);
+        }
     $quiescent();
+  };
+  let result: R;
+  try {
+    result = body(s);
+  } catch (e) {
+    joinAll();
+    throw e;
   }
+  joinAll();
+  if (errors.length !== 0)
+    throw errors.length === 1
+      ? errors[0]
+      : new AggregateError(errors, 'threads: more than one thread threw');
+  return result;
 }
 
 // `parts` owned, disjoint chunks of nearly equal size (the checker trusts this)
