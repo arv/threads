@@ -423,8 +423,9 @@ function nudgeHosts() {
 // between the tasks it runs: when it is the thread that holds up freeing, a
 // worker posts it a nudge, and it passes one as it gets the message (a
 // message, unlike a timer, is not throttled on a hidden page). at least 2 ms
-// apart: one is enough, and the page needs a moment to answer it
-let lastNudge = 0;
+// apart: one is enough, and the page needs a moment to answer it (the first
+// goes whenever it comes)
+let lastNudge = -Infinity;
 function nudgePage() {
   const e = C_THREADS + T_ENTRY;
   if (
