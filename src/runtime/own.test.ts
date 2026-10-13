@@ -188,8 +188,9 @@ describe('reference counts', () => {
   it('frees, and boxes, a struct whose type another thread declared', () => {
     // its type is not declared here (a worker that never loaded its module):
     // the kind is the address of the layout the declaring thread pinned
+    // (a field's name may hold anything: the layout is JSON)
     const kind = runtime.$intern(
-      'struct Elsewhere { v, next, name } refs [1] kinds frs',
+      `struct ${JSON.stringify(['Elsewhere', ['v', 'next', 'the name, with a comma'], [1], 'frs'])}`,
     );
     const make = () => {
       const a = runtime.$allocBlock(32); // [kind][count 1] and three fields
@@ -208,13 +209,17 @@ describe('reference counts', () => {
     expect(T.heapStats().freed - before).toBeGreaterThanOrEqual(3);
     const e = make(),
       h = own.box(e) as unknown as {
-        v: number;
-        next: object | null;
-        name: string;
+        'v': number;
+        'next': object | null;
+        'the name, with a comma': string;
       };
     h.v = 1.5;
-    h.name = 'boxed';
-    expect([h.v, h.next, h.name]).toEqual([1.5, null, 'boxed']);
+    h['the name, with a comma'] = 'boxed';
+    expect([h.v, h.next, h['the name, with a comma']]).toEqual([
+      1.5,
+      null,
+      'boxed',
+    ]);
     own.release(e); // the handle holds the other count
   });
 

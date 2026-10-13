@@ -811,7 +811,8 @@ export function sharedStruct<T = unknown>(
   refs: number[] = [],
   kinds = '',
 ) {
-  const layout = `struct ${name} { ${fields.join(', ')} } refs [${refs.join(', ')}]${kinds ? ` kinds ${kinds}` : ''}`;
+  // the layout, as JSON: a field's name may hold anything (see structType)
+  const layout = `struct ${JSON.stringify([name, fields, refs, kinds])}`;
   if (!kinds)
     kinds = fields.map((_, k) => (refs.includes(k) ? 'r' : 'f')).join('');
   const kind = $intern(layout),
@@ -916,19 +917,29 @@ export function sharedStruct<T = unknown>(
 function structType(kind: number): StructType {
   const known = cellKinds.get(kind) as StructType | undefined;
   if (known !== undefined) return known;
-  const m =
-    I32[kind >> 2] === K_STR
-      ? /^struct (.*) \{ (.*) \} refs \[(.*)\](?: kinds (\w*))?$/.exec(
-          $str(kind),
-        )
-      : null;
-  if (m === null) throw new TypeError(`own: no cell of kind ${kind}`);
-  return sharedStruct(
-    m[1],
-    m[2] === '' ? [] : m[2].split(', '),
-    m[3] === '' ? [] : m[3].split(', ').map(Number),
-    m[4] ?? '',
-  );
+  const text = I32[kind >> 2] === K_STR ? $str(kind) : '';
+  let layout: unknown;
+  try {
+    layout = text.startsWith('struct ') ? JSON.parse(text.slice(7)) : null;
+  } catch {
+    layout = null;
+  }
+  if (
+    !Array.isArray(layout) ||
+    layout.length !== 4 ||
+    typeof layout[0] !== 'string' ||
+    !Array.isArray(layout[1]) ||
+    !Array.isArray(layout[2]) ||
+    typeof layout[3] !== 'string'
+  )
+    throw new TypeError(`own: no cell of kind ${kind}`);
+  const [name, fields, refs, kinds] = layout as [
+    string,
+    string[],
+    number[],
+    string,
+  ];
+  return sharedStruct(name, fields, refs, kinds);
 }
 
 // ---- typed layouts: what the compiler emits for shared structs and
