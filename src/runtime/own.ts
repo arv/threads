@@ -604,9 +604,11 @@ function cell(a: number) {
       c = new Float64Array(SAB!, a + 16, I32[(a >> 2) + 1]) as F64Cell;
       c.$cell = a;
     } else if (kind === K_SHARED_ARRAY) c = sharedArrayHandle(a);
-    else if (Cls !== undefined)
-      c = Object.assign(Object.create(Cls.prototype) as object, {$cell: a});
-    else throw new TypeError(`own: no cell of kind ${kind}`);
+    else
+      c = Object.assign(
+        Object.create((Cls ?? structType(kind)).prototype) as object,
+        {$cell: a},
+      );
     if (counted(kind)) {
       holdFor(c, a);
       cells.set(a, new WeakRef(c));
@@ -905,6 +907,29 @@ export function sharedStruct<T = unknown>(
   cellKinds.set(kind, Struct);
   return Struct;
 }
+// the struct type of kind: declared here, or by another thread, whose module
+// this one may never load (a page's workers load modules on demand, and a
+// struct reaches a thread by address, in a message or a map). a kind is the
+// address of the type's layout, a pinned string (see sharedStruct), so the
+// type is declared from that: what frees a struct, or boxes one, needs no
+// module for it
+function structType(kind: number): StructType {
+  const known = cellKinds.get(kind) as StructType | undefined;
+  if (known !== undefined) return known;
+  const m =
+    I32[kind >> 2] === K_STR
+      ? /^struct (.*) \{ (.*) \} refs \[(.*)\](?: kinds (\w*))?$/.exec(
+          $str(kind),
+        )
+      : null;
+  if (m === null) throw new TypeError(`own: no cell of kind ${kind}`);
+  return sharedStruct(
+    m[1],
+    m[2] === '' ? [] : m[2].split(', '),
+    m[3] === '' ? [] : m[3].split(', ').map(Number),
+    m[4] ?? '',
+  );
+}
 
 // ---- typed layouts: what the compiler emits for shared structs and
 // SharedArrays ----
@@ -1017,7 +1042,7 @@ function destroy(o: number) {
         size = elementSize(b);
       if (size > 8 && n !== 0) {
         // structs
-        const T = cellKinds.get(I32[(b + 16) >> 2]) as StructType;
+        const T = structType(I32[(b + 16) >> 2]);
         if (T.refs.length + T.strs.length !== 0)
           for (let e = b + 16, end = e + n * size; e < end; e += size) {
             for (const k of T.refs) drop(I32[(e >> 2) + 2 + 2 * k]);
@@ -1027,7 +1052,7 @@ function destroy(o: number) {
         for (let e = (b + 16) >> 2, end = e + n; e < end; e++) drop(I32[e]);
       $freeBlock(b, 16 + n * size);
     } else {
-      const T = cellKinds.get(kind) as StructType;
+      const T = structType(kind);
       for (const k of T.refs) drop(I32[(b >> 2) + 2 + 2 * k]);
       for (const k of T.strs) drop(I32[(b >> 2) + 2 + 2 * k]);
       $freeBlock(b, T.size);
@@ -1239,9 +1264,9 @@ function atomicIndex(target: MaybeCell, key: any) {
     if (!(key >>> 0 === key && key < I32[(a >> 2) + 1])) oob(a, key);
     return ((a + 16) >> 2) + key;
   }
-  const T = cellKinds.get(I32[a >> 2]),
-    k = T?.fields?.indexOf(key) ?? -1;
-  if (k < 0 || T!.kinds![k] !== 'i')
+  const T = structType(I32[a >> 2]),
+    k = T.fields.indexOf(key);
+  if (k < 0 || T.kinds[k] !== 'i')
     throw new TypeError(
       `own: an atomic operation acts on an i32 field, which ${String(key)} is not`,
     );
