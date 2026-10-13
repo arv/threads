@@ -1,4 +1,12 @@
-import {heapStats, log, register, scope, type Scope} from '@arv/threads';
+import {
+  Channel,
+  go,
+  heapStats,
+  log,
+  register,
+  scope,
+  type Scope,
+} from '@arv/threads';
 // a scope whose thread throws (run.test.ts): the scope joins its other threads
 // all the same, and frees each thread's block and result; the body's error is
 // the one thrown, else the first thread's, or all of them
@@ -20,7 +28,10 @@ function attempt(body: (s: Scope) => void) {
   try {
     scope(body);
   } catch (e) {
-    caught = String(e);
+    caught =
+      e instanceof AggregateError
+        ? `${e}: [${e.errors.map(String).join(', ')}]`
+        : String(e);
   }
   __collect(); // the errors' strings go a grace period later
   const after = heapStats();
@@ -45,5 +56,26 @@ export function main() {
     s.spawn(worse);
     s.spawn(ok, 1);
   });
+  // in an async function, whose worker must not block: refused before a
+  // thread is spawned, which could not be joined
+  const done = new Channel<string>();
+  go(inAsync, done);
+  done.recv();
 }
-register(import.meta.url, {ok, bad, worse, main});
+async function inAsync(done: Channel<string>) {
+  const before = heapStats();
+  let caught = '';
+  try {
+    scope(s => {
+      s.spawn(ok, 1);
+    });
+  } catch (e) {
+    caught = e instanceof TypeError ? 'throws' : String(e);
+  }
+  const after = heapStats();
+  log(
+    `scope in an async function: ${caught}; blocks left behind: ${after.allocated - after.freed - (before.allocated - before.freed)}`,
+  );
+  await done.sendAsync('done');
+}
+register(import.meta.url, {ok, bad, worse, main, inAsync});
