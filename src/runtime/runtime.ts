@@ -422,8 +422,8 @@ function nudgeHosts() {
 // a page (browser.ts) is thread 1, and passes no quiescent point of its own
 // between the tasks it runs: when it is the thread that holds up freeing, a
 // worker posts it a nudge, and it passes one as it gets the message (a
-// message, unlike a timer, is not throttled on a hidden page). a few ms apart
-// at most: the page needs a moment to answer one
+// message, unlike a timer, is not throttled on a hidden page). at least 2 ms
+// apart: one is enough, and the page needs a moment to answer it
 let lastNudge = 0;
 function nudgePage() {
   const e = C_THREADS + T_ENTRY;
