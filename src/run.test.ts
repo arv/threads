@@ -51,6 +51,15 @@ describe('programs on threads', () => {
     ]);
   });
 
+  it('a scope joins every thread when one of them throws', () => {
+    expect(run('scope-throw', '--threads=1').trim().split('\n')).toEqual([
+      'scope threw: Error: boom; blocks left behind: 0',
+      'scope threw: Error: the body; blocks left behind: 0',
+      'scope threw: AggregateError: threads: more than one thread threw: [Error: boom, Error: worse]; blocks left behind: 0',
+      'scope in an async function: throws; blocks left behind: 0',
+    ]);
+  });
+
   it('the ring is recycled under threads that spawn at once', () => {
     expect(run('ring-recycle', '--threads=1').trim()).toMatch(
       /^1280 threads through the ring: sum (\d+), expected \1$/,

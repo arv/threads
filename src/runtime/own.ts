@@ -109,6 +109,13 @@ let repeats = 0; // the blob's repeated strings so far
 const shapes = new Map<string, (string[] | number)[]>();
 let lastKeys: string[] | null = null,
   lastShape = 0;
+// the counts the blob being written has taken, on strings and on cells: given
+// back if the write fails (see write)
+const takenStrings: number[] = [],
+  takenCells: number[] = [];
+// the objects a share writes, frozen once the blob is written, and not if it
+// is not
+const frozen: object[] = [];
 function shapeOf(keys: string[]) {
   const n = keys.length;
   if (lastKeys !== null && sameKeys(lastKeys, keys)) return lastShape;
@@ -126,7 +133,11 @@ function shapeOf(keys: string[]) {
     shape = wn;
     wn += 1 + n;
     wi[shape * 2] = n;
-    for (let k = 0; k < n; k++) wi[(shape + 1 + k) * 2] = $internRef(keys[k]);
+    for (let k = 0; k < n; k++) {
+      const a = $internRef(keys[k]);
+      takenStrings.push(a);
+      wi[(shape + 1 + k) * 2] = a;
+    }
     list.push(keys, shape);
   }
   lastKeys = keys;
@@ -224,10 +235,12 @@ function put(
       const interned = $internedHere(v);
       if (interned !== 0 && $retainString(interned)) {
         written.set(v, -interned);
+        takenStrings.push(interned);
         return boxWord(at, T_ISTR, interned);
       }
     } else if (body < 0) {
       $retainString(-body);
+      takenStrings.push(-body);
       return boxWord(at, T_ISTR, -body);
     } else {
       if (wi[body * 2 + 1] >>> 2 === 0) wi[body * 2 + 1] |= ++repeats << 2;
@@ -285,6 +298,7 @@ function put(
       // back once it has a handle of its own; a shared value keeps it
       if (!counted(I32[v.$cell >> 2])) return boxWord(at, T_CELL, v.$cell);
       retain(v.$cell);
+      takenCells.push(v.$cell);
       return boxWord(at, freeze ? T_CELL : T_CELL_COUNTED, v.$cell);
     }
     if (!Array.isArray(v))
@@ -316,23 +330,34 @@ function put(
     for (let k = 0; k < n; k++)
       put(body + 1 + k, values[k], moved, freeze, depth + 1);
   }
-  if (freeze) Object.freeze(v);
+  if (freeze) frozen.push(v);
   return boxWord(at, Array.isArray(v) ? T_ARR : T_OBJ, body);
 }
 // a blob of v in the shared heap; its address
+// a blob of v in the shared heap; its address. all or nothing: when the blob
+// does not fit (a full heap), or v cannot be sent, the counts taken for it go
+// back and nothing is frozen
 function write(v: Sent, moved: Moved | null, freeze: boolean, alloc = $alloc) {
   wn = 1;
   try {
     put(0, v, moved, freeze, 0);
+    const a = alloc(wn * 8);
+    U8.set(new Uint8Array(wf.buffer, 0, wn * 8), a);
+    for (const o of frozen) Object.freeze(o);
+    return a;
+  } catch (e) {
+    for (const p of takenStrings) $releaseString(p);
+    for (const p of takenCells) release(p);
+    throw e;
   } finally {
     written.clear();
     shapes.clear();
     lastKeys = null;
     repeats = 0;
+    takenStrings.length = 0;
+    takenCells.length = 0;
+    frozen.length = 0;
   }
-  const a = alloc(wn * 8);
-  U8.set(new Uint8Array(wf.buffer, 0, wn * 8), a);
-  return a;
 }
 
 // reading: a blob is immutable once written, so its words are read without care
@@ -610,9 +635,11 @@ function cell(a: number) {
       c = new Float64Array(SAB!, a + 16, I32[(a >> 2) + 1]) as F64Cell;
       c.$cell = a;
     } else if (kind === K_SHARED_ARRAY) c = sharedArrayHandle(a);
-    else if (Cls !== undefined)
-      c = Object.assign(Object.create(Cls.prototype) as object, {$cell: a});
-    else throw new TypeError(`own: no cell of kind ${kind}`);
+    else
+      c = Object.assign(
+        Object.create((Cls ?? structType(kind)).prototype) as object,
+        {$cell: a},
+      );
     if (counted(kind)) {
       holdFor(c, a);
       cells.set(a, new WeakRef(c));
@@ -815,7 +842,8 @@ export function sharedStruct<T = unknown>(
   refs: number[] = [],
   kinds = '',
 ) {
-  const layout = `struct ${name} { ${fields.join(', ')} } refs [${refs.join(', ')}]${kinds ? ` kinds ${kinds}` : ''}`;
+  // the layout, as JSON: a field's name may hold anything (see structType)
+  const layout = `struct ${JSON.stringify([name, fields, refs, kinds])}`;
   if (!kinds)
     kinds = fields.map((_, k) => (refs.includes(k) ? 'r' : 'f')).join('');
   const kind = $intern(layout),
@@ -910,6 +938,39 @@ export function sharedStruct<T = unknown>(
   );
   cellKinds.set(kind, Struct);
   return Struct;
+}
+// the struct type of kind: declared here, or by another thread, whose module
+// this one may never load (a page's workers load modules on demand, and a
+// struct reaches a thread by address, in a message or a map). a kind is the
+// address of the type's layout, a pinned string (see sharedStruct), so the
+// type is declared from that: what frees a struct, or boxes one, needs no
+// module for it
+function structType(kind: number): StructType {
+  const known = cellKinds.get(kind) as StructType | undefined;
+  if (known !== undefined) return known;
+  const text = I32[kind >> 2] === K_STR ? $str(kind) : '';
+  let layout: unknown;
+  try {
+    layout = text.startsWith('struct ') ? JSON.parse(text.slice(7)) : null;
+  } catch {
+    layout = null;
+  }
+  if (
+    !Array.isArray(layout) ||
+    layout.length !== 4 ||
+    typeof layout[0] !== 'string' ||
+    !Array.isArray(layout[1]) ||
+    !Array.isArray(layout[2]) ||
+    typeof layout[3] !== 'string'
+  )
+    throw new TypeError(`own: no cell of kind ${kind}`);
+  const [name, fields, refs, kinds] = layout as [
+    string,
+    string[],
+    number[],
+    string,
+  ];
+  return sharedStruct(name, fields, refs, kinds);
 }
 
 // ---- typed layouts: what the compiler emits for shared structs and
@@ -1023,7 +1084,7 @@ function destroy(o: number) {
         size = elementSize(b);
       if (size > 8 && n !== 0) {
         // structs
-        const T = cellKinds.get(I32[(b + 16) >> 2]) as StructType;
+        const T = structType(I32[(b + 16) >> 2]);
         if (T.refs.length + T.strs.length !== 0)
           for (let e = b + 16, end = e + n * size; e < end; e += size) {
             for (const k of T.refs) drop(I32[(e >> 2) + 2 + 2 * k]);
@@ -1033,7 +1094,7 @@ function destroy(o: number) {
         for (let e = (b + 16) >> 2, end = e + n; e < end; e++) drop(I32[e]);
       $freeBlock(b, 16 + n * size);
     } else {
-      const T = cellKinds.get(kind) as StructType;
+      const T = structType(kind);
       for (const k of T.refs) drop(I32[(b >> 2) + 2 + 2 * k]);
       for (const k of T.strs) drop(I32[(b >> 2) + 2 + 2 * k]);
       $freeBlock(b, T.size);
@@ -1245,9 +1306,9 @@ function atomicIndex(target: MaybeCell, key: any) {
     if (!(key >>> 0 === key && key < I32[(a >> 2) + 1])) oob(a, key);
     return ((a + 16) >> 2) + key;
   }
-  const T = cellKinds.get(I32[a >> 2]),
-    k = T?.fields?.indexOf(key) ?? -1;
-  if (k < 0 || T!.kinds![k] !== 'i')
+  const T = structType(I32[a >> 2]),
+    k = T.fields.indexOf(key);
+  if (k < 0 || T.kinds[k] !== 'i')
     throw new TypeError(
       `own: an atomic operation acts on an i32 field, which ${String(key)} is not`,
     );
@@ -1494,14 +1555,38 @@ class Scope {
     return th;
   }
 }
-export function scope<R>(body: (s: Scope) => R) {
+export function scope<R>(body: (s: Scope) => R): R {
+  // first, before a thread is spawned: joining would block a worker that runs
+  // async functions, and a thread spawned here could then not be joined
+  $mustNotBlock('scope()');
   const s = new Scope();
-  try {
-    return body(s);
-  } finally {
-    for (const th of s.threads) if (!th.joined) th.join();
+  // every thread is joined, whatever the body or a join threw: none outlives
+  // the scope, and each one's block and result are freed. the body's error is
+  // the one thrown; else the first join's, or all of them if several
+  const errors: unknown[] = [];
+  const joinAll = () => {
+    for (const th of s.threads)
+      if (!th.joined)
+        try {
+          th.join();
+        } catch (e) {
+          errors.push(e);
+        }
     $quiescent();
+  };
+  let result: R;
+  try {
+    result = body(s);
+  } catch (e) {
+    joinAll();
+    throw e;
   }
+  joinAll();
+  if (errors.length !== 0)
+    throw errors.length === 1
+      ? errors[0]
+      : new AggregateError(errors, 'threads: more than one thread threw');
+  return result;
 }
 
 // `parts` owned, disjoint chunks of nearly equal size (the checker trusts this)
