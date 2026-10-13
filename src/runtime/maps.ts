@@ -186,6 +186,21 @@ function encode(v: unknown, key: boolean, adding: boolean): boolean {
     `threads: a SharedMap's or SharedSet's ${key ? 'key' : 'value'} is shared: a number, a string, a boolean, null, undefined, a cell (a shared struct, a SharedArray, a Channel, a map...), or a plain object or array, which the map shares`,
   );
 }
+// encode, for a key, after its value was encoded (vl, vh, vhow): if the key
+// cannot be (it does not fit the heap, say), the value's count goes back
+function encodeKeyOrGiveBack(
+  key: unknown,
+  vl: number,
+  vh: number,
+  vhow: number,
+) {
+  try {
+    encode(key, true, true);
+  } catch (e) {
+    unheld(vl, vh, vhow);
+    throw e;
+  }
+}
 // the key word l, h as the map adds it: a pending string, counted now (its
 // address is the one encode found, if it found one: the string cannot have gone
 // since, with no quiescent point between)
@@ -546,7 +561,7 @@ export class SharedMap<K = unknown, V = unknown> {
     const vl = lo,
       vh = hi,
       vhow = held;
-    encode(key, true, true);
+    encodeKeyOrGiveBack(key, vl, vh, vhow);
     const m = this.$cell,
       l = lo,
       h = hi,
@@ -578,7 +593,7 @@ export class SharedMap<K = unknown, V = unknown> {
     const vl = lo,
       vh = hi,
       vhow = held;
-    encode(key, true, true);
+    encodeKeyOrGiveBack(key, vl, vh, vhow);
     const m = this.$cell,
       l = lo,
       h = hi,

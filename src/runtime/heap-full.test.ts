@@ -18,6 +18,8 @@ const fill = () => {
 };
 // a struct's count
 const count = (a: number) => runtime.I32[(a >> 2) + 1];
+// a struct as compiled code passes it: with a count for the map
+const ref = (p: number) => own.countedRef(p) as unknown as number;
 // the string table: [kind][capacity][used]... at C_STR_TABLE
 const table = () => runtime.I32[14],
   used = () => runtime.I32[(table() >> 2) + 2],
@@ -84,8 +86,6 @@ describe('a full heap', () => {
   });
 
   it('gives back the counts a map could not take', () => {
-    // as compiled code passes a struct: with a count for the map
-    const ref = (p: number) => own.countedRef(p) as unknown as number;
     expect([count(a), count(b)]).toEqual([1, 1]);
     expect(() => m.set(ref(a), ref(b))).toThrow(RangeError);
     expect([count(a), count(b)]).toEqual([1, 1]);
@@ -93,6 +93,24 @@ describe('a full heap', () => {
     expect([count(a), count(b)]).toEqual([1, 1]);
     expect(() => s.add(ref(a))).toThrow(RangeError);
     expect(count(a)).toBe(1);
+  });
+
+  it('shares nothing, and takes no count, when the value does not fit', () => {
+    const o = {name: 'known before the heap filled', inner: {n: 1}},
+      c0 = count(known); // the string's count: a share would take one
+    expect(() => T.share(o)).toThrow(RangeError);
+    expect([Object.isFrozen(o), Object.isFrozen(o.inner)]).toEqual([
+      false,
+      false,
+    ]);
+    expect(count(known)).toBe(c0);
+    // a map's key that cannot be shared: the value's count goes back too
+    const k = {} as unknown as number;
+    expect(() => m.set(k, ref(b))).toThrow(RangeError);
+    expect(Object.isFrozen(k)).toBe(false);
+    expect(count(b)).toBe(1);
+    expect(() => m.getOrInsert(k, ref(b))).toThrow(RangeError);
+    expect(count(b)).toBe(1);
   });
 
   it('adds no string its table has no room for', () => {
