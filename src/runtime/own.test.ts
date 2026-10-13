@@ -33,6 +33,16 @@ describe('moving values', () => {
     expect(move(undefined)).toBeUndefined();
   });
 
+  it('keeps an own "__proto__" key a key', () => {
+    // JSON.parse makes one; in an object literal it would set the prototype
+    const v = JSON.parse('{"__proto__": {"polluted": true}, "x": 1}') as object;
+    const r = move(v) as Record<string, unknown>;
+    expect(Object.hasOwn(r, '__proto__')).toBe(true);
+    expect(r['__proto__']).toEqual({polluted: true});
+    expect(Object.getPrototypeOf(r)).toBe(Object.prototype);
+    expect(r.x).toBe(1);
+  });
+
   it('revokes what the sender moved', () => {
     const v = {a: 1};
     move(v);
@@ -256,6 +266,20 @@ describe('strings are collected', () => {
       counted,
     );
     expect(runtime.$internFind('pinned, unique to this test')).toBe(pinned);
+  });
+
+  it('a lookup finds no string that died', () => {
+    // this thread's cache knows the address; the string leaves the table at
+    // count 0, but its block stays a grace period. a lookup must not find it:
+    // another thread may intern the string again, at another address, which a
+    // map's lookup with the dead one would miss
+    const a = runtime.$internRef('dies, unique to this test');
+    expect(runtime.$internFind('dies, unique to this test')).toBe(a);
+    expect(runtime.$internedHere('dies, unique to this test')).toBe(a);
+    own.release(a);
+    expect(runtime.$internFind('dies, unique to this test')).toBe(0);
+    expect(runtime.$internedHere('dies, unique to this test')).toBe(0);
+    own.__collect();
   });
 
   it('an address a string left is never that string again', () => {

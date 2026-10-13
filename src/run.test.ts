@@ -44,6 +44,13 @@ describe('programs on threads', () => {
     ]);
   });
 
+  it('a key another thread interned again is found by the thread that knew it', () => {
+    expect(run('intern-stale', '--threads=1').trim().split('\n')).toEqual([
+      'y: [[true,2,1],1]',
+      'entries: [["k",9]] size 1',
+    ]);
+  });
+
   it('a scope joins every thread when one of them throws', () => {
     expect(run('scope-throw', '--threads=1').trim().split('\n')).toEqual([
       'scope threw: Error: boom',
