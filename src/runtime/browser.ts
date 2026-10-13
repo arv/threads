@@ -16,6 +16,9 @@ import type {Message} from './runtime.ts';
 const sab = globalThis.__escapeSab;
 const workers: Worker[] = [];
 let started: Promise<void> | null = null,
+  // fails the start that is under way: its workers are terminated as they
+  // load, and never report ready
+  failStart: ((e: Error) => void) | null = null,
   stopped = false,
   // one more for each pool stopped: a run that began on a pool that is gone
   // fails rather than spawn on the next
@@ -69,7 +72,13 @@ export function start({
   threadBegin(1);
   // between tasks the page holds no uncounted address (REFCOUNT.md): quiescent
   $waitBegin();
-  started = Promise.all(Array.from({length: count}, add)).then(() => {});
+  started = Promise.race([
+    Promise.all(Array.from({length: count}, add)).then(() => {}),
+    new Promise<never>((_, reject) => {
+      failStart = reject;
+    }),
+  ]);
+  started.catch(() => {}); // those awaiting it see the rejection
   return started;
 }
 
@@ -106,6 +115,8 @@ export function stop() {
   for (const w of workers.splice(0)) w.terminate();
   for (const fail of waiting) fail(new Error(STOPPED));
   waiting.clear();
+  failStart?.(new Error(STOPPED));
+  failStart = null;
   generation++;
   stopped = true;
   started = null;
