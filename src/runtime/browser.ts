@@ -44,11 +44,15 @@ export function start({
     throw new Error(
       'threads: import "@arv/threads/heap" first in the page\'s entry module',
     );
+  // this pool's: a message of one stopped since is dropped (a grow posted as
+  // it was stopped, say, would add a worker to the next)
+  const g = generation;
   const onMessage: (m: Message) => void = m => {
     if (m.type === 'out') onLog(m.text);
     // every pool thread is busy: one more worker
-    else if (m.type === 'grow') add();
-    else if (m.type === 'crash')
+    else if (m.type === 'grow') {
+      if (generation === g) add();
+    } else if (m.type === 'crash')
       console.error(`threads: a worker crashed: ${m.message}`);
   };
   const add = () =>

@@ -1070,33 +1070,30 @@ const keepAlive: (ms: number) => ReturnType<typeof setTimeout> = ms =>
   setTimeout(() => {}, ms);
 // one turn of a host: start the next queued async thread, or wait for one (or
 // for one of its own to end)
-async function hostTurn() {
-  if (stale()) {
-    // of a pool that was stopped: leave, counting and writing nothing
-    hosting = false;
-    freeTid();
-    return;
-  }
+// false when the worker is to leave: its pool was stopped (see poolLoop)
+async function hostTurn(): Promise<boolean> {
+  if (stale()) return false;
   const bell = ME + T_BELL,
     b = Atomics.load(I32, bell);
   const t = takeAsync();
   if (t !== 0) {
     if (beforeTask !== null) await beforeTask(t);
-    // the pool may have been stopped during the wait: its thread is lost
-    if (stale()) {
-      hosting = false;
-      freeTid();
-      return;
+    // the pool may have been stopped during the wait: its thread is lost. a
+    // pool operation from the check to the start: no reset falls between
+    if (!busy()) return false;
+    try {
+      runThread(t);
+    } finally {
+      done();
     }
-    runThread(t);
     $quiescent();
     // resumed threads run between new ones
     if ((++started & 31) === 0) await eventLoopTurn();
-    return;
+    return true;
   }
   if (Atomics.load(I32, C_SHUTDOWN)) {
     unhost();
-    return;
+    return true;
   }
   const idle = live === 0,
     w = Atomics.waitAsync(I32, bell, b, idle ? LINGER : WAKE);
@@ -1113,26 +1110,19 @@ async function hostTurn() {
     kick = null;
     clearTimeout(alive);
   }
-  // resumed on a pool that was stopped meanwhile: leave, writing nothing
-  if (stale()) {
-    hosting = false;
-    freeTid();
-    return;
-  }
+  // resumed on a pool that was stopped meanwhile: leave
+  if (stale()) return false;
   $quiescent();
   if (idle && live === 0 && Atomics.load(I32, bell) === b) {
     // no async thread for LINGER ms: back to blocking threads, unless one was
     // queued meanwhile. a pool operation: the count of hosts is the pool's
-    if (!busy()) {
-      hosting = false;
-      freeTid();
-      return;
-    }
+    if (!busy()) return false;
     Atomics.sub(I32, C_HOSTS, 1);
     if (Atomics.load(I32, C_AQ_LEN) !== 0) Atomics.add(I32, C_HOSTS, 1);
     else unhost();
     done();
   }
+  return true;
 }
 // a pool worker: take threads off the queue until shutdown; a host takes async
 // threads only while it has handles to finalize it waits asynchronously, so its
@@ -1140,7 +1130,16 @@ async function hostTurn() {
 export async function poolLoop() {
   for (;;) {
     if (hosting) {
-      await hostTurn();
+      if (!(await hostTurn())) {
+        // of a pool that was stopped: leave. a host with async threads still
+        // on it keeps its entry, which their callbacks may yet write to; it
+        // hosts them on its own, uncounted
+        if (live === 0) {
+          hosting = false;
+          freeTid();
+        }
+        return;
+      }
       continue;
     }
     if (Atomics.load(I32, C_SHUTDOWN) || !busy()) {
@@ -1206,12 +1205,17 @@ export async function poolLoop() {
       continue;
     }
     if (beforeTask !== null) await beforeTask(t);
-    // the pool may have been stopped during the wait: its thread is lost
-    if (stale()) {
+    // the pool may have been stopped during the wait: its thread is lost. a
+    // pool operation from the check to the thread's end: no reset falls in
+    if (!busy()) {
       freeTid();
       return;
     }
-    runThread(t);
+    try {
+      runThread(t);
+    } finally {
+      done();
+    }
   }
 }
 // a program's main, on the coordinator's main worker (src/worker.ts,
