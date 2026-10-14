@@ -532,6 +532,56 @@ describe('reference counts', () => {
     );
   });
 
+  it('a thread a quarter of the range behind stalls the epoch until it passes a point', () => {
+    // a thread that passed no point while the epoch moved a quarter of its
+    // range (as by hours of other threads' reclaims): a reclaim makes no new
+    // epoch, which would soon take the thread's old word for a newer one, and
+    // frees nothing of what the thread may hold; once the thread passes a
+    // point, the epoch moves on and the old decrements are freed
+    const EPOCH = 17, // C_EPOCH
+      NEXT_TID = 4; // C_NEXT_TID
+    if (Atomics.load(runtime.I32, NEXT_TID) < 4)
+      Atomics.store(runtime.I32, NEXT_TID, 4);
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {nudge: true},
+      () => {},
+      text => logged.push(text),
+    );
+    runtime.$nudged();
+    runtime.threadBegin(3); // a thread at this point, which it keeps
+    const far = (Atomics.load(runtime.I32, EPOCH) + (1 << 30)) | 0;
+    Atomics.store(runtime.I32, EPOCH, far);
+    runtime.threadBegin(1);
+    runtime.$nudged(); // the page, at the new epoch
+    runtime.threadBegin(2);
+    const a = own.newStruct(N),
+      b = own.newStruct(N);
+    own.store(next(a), b);
+    own.store(next(a), 0); // deferred at the far epoch
+    runtime.threadEnd(); // its reclaim: thread 3 is a quarter behind: no new epoch
+    expect(Atomics.load(runtime.I32, EPOCH)).toBe(far);
+    expect(runtime.I32[b >> 2]).toBe(N.kind);
+    runtime.threadBegin(3); // thread 3 passes a point
+    runtime.threadBegin(1);
+    runtime.$nudged(); // the page's reclaim makes a new epoch again
+    expect(Atomics.load(runtime.I32, EPOCH)).toBe((far + 2) | 0);
+    runtime.threadBegin(3); // and another point, past the new epoch
+    runtime.threadBegin(1);
+    runtime.$nudged(); // b is older than every thread's point now
+    expect(runtime.I32[b >> 2]).toBe(runtime.K_FREE);
+    runtime.threadBegin(3);
+    runtime.threadEnd();
+    runtime.threadBegin(1);
+    own.release(a);
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {},
+      () => {},
+      text => logged.push(text),
+    );
+  });
+
   it('frees, and boxes, a struct whose type another thread declared', () => {
     // its type is not declared here (a worker that never loaded its module):
     // the kind is the address of the layout the declaring thread pinned
