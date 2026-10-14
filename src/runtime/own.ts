@@ -1377,7 +1377,10 @@ export const atomic: {
   // uncounted, so it holds up no other thread's frees, and its own queue goes
   // to the shared list first), the thread marked running again after
   wait: (t, k, v, timeout) => {
-    $mustNotBlock('atomic.wait()', "a Condition's await waitAsync()");
+    $mustNotBlock(
+      'atomic.wait()',
+      'await condition.waitAsync(lock), on a Condition',
+    );
     const i = atomicIndex(t, k);
     $waitBegin();
     try {
