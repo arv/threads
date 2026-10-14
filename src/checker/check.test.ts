@@ -201,6 +201,41 @@ describe('threads-check, where it differs from the fork', () => {
     );
   });
 
+  it('refuses an ordinary object where a struct goes', () => {
+    // TypeScript takes an object literal, or an instance of a class, for a
+    // struct type declared with an interface, by its members, and a cast for
+    // any struct type; the place holds an address, which the runtime cannot
+    // make of the object. the fork lets them through
+    const dir = join(checker, 'test/diverging/ordinary-objects');
+    const notAStruct = (
+      at: string,
+      type: string,
+      place: string,
+      make: string,
+    ) =>
+      `objects.ts(${at}): error TS96035: A value of type '${type}' cannot be used as '${place}': it is an ordinary object, not a shared struct, which 'new ${make}()' makes.`;
+    const literal = '{ value: number; next: null; }';
+    expect(
+      check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
+        .map(d => formatDiagnostic(d, dir))
+        .sort(),
+    ).toEqual(
+      [
+        notAStruct('18,46', literal, 'Node', 'Node'),
+        notAStruct('19,43', literal, 'Node', 'Node'),
+        notAStruct('20,46', 'Plain', 'Node', 'Node'),
+        notAStruct('21,44', literal, 'Node | null', 'Node'),
+        notAStruct('23,41', literal, 'Node', 'Node'),
+        notAStruct('24,51', literal, 'Node', 'Node'),
+        notAStruct('25,37', literal, 'Node', 'Node'),
+        notAStruct('26,33', '{ x: number; }', '{ x: number; } & Cell', 'Point'),
+        notAStruct('27,37', literal, 'Node', 'Node'),
+        notAStruct('28,61', literal, 'Node', 'Node'),
+        notAStruct('29,64', 'Plain', 'Node | null', 'Node'),
+      ].sort(),
+    );
+  });
+
   it("reports no blocking call on a Channel that is not the runtime's", () => {
     const dir = join(checker, 'test/diverging/ambient-channel');
     expect(

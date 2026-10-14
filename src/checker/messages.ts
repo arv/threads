@@ -125,6 +125,10 @@ export const Messages = {
     code: 96033,
     text: "A value of type '{0}' cannot be used as '{1}': {2}. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
   },
+  NotAStruct: {
+    code: 96035,
+    text: "A value of type '{0}' cannot be used as '{1}': it is an ordinary object, not a shared struct, which 'new {2}()' makes.",
+  },
 } as const;
 
 export type Message = (typeof Messages)[keyof typeof Messages];

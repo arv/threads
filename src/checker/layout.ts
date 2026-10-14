@@ -14,6 +14,8 @@
 //     (96026);
 //   - a string or channel field, or a string element, is not assigned by
 //     destructuring or as a loop variable (96027);
+//   - an ordinary object, which TypeScript may take for a struct by its
+//     members, is not used where a struct goes (96035);
 //   - an atomic operation acts on an i32 field named by a string literal, or on
 //     an element of a SharedArray<i32> (96028, reported with the struct calls,
 //     in refcount.ts).
@@ -492,6 +494,22 @@ function checkLayoutTarget(
   }
   if (!isExpression(expr)) return;
   const source = c.host.typeOf(expr);
+  // an ordinary object, which TypeScript takes for a struct by its members:
+  // the place holds an address, which the runtime cannot unbox the object to
+  const structs = isCellType(c, target) ? structsOf(c, target) : [];
+  if (
+    structs.length > 0 &&
+    nonNullishMembers(c, source).some(m => isOrdinaryObjectType(c, m))
+  ) {
+    c.error(
+      expr,
+      Messages.NotAStruct,
+      c.host.typeToString(source),
+      c.host.typeToString(target),
+      structs[0]!.name,
+    );
+    return;
+  }
   const why = layoutMismatch(c, source, target, cast);
   if (why)
     c.error(
@@ -501,6 +519,20 @@ function checkLayoutTarget(
       c.host.typeToString(target),
       why,
     );
+}
+
+// Reports whether a value of type t is an ordinary object: of an object type
+// with members, or an intersection of them (an object literal's, a class's),
+// that is not a shared struct or a SharedArray. Not `{}` , which any value
+// goes through, as it goes through `unknown` , `any` or a type parameter: a
+// handle may be one.
+function isOrdinaryObjectType(c: Own, t: Type): boolean {
+  const parts = t.flags & TypeFlags.Intersection ? c.host.memberTypes(t) : [t];
+  return (
+    parts.every(p => !!(p.flags & TypeFlags.Object)) &&
+    !isCellType(c, t) &&
+    c.host.checker.getPropertiesOfType(t as any).length > 0
+  );
 }
 
 // The shared structs of t's members other than null, undefined and the
