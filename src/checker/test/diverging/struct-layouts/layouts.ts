@@ -84,3 +84,15 @@ interface Measure { n: number }
 const Measure = struct<Measure>({ n: f64 });                           // error: the type keeps the i32 one below
 const MeasureAgain = struct<Measure>({ n: i32 });
 export { Measure, MeasureAgain, NodeBox };
+// a falsy alternative: the struct is what reaches the place
+declare const childOrZero: Child | 0;
+export const orNode: Node = childOrZero || new Node();                 // error: the Child
+// a union of functions: each may be the one called
+declare const makers: (() => Child) | (() => Node);
+export const maker: () => Node = makers;                               // error
+// a promise of a struct: what it resolves to
+declare function makeChildLater(): Promise<Child>;
+declare function makeLeafLater(): Promise<Leaf>;
+export const later: () => Promise<Node> = makeChildLater;              // error
+export const promised: Promise<Node> = makeChildLater();               // error
+export const leafLater: () => Promise<Node> = makeLeafLater;           // fine

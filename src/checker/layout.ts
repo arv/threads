@@ -473,11 +473,13 @@ function checkLayoutTarget(
     );
 }
 
-// The shared structs of t's members other than null and undefined, or none
-// when one of them is not a struct (a handle's type, a type parameter).
+// The shared structs of t's members other than null, undefined and the
+// primitives (a falsy 0 beside a struct), or none when one of them is not a
+// struct (a handle's type, a type parameter).
 function structsOf(c: Own, t: Type): StructInfo[] {
   const result: StructInfo[] = [];
   for (const member of nonNullishMembers(c, t)) {
+    if (member.flags & TypeFlags.Primitive) continue;
     const s = getStructOfType(c, member);
     if (!s) return [];
     result.push(s);
@@ -586,7 +588,18 @@ function layoutMismatch(
     return undefined;
   }
   const tos = structsOf(c, target);
-  if (tos.length === 0) return callableMismatch(c, source, target, cast, seen);
+  if (tos.length === 0) {
+    // a promise: what it resolves to, into what the place's does
+    if (source.flags & TypeFlags.Object && target.flags & TypeFlags.Object) {
+      const from = c.host.awaitedType(source),
+        to = c.host.awaitedType(target);
+      if (from !== source && to !== target) {
+        const why = layoutMismatch(c, from, to, cast, seen);
+        return why && `what it resolves to: ${why}`;
+      }
+    }
+    return callableMismatch(c, source, target, cast, seen);
+  }
   for (const from of structsOf(c, source)) {
     let why: string | undefined;
     for (const to of tos) {
@@ -615,9 +628,18 @@ function callableMismatch(
   cast: boolean,
   seen: Seen,
 ): string | undefined {
-  if (!(source.flags & TypeFlags.Object) || !(target.flags & TypeFlags.Object))
+  const composite = TypeFlags.Object | TypeFlags.Union | TypeFlags.Intersection;
+  if (!(source.flags & composite) || !(target.flags & composite))
     return undefined;
   const host = c.host;
+  // a union of functions: any of them may be the one called
+  if (source.flags & TypeFlags.Union) {
+    for (const member of host.memberTypes(source)) {
+      const why = callableMismatch(c, member, target, cast, seen);
+      if (why) return why;
+    }
+    return undefined;
+  }
   const froms = host.callSignatures(source);
   if (froms.length === 0) return undefined;
   const assignable = (a: Type | undefined, b: Type | undefined) =>
