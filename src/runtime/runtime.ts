@@ -8,6 +8,9 @@
 const C_ALLOC = 0; // the shared bump cursor (bytes)
 const C_NEXT_TID = 4;
 const C_STR_LOCK = 5;
+// pool workers asked for, or started, that have not joined the pool yet (see
+// enqueue, workersComing)
+const C_COMING = 6;
 const C_RING_HEAD = 8,
   C_RING_TAIL = 9,
   C_PENDING = 10,
@@ -975,12 +978,16 @@ export function spawnThread(t: number) {
     done();
   }
 }
-// queue a thread block, or a DRAFT, for an idle worker; with none idle, ask the
-// page for one more. in a pool operation (busy). a full ring refuses it and is
-// left as it was: a slot claimed and never written would stop the worker that
-// takes it for good. a worker takes a slot after it moved the head past it, so
-// the slot the tail comes round to may still be being taken: the producer
-// waits a moment for it
+// queue a thread block, or a DRAFT, for an idle worker; with none idle and none
+// on its way, ask the page for one more. a worker takes a while to start (it
+// loads the runtime and the program: tens of ms, more on few cores): were the
+// ones on their way not counted, every thread queued meanwhile would ask again,
+// and a burst of spawns would start hundreds of workers, which the process then
+// waits for as it exits. in a pool operation (busy). a full ring refuses it and
+// is left as it was: a slot claimed and never written would stop the worker
+// that takes it for good. a worker takes a slot after it moved the head past
+// it, so the slot the tail comes round to may still be being taken: the
+// producer waits a moment for it
 function enqueue(t: number) {
   let tail = Atomics.load(I32, C_RING_TAIL);
   for (;;) {
@@ -998,12 +1005,15 @@ function enqueue(t: number) {
   Atomics.notify(I32, C_PENDING, 1);
   // queued now, for good: should asking for one more worker fail, the thread
   // waits for one that is, rather than be taken back from under a worker
-  if (Atomics.load(I32, C_IDLE) < pending)
+  if (Atomics.load(I32, C_IDLE) + Atomics.load(I32, C_COMING) < pending) {
+    Atomics.add(I32, C_COMING, 1);
     try {
       post({type: 'grow'});
     } catch (e) {
+      Atomics.sub(I32, C_COMING, 1);
       console.warn(`threads: could not ask for a worker: ${String(e)}`);
     }
+  }
 }
 // wait for thread block a to finish: its result, or what it threw thrown. the
 // caller checks that it may block before it commits to the join (own.ts)
@@ -1474,6 +1484,8 @@ async function hostTurn(): Promise<boolean> {
   }
   return true;
 }
+// whether this worker has been counted idle once (see poolLoop)
+let joined = false;
 // a pool worker: take threads off the queue until shutdown; a host takes async
 // threads only while it has handles to finalize it waits asynchronously, so its
 // event loop runs the registry
@@ -1488,6 +1500,12 @@ export async function poolLoop() {
     // idle first: a thread queued meanwhile waits for this worker rather than
     // asking for one more
     Atomics.add(I32, C_IDLE, 1);
+    // new to the pool, it was counted as coming: now as idle instead, after
+    // the above, so that a thread queued meanwhile sees it as one or the other
+    if (!joined) {
+      joined = true;
+      Atomics.sub(I32, C_COMING, 1);
+    }
     done();
     if (afterTask()) {
       await eventLoopTurn();
@@ -1582,6 +1600,13 @@ export function waitAllThreads() {
   while ((n = Atomics.load(I32, C_LIVE)) !== 0) Atomics.wait(I32, C_LIVE, n);
   $waitEnd();
 }
+// a coordinator starts n pool workers of its own accord (the pool it starts
+// with), or, n negative, one it was asked for did not start: each worker is
+// counted as coming until it joins the pool, so that a thread queued before
+// then waits for it rather than ask for one more (see enqueue)
+export function workersComing(sab: SharedArrayBuffer, n: number) {
+  Atomics.add(new Int32Array(sab), C_COMING, n);
+}
 export function shutdown(sab: SharedArrayBuffer) {
   const i32 = new Int32Array(sab);
   Atomics.store(i32, C_SHUTDOWN, 1);
@@ -1645,6 +1670,7 @@ export async function resetPool(sab: SharedArrayBuffer) {
     C_RING_TAIL,
     C_PENDING,
     C_IDLE,
+    C_COMING,
     C_LIVE,
     C_AQ_LOCK,
     C_AQ_HEAD,
