@@ -2,7 +2,15 @@
 // test/expected/cases-<name>.txt says, which `vp run compare --update` writes
 // from the tsgo fork's `own check` (compare.ts compares with the fork itself
 // when it is there).
-import {readdirSync, readFileSync} from 'node:fs';
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {afterAll, describe, expect, it} from 'vite-plus/test';
@@ -47,6 +55,54 @@ describe('threads-check', () => {
         formatDiagnostic(d, dir),
       ),
     ).toEqual(["tsconfig.json(9,5): error TS1005: ',' expected."]);
+  });
+
+  it('analyzes a finally once for each way in, however deep it is nested', () => {
+    // a finally runs for each state it may be reached with, and runs that
+    // start alike are one: 20 finallies nested in each other's are not 2 ** 20
+    // runs of the innermost
+    const depth = 20;
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'nested-finallies-')));
+    try {
+      const program = [
+        'import { Channel } from "threads";',
+        'declare function use(...values: unknown[]): void;',
+        'export function nested(ch: Channel<number[]>) {',
+        '  const xs = [1];',
+        ...Array.from({length: depth}, () => 'try { use(1); } finally {'),
+        'ch.send(xs); use(xs);',
+        ...Array.from({length: depth}, () => '}'),
+        '}',
+      ];
+      writeFileSync(join(dir, 'nested.ts'), program.join('\n') + '\n');
+      writeFileSync(
+        join(dir, 'tsconfig.json'),
+        JSON.stringify({
+          compilerOptions: {
+            target: 'es2022',
+            module: 'esnext',
+            moduleResolution: 'bundler',
+            strict: true,
+            lib: ['es2022'],
+            noEmit: true,
+            paths: {threads: [join(checker, '../runtime/threads.d.ts')]},
+          },
+          include: ['*.ts'],
+        }),
+      );
+      const start = performance.now();
+      const diagnostics = check(join(dir, 'tsconfig.json'), {
+        runtime: 'threads',
+        api,
+      }).map(d => formatDiagnostic(d, dir));
+      expect(performance.now() - start).toBeLessThan(2000);
+      const line = depth + 5;
+      expect(diagnostics).toEqual([
+        `nested.ts(${line},18): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line ${line}.`,
+      ]);
+    } finally {
+      rmSync(dir, {recursive: true, force: true});
+    }
   });
 
   for (const name of readdirSync(cases).sort()) {
@@ -161,7 +217,9 @@ describe('threads-check, where it differs from the fork', () => {
     // block ends in a return, a throw or a break, forgetting a send in it, and
     // takes a break or continue to its target before the finally it crosses.
     // it goes on after a finally from the block's entry too, so a send in a
-    // block that completes is one that may have been made
+    // block that completes is one that may have been made. a throw no call
+    // makes (a getter's) may come as soon as a block starts: in the finally, a
+    // send in the block is one that may have been made
     const dir = join(checker, 'test/diverging/try-exits');
     expect(
       check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
@@ -169,14 +227,14 @@ describe('threads-check, where it differs from the fork', () => {
         .sort(),
     ).toEqual(
       [
-        "try-exits.ts(9,46): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 9.",
+        "try-exits.ts(9,46): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 9.",
         "try-exits.ts(87,69): error TS96006: 'xs' may have been consumed by 'consume' on line 87.",
         "try-exits.ts(91,70): error TS96006: 'xs' may have been consumed by 'consume' on line 91.",
         "try-exits.ts(100,65): error TS96006: 'xs' may have been consumed by 'consume' on line 100.",
         "try-exits.ts(13,58): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 13.",
-        "try-exits.ts(17,56): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 17.",
+        "try-exits.ts(17,56): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 17.",
         "try-exits.ts(22,7): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 21.",
-        "try-exits.ts(39,19): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 38.",
+        "try-exits.ts(39,19): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 38.",
         "try-exits.ts(44,7): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 43.",
         "try-exits.ts(61,7): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 59.",
         "try-exits.ts(65,54): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 65.",
@@ -186,6 +244,8 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(119,69): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 119.",
         "try-exits.ts(123,65): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 123.",
         "try-exits.ts(129,54): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 128.",
+        "try-exits.ts(137,7): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 135.",
+        "try-exits.ts(144,19): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 141.",
       ].sort(),
     );
   });

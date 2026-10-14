@@ -6,7 +6,7 @@ declare function use(...values: unknown[]): void;
 
 export function returnThenFinally(ch: Channel<number[]>) {
   const xs = [1];
-  try { ch.send(xs); return; } finally { use(xs); }          // error: was sent
+  try { ch.send(xs); return; } finally { use(xs); }          // error: may have been sent, by a throw before it
 }
 export function throwThenCatch(ch: Channel<number[]>) {
   const xs = [1];
@@ -128,4 +128,18 @@ export function getterThenReassigned(ch: Channel<number[]>) {
   ch.send(xs);
   try { void getter.value; xs = [2]; } finally { use(xs); }  // error: the getter may throw before xs is new
   use(xs);                                                    // fine: the try completed, xs is new
+}
+// what such a throw reaches the finally with goes where the finally goes
+export function implicitThenBreak(ch: Channel<number[]>) {
+  let xs = [1];
+  ch.send(xs);
+  outer: { try { void getter.value; xs = [2]; } finally { break outer; } }
+  use(xs);                                                    // error: the getter may throw before xs is new
+}
+export function implicitThenReturn(ch: Channel<number[]>) {
+  let xs = [1];
+  ch.send(xs);
+  try {
+    try { void getter.value; xs = [2]; } finally { return; }
+  } finally { use(xs); }                                      // error: so may the return
 }

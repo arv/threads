@@ -389,6 +389,7 @@ class Analyzer {
   readonly captures = new Map<Node, Captures>();
   readonly loopFresh = new Map<Node, Set<TsSymbol>>();
   readonly primitiveOrShared = new Map<Type, boolean>();
+  readonly evaluating = new Map<Node, boolean>();
   readonly idOf: (symbol: TsSymbol) => number;
 
   constructor(c: Own) {
@@ -414,6 +415,19 @@ class Analyzer {
 
   typeOf(node: Node): Type {
     return this.c.host.typeOf(node);
+  }
+
+  // Reports whether a block evaluates anything: a throw no call makes (a
+  // getter's, an operator's) may then come from it, as early as its start.
+  evaluatesAnything(block: Node): boolean {
+    let result = this.evaluating.get(block);
+    if (result === undefined) {
+      const visit = (node: Node): boolean =>
+        isExpression(node) || !!forEachChild(node, visit);
+      result = !!forEachChild(block, visit);
+      this.evaluating.set(block, result);
+    }
+    return result;
   }
 
   analyzeFunction(node: Node): FunctionResult {
@@ -1440,6 +1454,11 @@ class FunctionAnalysis {
     t.thrown = [];
     t.exits = [];
     t.catches = false; // a throw in the catch goes to the finally
+    // a throw no call makes may come from anywhere in a block: as soon as it
+    // starts, conservatively, as one more of its throws (the catch starts
+    // from the try block's entry already)
+    if (!node.catchClause && this.a.evaluatesAnything(node.tryBlock))
+      blockThrown.push(entry);
     let after = s;
     if (node.catchClause) {
       const catchClause = node.catchClause as Node;
@@ -1451,6 +1470,7 @@ class FunctionAnalysis {
         cs.addFlags(r, RegionFlags.Outer);
         this.bindName(decl.name, decl, regionValue(r), cs);
       }
+      if (this.a.evaluatesAnything(catchClause.block)) t.thrown.push(cs.copy());
       this.statement(catchClause.block, cs);
       after = joinStates(s, cs);
     }
@@ -1463,32 +1483,25 @@ class FunctionAnalysis {
       if (outer) (outer.catches ? outer.caught : outer.thrown).push(st);
     };
     if (node.finallyBlock) {
-      // the finally first for what it reports alone, from the try's entry
-      // joined with its end: a throw the analysis does not record (a
-      // getter's, a division's) may come anywhere in the block, and reach the
-      // finally with what the block had done so far. That run is in a try of
-      // its own, which keeps what it would throw, return or jump to. Then once
-      // as the try completes normally, from the end of its block or its catch
-      // alone, which goes on after it; and once more for the throws and for
-      // each place the early exits go to, which do not: those runs report
-      // what they reach, and what of them is still reachable (a finally may
-      // return or throw instead) goes on to the next try out, or to its
-      // target
-      const nowhere: TryContext = {
-        catches: false,
-        caught: [],
-        thrown: [],
-        exits: [],
-      };
-      this.tries.push(nowhere);
-      this.statement(node.finallyBlock, joinStates(entry, after));
-      this.tries.pop();
-      if (!after.unreachable) this.statement(node.finallyBlock, after);
+      // the finally once as the try completes normally, from the end of its
+      // block or its catch, which goes on after it; and once more for the
+      // throws and for each place the early exits go to, which do not: those
+      // runs report what they reach, and what of them is still reachable (a
+      // finally may return or throw instead) goes on to the next try out, or
+      // to its target. Runs that start from states alike (by signature) end
+      // alike and report alike, so the finally is analyzed once for them:
+      // finallies nested in finallies are not analyzed exponentially often
+      const runs = new Map<string, State>();
       const run = (early: State[]) => {
-        const fe = joinAllStates(early[0]!, early.slice(1));
-        this.statement(node.finallyBlock, fe);
-        return fe;
+        const start = joinAllStates(early[0]!, early.slice(1));
+        const key = start.signature(this.a.idOf);
+        const end = runs.get(key);
+        if (end) return end.copy();
+        this.statement(node.finallyBlock, start);
+        runs.set(key, start.copy());
+        return start;
       };
+      if (!after.unreachable) after = run([after]);
       if (thrown.length > 0) {
         const fe = run(thrown);
         if (!fe.unreachable) throwOn(fe);
