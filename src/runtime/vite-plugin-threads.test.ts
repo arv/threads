@@ -9,6 +9,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {build, createServer, type InlineConfig, type Plugin} from 'vite-plus';
 import {afterAll, beforeEach, describe, expect, it} from 'vite-plus/test';
+import {registeredIn} from './compiled.ts';
 import threads, {type Options} from './vite-plugin-threads.ts';
 
 const TSGO = path.join(
@@ -269,6 +270,20 @@ describe('the Vite plugin', () => {
     expect(js).not.toContain('"src/app.ts"');
   });
 
+  it('compiles the .ts an import names, though a .js of its name is beside it', async () => {
+    // the fork rewrites ./app.ts to ./app.js
+    const root = project({
+      'index.html': INDEX,
+      'tsconfig.json': tsconfig(),
+      'src/main.ts': page('./app.ts'),
+      'src/app.ts': APP,
+      'src/app.js': `export function main() {\n  return 'the JavaScript beside it';\n}\n`,
+    });
+    const js = await bundle(root);
+    expect(js).toMatch(registered('src/app.ts'));
+    expect(js).not.toContain('the JavaScript beside it');
+  });
+
   it('leaves ?raw, ?url and ?worker to Vite', async () => {
     const root = project({
       'index.html': INDEX,
@@ -281,12 +296,65 @@ describe('the Vite plugin', () => {
     expect(js).toContain('new Worker(');
   });
 
+  it('erases a playground program’s types, registering what the fork registers', async () => {
+    const root = project({
+      'index.html': INDEX,
+      'tsconfig.json': tsconfig(),
+      'src/main.ts': page('./app.ts'),
+      'src/app.ts': APP,
+    });
+    const server = await createServer({
+      ...config(root, {playground: true}),
+      server: {ws: false, watch: null},
+    });
+    await server.listen();
+    try {
+      const response = await fetch(
+        new URL('__threads/compile', server.resolvedUrls!.local[0]),
+        {
+          method: 'POST',
+          // functions a scan of the text takes for declarations at the top
+          // level, and one it misses
+          body: JSON.stringify({
+            source: `import {log} from '@arv/threads';
+if (true) /[{]/.test('');
+export function main(): void {
+function* gen() {
+  yield 1;
+}
+  log(String([...gen()]));
+}
+const fn =
+  function named() {};
+/*
+export function example() {}
+*/
+export default function last() {}
+`,
+          }),
+        },
+      );
+      const {compiled, erased} = (await response.json()) as {
+        compiled: {js: string};
+        erased: {js: string};
+      };
+      expect(registeredIn(compiled.js, '@arv/threads')).toEqual([
+        'main',
+        'last',
+      ]);
+      expect(registeredIn(erased.js, '@arv/threads')).toEqual(['main', 'last']);
+    } finally {
+      await server.close();
+    }
+  });
+
   it('compiles again for a change only to a source the fork compiled or Vite loaded', async () => {
     const root = project({
       'index.html': INDEX,
       'tsconfig.json': tsconfig(),
       'src/main.ts': page('./app.ts'),
       'src/app.ts': APP,
+      'src/extra.ts': APP,
       'scripts/tool.ts': `export const tool: number = 1;\n`,
     });
     const server = await serve(root);
@@ -302,11 +370,14 @@ describe('the Vite plugin', () => {
       >;
       // whether the fork compiled again, which clears what it emitted
       const marker = path.join(root, '.vite/threads/page/marker');
-      const compiles = async (type: 'create' | 'update', file: string) => {
+      const compiles = async (
+        type: 'create' | 'update' | 'delete',
+        file: string,
+      ) => {
         fs.writeFileSync(marker, '');
         await hotUpdate.call({environment: client} as any, {
           type,
-          file: path.join(root, file),
+          file: path.isAbsolute(file) ? file : path.join(root, file),
           timestamp: Date.now(),
           modules: [],
           read: () => '',
@@ -317,6 +388,11 @@ describe('the Vite plugin', () => {
       expect(await compiles('update', 'scripts/tool.ts')).toBe(false);
       expect(await compiles('update', 'src/app.ts')).toBe(true);
       expect(await compiles('create', 'scripts/new.ts')).toBe(true);
+      // the path as it comes, not as path.join would make it
+      expect(await compiles('update', `${root}/src/./app.ts`)).toBe(true);
+      // a thread module the workers' table names, which nothing loaded
+      fs.rmSync(path.join(root, 'src/extra.ts'));
+      expect(await compiles('delete', 'src/extra.ts')).toBe(true);
     } finally {
       await server.close();
     }

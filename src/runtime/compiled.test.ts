@@ -1,71 +1,39 @@
 // What a program with its types only erased needs at its end (registration):
-// the line registering the top-level functions the fork's emit registers
+// the line registering the functions the fork's emit of it registers. Which
+// those are, from sources the fork tells apart and a scan of the text would
+// not, the Vite plugin's tests check with the fork itself
 import {describe, expect, it} from 'vite-plus/test';
-import {registration} from './compiled.ts';
+import {registeredIn, registration} from './compiled.ts';
 
 const RUNTIME = '@arv/threads';
-// the functions the line registers
-const registered = (source: string) =>
-  /\{ (.*) \}\);\n$/.exec(registration(source, RUNTIME).tail)![1].split(', ');
+// the fork's emit of a program that registers main and gen
+const EMIT = `import { register as __register } from "@arv/threads";
+import { log } from '@arv/threads';
+export default function main() { log('main'); }
+function* gen() { yield 1; }
+__register(import.meta.url, { main, gen });
+//# sourceMappingURL=program.js.map`;
 
 describe('registration', () => {
-  it('registers every named top-level function, as the fork does', () => {
-    // the fork's emit of this registers { main, gen, agen, split }
-    expect(
-      registered(`import {log} from '@arv/threads';
-export default function main(n: number): number { log('hi'); return n; }
-function *gen() { yield 1; }
-export async function * agen() { yield 1; }
-function
-split() {}
-`),
-    ).toEqual(['main', 'gen', 'agen', 'split']);
-    // and of this { g, h, i }
-    expect(
-      registered(`import {log} from '@arv/threads';
-export default async function* g() { log('g'); }
-function* h() {}
-async function i() {}
-`),
-    ).toEqual(['g', 'h', 'i']);
+  it('registers what the fork’s emit registers', () => {
+    expect(registeredIn(EMIT, RUNTIME)).toEqual(['main', 'gen']);
+    const {tail, added} = registration('', RUNTIME, EMIT);
+    expect(tail).toBe(
+      `\n// added: the runtime finds a thread's function by module and name\nimport { register } from "@arv/threads";\nregister(import.meta.url, { main, gen });\n`,
+    );
+    expect(added).toBe(3);
   });
 
-  it('leaves out what is not at the top level, however it is indented', () => {
-    // the fork's emit of this registers { main, indented, after }
-    expect(
-      registered(`import {log} from '@arv/threads';
-/*
-export default function example() {}
-*/
-const text = \`
-function *notOne() {}
-\${'}'}
-export function nor() {}
-\`;
-const re = /['{]/, half = text.length / 2;
-export function main(n: number): number {
-function *gen() { yield n; }
-  log(String(re), half, [...gen()].length);
-  return n;
-}
-  function indented() {}
-const o = {k: 1}; function after() {}
-`),
-    ).toEqual(['main', 'indented', 'after']);
+  it('imports register under a name the program does not have', () => {
+    expect(registration('const register = 1;', RUNTIME, EMIT).tail).toContain(
+      'import { register as register_1 } from "@arv/threads";\nregister_1(import.meta.url, { main, gen });',
+    );
   });
 
-  it('leaves out a function with no name, and one not at the top level', () => {
-    // the fork's emit of this registers { k }
-    expect(
-      registered(`import {log} from '@arv/threads';
-export default function () { log('x'); }
-export function k() {
-  function inner() {}
-  return inner;
-}
-const f = function named() {};
-functionally();
-`),
-    ).toEqual(['k']);
+  it('adds nothing where the fork registers nothing, or emitted nothing', () => {
+    const none = `import { log } from '@arv/threads';\nlog('x');\n`;
+    expect(registeredIn(none, RUNTIME)).toBe(null);
+    expect(registration('', RUNTIME, none)).toEqual({tail: '', added: 0});
+    expect(registration('', RUNTIME, null)).toEqual({tail: '', added: 0});
   });
 });
