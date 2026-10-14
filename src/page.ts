@@ -16,6 +16,8 @@ export interface PageResult {
 declare global {
   interface Window {
     __escapeResult?: PageResult;
+    // how the page failed before it reported, as chrome.ts records it
+    __escapeFailure?: string;
   }
 }
 
@@ -66,8 +68,8 @@ async function run() {
       } else if (m.type === 'done') finish(true);
       else if (m.type === 'crash') finish(false, m.message);
     };
-    // the page reports a worker's error (so it is not the page's, which
-    // chrome.ts fails on); one whose module did not load has no message
+    // the page reports a worker's error itself (uncanceled, it would be the
+    // page's own too); one whose module did not load has no message
     w.onerror = e => {
       e.preventDefault();
       finish(false, e.message || `a ${role} worker did not load`);

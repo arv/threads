@@ -123,27 +123,38 @@ export const runInChrome = async ({
   const browser = await chromium.launch({channel: 'chrome', headless: !headed});
   try {
     const page = await browser.newPage();
-    // a page that fails before it reports never will: the run fails with the
-    // first failure (one after the result is no one's)
-    let fail!: (e: Error) => void;
-    const failed = new Promise<never>((_, reject) => {
-      fail = reject;
+    // a page that fails before it reports never will: the page records its
+    // first failure (an error it throws, a rejection it leaves, a script that
+    // does not load) until it reports, so one after the result is no one's
+    await page.addInitScript(() => {
+      const failed = (failure: string) => {
+        if (window.__escapeResult === undefined)
+          window.__escapeFailure ??= failure;
+      };
+      addEventListener(
+        'error',
+        e => {
+          failed(
+            e.target instanceof HTMLScriptElement
+              ? `did not load ${e.target.src}, or a module it imports`
+              : `threw ${e.error?.stack ?? e.message}`,
+          );
+        },
+        true, // a script's error does not bubble
+      );
+      addEventListener('unhandledrejection', e =>
+        failed(`left a rejection: ${e.reason?.stack ?? e.reason}`),
+      );
     });
-    failed.catch(() => {});
-    page.on('pageerror', e =>
-      fail(new Error(`chrome: the page threw ${e.stack ?? e.message}`)),
-    );
     page.on('console', m => {
       if (m.type() !== 'error') return;
+      // what the page does not have is no matter (its icon), unless it is a
+      // module: which one
       const {url} = m.location();
-      // a module that did not load: what imports it never runs
-      if (
-        m.text().startsWith('Failed to load module script') ||
-        (m.text().includes('404') && /\.[jt]s$/.test(url))
-      )
-        fail(new Error(`chrome: ${url} did not load: ${m.text()}`));
-      // what else is not found (the page's icon) is no matter
-      else if (!m.text().includes('404')) console.error(`console: ${m.text()}`);
+      if (!m.text().startsWith('Failed to load resource'))
+        console.error(`console: ${m.text()}`);
+      else if (/\.[jt]s$/.test(url))
+        console.error(`console: ${url}: ${m.text()}`);
     });
     if (trace)
       await browser.startTracing(page, {
@@ -161,24 +172,29 @@ export const runInChrome = async ({
     await page.goto(
       `http://127.0.0.1:${server.address().port}/src/index.html?${new URLSearchParams(query)}`,
     );
-    const result = await Promise.race([
-      page
-        .waitForFunction(() => window.__escapeResult!, null, {
-          timeout,
-          polling: 100,
-        })
-        .then(
-          h => h.jsonValue(),
-          (e: Error) => {
-            throw e.name === 'TimeoutError'
-              ? new Error(
-                  `chrome: the page did not report in ${timeout / 1000} s: its program is stuck, or slower than that (chrome.ts --timeout=S waits longer, 0 for good)`,
-                )
-              : e;
-          },
-        ),
-      failed,
-    ]);
+    const settled = await page
+      .waitForFunction(
+        () => {
+          const {__escapeResult: result, __escapeFailure: failure} = window;
+          return result || failure ? {result, failure} : null;
+        },
+        null,
+        {timeout, polling: 100},
+      )
+      .then(
+        h => h.jsonValue(),
+        (e: Error) => {
+          throw e.name === 'TimeoutError'
+            ? new Error(
+                `chrome: the page did not report in ${timeout / 1000} s: its program is stuck, or slower than that (chrome.ts --timeout=S waits longer, 0 for good)`,
+              )
+            : e;
+        },
+      );
+    // what it waited for: the one, or the other
+    const {result, failure} = settled!;
+    if (failure !== undefined || !result)
+      throw new Error(`chrome: the page ${failure}`);
     if (trace) await browser.stopTracing();
     return {...result, version: browser.version()};
   } finally {
