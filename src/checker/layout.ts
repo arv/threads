@@ -22,7 +22,7 @@ import type {SourceFile} from 'typescript/ast';
 import {CellKind, Conversion, isArrayKind} from './context.ts';
 import type {CellType, FieldKind, Own, StructInfo} from './context.ts';
 import {IndexKind, ObjectFlags, SymbolFlags, TypeFlags} from './host.ts';
-import type {Type} from './host.ts';
+import type {Signature, Type} from './host.ts';
 import {
   checkIntegerCompoundAssignment,
   checkIntegerTarget,
@@ -451,10 +451,40 @@ function checkLayoutTarget(
           checkLayoutTarget(c, expr.right, target, cast);
           return;
         case K.BarBarToken:
-        case K.QuestionQuestionToken:
+        case K.QuestionQuestionToken: {
+          // the right is the result only if the left may be falsy (||), or
+          // null or undefined (??): not after a struct, which is neither
           checkLayoutTarget(c, expr.left, target, cast);
-          checkLayoutTarget(c, expr.right, target, cast);
+          const left = c.host.typeOf(expr.left);
+          const members =
+            left.flags & TypeFlags.Union ? c.host.memberTypes(left) : [left];
+          const passes =
+            expr.operatorToken.kind === K.BarBarToken
+              ? members.some(
+                  m =>
+                    !(
+                      m.flags &
+                      (TypeFlags.Object |
+                        TypeFlags.NonPrimitive |
+                        TypeFlags.ESSymbolLike |
+                        TypeFlags.Intersection)
+                    ),
+                )
+              : members.some(
+                  m =>
+                    !!(
+                      m.flags &
+                      (TypeFlags.Any |
+                        TypeFlags.Unknown |
+                        TypeFlags.Nullable |
+                        TypeFlags.Void |
+                        TypeFlags.InstantiableNonPrimitive |
+                        TypeFlags.InstantiablePrimitive)
+                    ),
+                );
+          if (passes) checkLayoutTarget(c, expr.right, target, cast);
           return;
+        }
         case K.CommaToken:
           checkLayoutTarget(c, expr.right, target, cast);
           return;
@@ -640,40 +670,50 @@ function callableMismatch(
     }
     return undefined;
   }
-  const froms = host.callSignatures(source);
-  if (froms.length === 0) return undefined;
   const assignable = (a: Type | undefined, b: Type | undefined) =>
     !a || !b || host.checker.isTypeAssignableTo(a as any, b as any);
-  const returnOf = (s: (typeof froms)[number]) =>
+  const returnOf = (s: Signature) =>
     host.checker.getReturnTypeOfSignature(s as any) as Type;
   return within(seen.types, source, target, undefined, () => {
-    for (const to of host.callSignatures(target)) {
-      const from =
-        froms.length === 1
-          ? froms[0]
-          : froms.find(
-              f =>
-                to.parameters.every((_, i) => {
-                  const passed = host.parameterTypeAt(to, i),
-                    taken = host.parameterTypeAt(f, i);
-                  return assignable(passed, taken) || assignable(taken, passed);
-                }) && assignable(returnOf(f), returnOf(to)),
-            );
-      if (!from) continue;
-      const result = layoutMismatch(
-        c,
-        returnOf(from),
-        returnOf(to),
-        cast,
-        seen,
-      );
-      if (result) return `what it returns: ${result}`;
-      for (let i = 0; i < to.parameters.length; i++) {
-        const passed = host.parameterTypeAt(to, i),
-          taken = host.parameterTypeAt(from, i);
-        if (!passed || !taken) break;
-        const why = layoutMismatch(c, passed, taken, cast, seen);
-        if (why) return `what it is called with, parameter ${i + 1}: ${why}`;
+    // its calls, then its constructions (a struct type's new () makes one)
+    for (const construct of [false, true]) {
+      const froms = host.callSignatures(source, construct);
+      if (froms.length === 0) continue;
+      for (const to of host.callSignatures(target, construct)) {
+        // a call of `to` passes its parameters' worth of arguments, which an
+        // overload that needs more cannot take
+        const from =
+          froms.length === 1
+            ? froms[0]
+            : froms.find(
+                f =>
+                  host.requiredArguments(f) <= to.parameters.length &&
+                  to.parameters.every((_, i) => {
+                    const passed = host.parameterTypeAt(to, i),
+                      taken = host.parameterTypeAt(f, i);
+                    return (
+                      assignable(passed, taken) || assignable(taken, passed)
+                    );
+                  }) &&
+                  assignable(returnOf(f), returnOf(to)),
+              );
+        if (!from) continue;
+        const result = layoutMismatch(
+          c,
+          returnOf(from),
+          returnOf(to),
+          cast,
+          seen,
+        );
+        if (result)
+          return `${construct ? 'what it constructs' : 'what it returns'}: ${result}`;
+        for (let i = 0; i < to.parameters.length; i++) {
+          const passed = host.parameterTypeAt(to, i),
+            taken = host.parameterTypeAt(from, i);
+          if (!passed || !taken) break;
+          const why = layoutMismatch(c, passed, taken, cast, seen);
+          if (why) return `what it is called with, parameter ${i + 1}: ${why}`;
+        }
       }
     }
     return undefined;

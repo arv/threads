@@ -1,7 +1,7 @@
 // A shared struct value used as another struct type: TypeScript relates the two
 // by their members, the runtime reads each field at its place. The fork does
 // not compare layouts.
-import { f64, i32, ref, struct, SharedArray } from "threads";
+import { f64, i32, ref, struct, SharedArray, type StructType } from "threads";
 
 interface Node { value: number; next: Node | null }
 const Node = struct<Node>({ value: f64, next: ref<Node>() });
@@ -96,3 +96,14 @@ declare function makeLeafLater(): Promise<Leaf>;
 export const later: () => Promise<Node> = makeChildLater;              // error
 export const promised: Promise<Node> = makeChildLater();               // error
 export const leafLater: () => Promise<Node> = makeLeafLater;           // fine
+// an operand that cannot be the result is not checked
+export function deadRight(n: Node): Node { return n || new Child(); }  // fine: a Node is truthy
+export function deadNullish(n: Node): Node { return n ?? new Child(); }  // fine: a Node is not null
+export function liveNullish(n: Node | null): Node { return n ?? new Child(); }  // error: the Child
+// a constructor: what it constructs
+export const Make: StructType<Node> = Child;                           // error
+export const MakeLeaf: StructType<Node> = Leaf;                        // fine
+// an overload of another arity, which TypeScript does not take
+declare function arity(x: string, y: number): Child;
+declare function arity(x: string): Node;
+export const byArity: (x: string) => Node = arity;                     // fine: TypeScript takes the second
