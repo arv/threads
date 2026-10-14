@@ -330,7 +330,9 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
   const countedIn = (ts: readonly Type[]): Type | undefined =>
     ts.find(t => isCellType(c, t) || !!getCountedElementType(c, t));
   // a call of a generator of this program, whose body is checked: its yields
-  // and its result are reported where they are
+  // and its result are reported where they are. Not one in the scope of type
+  // parameters (its own, an enclosing function's or class's): its body sees
+  // those, while what a call yields is of the types the call gives them
   const programGenerator = (e: Node): boolean => {
     const target = skipParentheses(e);
     if (target.kind !== K.CallExpression) return false;
@@ -339,11 +341,15 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
       handle && !isAmbientHandle(c, handle)
         ? host.declarationOf(handle)
         : undefined;
-    return (
-      !!decl &&
-      !!(getFunctionFlags(decl) & FunctionFlags.Generator) &&
-      !(getFunctionFlags(decl) & FunctionFlags.Invalid)
-    );
+    if (
+      !decl ||
+      !(getFunctionFlags(decl) & FunctionFlags.Generator) ||
+      getFunctionFlags(decl) & FunctionFlags.Invalid
+    )
+      return false;
+    for (let n: Node | undefined = decl; n; n = n.parent)
+      if ((n.typeParameters?.length ?? 0) > 0) return false;
+    return true;
   };
   // `yield* e`: e's own yields are reported where they are when e is a call of
   // a generator of this program (its body is checked); otherwise what e's

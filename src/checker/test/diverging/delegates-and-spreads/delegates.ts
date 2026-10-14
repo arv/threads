@@ -46,3 +46,22 @@ export function rests(ch: Channel<Node>) {
   const [...letters] = "abc";                                              // fine
   return [taken.length, more.length, letters];
 }
+// an iterator whose type arguments are not what it yields
+declare class Cursor<A, B> implements IterableIterator<B> {
+  a: A;
+  next(): IteratorResult<B>;
+  [Symbol.iterator](): Cursor<A, B>;
+}
+declare const cursor: Cursor<number, Node>;
+export const fromCursor = () => [...cursor];                               // error
+export function* viaCursor() { yield* cursor; }                            // error
+declare function finishes(): Generator<number, Node, void>;
+export const fromFinishes = () => [...finishes()];                         // fine: the Node is the result, which is not iterated
+// a generic generator of this program: its body sees only T
+declare function aNode(): Node;
+export function* pass<T>(x: T) { yield x; }
+export function* passes() { yield* pass(aNode()); }                        // error: T is Node here
+export function* passesNumbers() { yield* pass(1); }                       // fine
+// an async generator awaits its result
+declare function later(): AsyncGenerator<number, Promise<Node>, void>;
+export async function* awaitedResult() { return yield* later(); }          // error

@@ -108,6 +108,10 @@ describe('threads-check, where it differs from the fork', () => {
         "delegates.ts(41,41): error TS96021: A value of type 'Node' cannot be stored in an ordinary array or object: reference counting cannot see it there. Use a SharedArray or a shared struct field, or a place typed 'unknown', which holds a handle.",
         "delegates.ts(43,13): error TS96021: A value of type 'Node' cannot be stored in an ordinary array or object: reference counting cannot see it there. Use a SharedArray or a shared struct field, or a place typed 'unknown', which holds a handle.",
         "delegates.ts(45,7): error TS96021: A value of type 'Node' cannot be stored in an ordinary array or object: reference counting cannot see it there. Use a SharedArray or a shared struct field, or a place typed 'unknown', which holds a handle.",
+        "delegates.ts(56,37): error TS96021: A value of type 'Node' cannot be stored in an ordinary array or object: reference counting cannot see it there. Use a SharedArray or a shared struct field, or a place typed 'unknown', which holds a handle.",
+        "delegates.ts(57,39): error TS96032: A value of type 'Node' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
+        "delegates.ts(63,36): error TS96032: A value of type 'Node' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
+        "delegates.ts(67,49): error TS96032: A value of type 'Node' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
       ].sort(),
     );
   });
