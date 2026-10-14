@@ -133,6 +133,10 @@ export const Messages = {
     code: 96036,
     text: "Field '{0}' is marked {1} but typed '{2}': its values are stored as its marker says and checked as its type says, so type it '{3}' or mark it {4}.",
   },
+  StaysHere: {
+    code: 96037,
+    text: "A value of type '{0}' cannot be sent to another thread or shared: it stays on the thread that made it, which {1}.",
+  },
 } as const;
 
 export type Message = (typeof Messages)[keyof typeof Messages];
