@@ -327,6 +327,7 @@ export const setDeferHandler: (f: (p: number) => void) => void = f => {
 export function $defer(p: number) {
   pend.push(Atomics.load(I32, C_EPOCH), p);
   count(N_DEFER);
+  if (!CAN_BLOCK) pageLater();
 }
 export function $quiescent() {
   Atomics.store(I32, ME + T_QS, Atomics.load(I32, C_EPOCH));
@@ -498,12 +499,37 @@ function nudgePageForShared() {
 // posted before it stopped: it works the list off, and waits on
 export function $nudged() {
   Atomics.store(I32, C_NUDGED, 0); // first: the next nudge is for what comes
+  pagePoint();
+}
+function pagePoint() {
   if (Atomics.load(I32, ME + T_QS) === IDLE) {
     $waitBegin();
     return;
   }
   $quiescent();
   reclaim();
+}
+// a page's own queue (a reference it overwrote, say): no worker sees it, to
+// nudge for it, and the page passes no point of its own between tasks. so it
+// looks again at the next task, and then at longer intervals while anything
+// is left, up to a second: a timer, which a hidden page throttles, does for
+// the page's own queue, small as it is (workers' queues are nudged for). not
+// on a page that stopped: start() reclaims
+let pageTimer: ReturnType<typeof setTimeout> | null = null,
+  pageDelay = 0;
+function pageLater() {
+  if (pageTimer !== null || Atomics.load(I32, ME + T_QS) === IDLE) return;
+  pageTimer = setTimeout(pageReclaim, pageDelay);
+}
+function pageReclaim() {
+  pageTimer = null;
+  pagePoint();
+  if (pend.length === 0) {
+    pageDelay = 0;
+    return;
+  }
+  pageDelay = Math.min(1000, Math.max(50, pageDelay * 2));
+  pageLater();
 }
 // at a thread's end: hand the queued decrements to the shared list
 function handOffPending() {
