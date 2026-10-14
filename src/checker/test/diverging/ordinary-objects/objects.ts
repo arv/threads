@@ -3,7 +3,7 @@
 // interface, by its members, and lets a cast make one of a struct type of any
 // kind. The place holds an address in the shared heap, and the runtime cannot
 // make one of the object. The fork lets them through.
-import { f64, ref, struct, Channel, SharedArray, type Struct } from "threads";
+import { f64, ref, struct, Channel, SharedArray, type Cell, type Struct } from "threads";
 
 interface Node { value: number; next: Node | null }
 const Node = struct<Node>({ value: f64, next: ref<Node>() });
@@ -35,3 +35,15 @@ export function fromHandle(): Node { return handle as Node; }                   
 export function fromAny(): Node { return anything; }                                  // fine
 export function fromEmpty(x: {}): Node { return x as Node; }                          // fine: so may an {}
 export function generic<T extends Node>(t: T): Node { return t; }                     // fine
+// a place of structs and SharedArrays holds an address too
+export function mixed() { const n: Node | SharedArray<number> = { value: 1, next: null }; return n; }  // error
+// an async function's result is what its promise resolves to
+export async function forwarded(): Promise<Node> { return Promise.resolve(new Node()); }  // fine
+export async function forwardedPlain(): Promise<Node> { return Promise.resolve({ value: 1, next: null }); }  // error
+// what a function returns, or a promise resolves to, as one of a struct
+function plain() { return { value: 1, next: null }; }
+export const make: () => Node = plain;                                // error
+declare function plainLater(): Promise<{ value: number; next: null }>;
+export const later: () => Promise<Node> = plainLater;                 // error
+// the runtime's Cell holds a handle
+export function roundTrip() { const h: Cell = new Point(); return h as Point; }  // fine

@@ -33,6 +33,7 @@ import {
   getRuntimeExportName,
   getStructOfCall,
   getStructRegistry,
+  isCellBranded,
 } from './markers.ts';
 import {Messages} from './messages.ts';
 import {
@@ -411,17 +412,19 @@ function setTarget(c: Own, expr: Node | undefined, targetRaw: boolean): void {
 type Target = Type | undefined | null;
 
 // cast: a type assertion's, which may name a struct laid out as the value's and
-// more (a downcast) as well as one laid out as a part of it
+// more (a downcast) as well as one laid out as a part of it. awaited: an async
+// function's result, which the place takes as what it resolves to
 function setTargetType(
   c: Own,
   expr: Node | undefined,
   target: Target,
   cast = false,
+  awaited = false,
 ): void {
   if (!expr || target === undefined) return;
   if (target !== null) {
     checkIntegerTarget(c, expr, target);
-    checkLayoutTarget(c, expr, target, cast);
+    checkLayoutTarget(c, expr, target, cast, awaited);
   }
   setTarget(c, expr, target !== null && isCellType(c, target));
 }
@@ -437,26 +440,27 @@ function checkLayoutTarget(
   expr: Node,
   target: Type,
   cast: boolean,
+  awaited: boolean,
 ): void {
   switch (expr.kind) {
     case K.ParenthesizedExpression:
-      checkLayoutTarget(c, expr.expression, target, cast);
+      checkLayoutTarget(c, expr.expression, target, cast, awaited);
       return;
     case K.ConditionalExpression:
-      checkLayoutTarget(c, expr.whenTrue, target, cast);
-      checkLayoutTarget(c, expr.whenFalse, target, cast);
+      checkLayoutTarget(c, expr.whenTrue, target, cast, awaited);
+      checkLayoutTarget(c, expr.whenFalse, target, cast, awaited);
       return;
     case K.BinaryExpression:
       switch (expr.operatorToken.kind) {
         case K.AmpersandAmpersandToken:
           // a struct is truthy: a struct on the left is never the result
-          checkLayoutTarget(c, expr.right, target, cast);
+          checkLayoutTarget(c, expr.right, target, cast, awaited);
           return;
         case K.BarBarToken:
         case K.QuestionQuestionToken: {
           // the right is the result only if the left may be falsy (||), or
           // null or undefined (??): not after a struct, which is neither
-          checkLayoutTarget(c, expr.left, target, cast);
+          checkLayoutTarget(c, expr.left, target, cast, awaited);
           const left = c.host.typeOf(expr.left);
           const members =
             left.flags & TypeFlags.Union ? c.host.memberTypes(left) : [left];
@@ -484,23 +488,21 @@ function checkLayoutTarget(
                         TypeFlags.InstantiablePrimitive)
                     ),
                 );
-          if (passes) checkLayoutTarget(c, expr.right, target, cast);
+          if (passes) checkLayoutTarget(c, expr.right, target, cast, awaited);
           return;
         }
         case K.CommaToken:
-          checkLayoutTarget(c, expr.right, target, cast);
+          checkLayoutTarget(c, expr.right, target, cast, awaited);
           return;
       }
   }
   if (!isExpression(expr)) return;
-  const source = c.host.typeOf(expr);
+  const value = c.host.typeOf(expr);
+  const source = awaited ? c.host.awaitedType(value) : value;
   // an ordinary object, which TypeScript takes for a struct by its members:
   // the place holds an address, which the runtime cannot unbox the object to
-  const structs = isCellType(c, target) ? structsOf(c, target) : [];
-  if (
-    structs.length > 0 &&
-    nonNullishMembers(c, source).some(m => isOrdinaryObjectType(c, m))
-  ) {
+  const structs = structMembersOf(c, target);
+  if (structs.length > 0 && ordinaryMemberOf(c, source)) {
     c.error(
       expr,
       Messages.NotAStruct,
@@ -523,16 +525,32 @@ function checkLayoutTarget(
 
 // Reports whether a value of type t is an ordinary object: of an object type
 // with members, or an intersection of them (an object literal's, a class's),
-// that is not a shared struct or a SharedArray. Not `{}` , which any value
-// goes through, as it goes through `unknown` , `any` or a type parameter: a
-// handle may be one.
+// that is not a shared struct or a SharedArray, nor a cell (the runtime's
+// `Cell` , a handle's type). Not `{}` , which any value goes through, as it
+// goes through `unknown` , `any` or a type parameter: a handle may be one.
 function isOrdinaryObjectType(c: Own, t: Type): boolean {
   const parts = t.flags & TypeFlags.Intersection ? c.host.memberTypes(t) : [t];
   return (
     parts.every(p => !!(p.flags & TypeFlags.Object)) &&
     !isCellType(c, t) &&
+    !isCellBranded(c, t) &&
     c.host.checker.getPropertiesOfType(t as any).length > 0
   );
+}
+
+// The member of t, other than null and undefined, that is an ordinary object,
+// if any.
+function ordinaryMemberOf(c: Own, t: Type): Type | undefined {
+  return nonNullishMembers(c, t).find(m => isOrdinaryObjectType(c, m));
+}
+
+// The shared structs among t's members, if a place of type t holds an
+// address: one of structs, or of structs and SharedArrays, possibly null.
+function structMembersOf(c: Own, t: Type): StructInfo[] {
+  if (!isCellType(c, t)) return [];
+  return nonNullishMembers(c, t)
+    .map(m => getStructOfType(c, m))
+    .filter((s): s is StructInfo => s !== undefined);
 }
 
 // The shared structs of t's members other than null, undefined and the
@@ -649,6 +667,13 @@ function layoutMismatch(
     }
     return undefined;
   }
+  // an ordinary object where a struct goes, as what a function returns or is
+  // called with, or what a promise resolves to (as a value of its own, it is
+  // reported by checkLayoutTarget)
+  const ordinary =
+    structMembersOf(c, target).length > 0 && ordinaryMemberOf(c, source);
+  if (ordinary)
+    return `'${c.host.typeToString(ordinary)}' is an ordinary object, not a shared struct`;
   const tos = structsOf(c, target);
   if (tos.length === 0) {
     // a promise: what it resolves to, into what the place's does
@@ -849,16 +874,26 @@ function computeConversion(c: Own, node: Node): void {
       computeBinaryConversion(c, node);
       return;
     case K.ReturnStatement:
-      if (node.expression)
+      if (node.expression) {
+        const fn = getContainingFunction(node);
         setTargetType(
           c,
           node.expression,
-          getReturnTargetType(c, getContainingFunction(node)),
+          getReturnTargetType(c, fn),
+          false,
+          isAsyncFunction(fn),
         );
+      }
       return;
     case K.ArrowFunction:
       if (node.body && node.body.kind !== K.Block)
-        setTargetType(c, node.body, getReturnTargetType(c, node));
+        setTargetType(
+          c,
+          node.body,
+          getReturnTargetType(c, node),
+          false,
+          isAsyncFunction(node),
+        );
       return;
     case K.ArrayLiteralExpression: {
       if (isAssignmentTarget(node)) return;
@@ -1067,6 +1102,14 @@ function computeBinaryConversion(c: Own, node: Node): void {
       setTarget(c, left, false);
       return;
   }
+}
+
+// Reports whether a function is async: what it returns is awaited, into what
+// its promise resolves to.
+function isAsyncFunction(fn: Node | undefined): boolean {
+  return (
+    !!fn && isFunctionLike(fn) && !!(getFunctionFlags(fn) & FunctionFlags.Async)
+  );
 }
 
 // The type a function's returned values flow into: its declared, contextual or

@@ -14,6 +14,8 @@ const api = new API({cwd: checker});
 afterAll(() => api.close());
 
 const lines = (text: string) => text.split('\n').filter(l => l !== '');
+const LAID_OUT =
+  "A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.";
 const YIELDED =
   "A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.";
 
@@ -206,7 +208,8 @@ describe('threads-check, where it differs from the fork', () => {
     // TypeScript takes an object literal, or an instance of a class, for a
     // struct type declared with an interface, by its members, and a cast for
     // any struct type; the place holds an address, which the runtime cannot
-    // make of the object. the fork lets them through
+    // make of the object. so does a function's result, or a promise's, taken
+    // for one. the fork lets them through
     const dir = join(checker, 'test/diverging/ordinary-objects');
     const notAStruct = (
       at: string,
@@ -233,6 +236,15 @@ describe('threads-check, where it differs from the fork', () => {
         notAStruct('27,37', literal, 'Node', 'Node'),
         notAStruct('28,61', literal, 'Node', 'Node'),
         notAStruct('29,64', 'Plain', 'Node | null', 'Node'),
+        notAStruct(
+          '39,65',
+          literal,
+          'Node | SharedArray<number, "other">',
+          'Node',
+        ),
+        notAStruct('42,64', literal, 'Node', 'Node'),
+        `objects.ts(45,33): error TS96033: A value of type '() => ${literal}' cannot be used as '() => Node': what it returns: '${literal}' is an ordinary object, not a shared struct. ${LAID_OUT}`,
+        `objects.ts(47,43): error TS96033: A value of type '() => Promise<${literal}>' cannot be used as '() => Promise<Node>': what it returns: what it resolves to: '${literal}' is an ordinary object, not a shared struct. ${LAID_OUT}`,
       ].sort(),
     );
   });
