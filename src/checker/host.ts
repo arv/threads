@@ -51,6 +51,7 @@ export class Host {
   private readonly aliases = new Map<TsSymbol, TsSymbol | undefined>();
   private readonly typeArgs = new Map<Type, readonly Type[]>();
   private readonly awaited = new Map<Type, Type>();
+  private readonly calls = new Map<Type, readonly Signature[]>();
   private readonly typeStrings = new Map<Type, string>();
   private readonly libraryPaths = new Map<string, boolean>();
   private readonly symbolIds = new Map<TsSymbol, number>();
@@ -250,6 +251,19 @@ export class Host {
       this.libraryPaths.set(path, result);
     }
     return result;
+  }
+
+  // The call signatures of t: a function type's.
+  callSignatures(t: Type): readonly Signature[] {
+    let signatures = this.calls.get(t);
+    if (!signatures) {
+      signatures = this.checker.getSignaturesOfType(
+        t as any,
+        SignatureKind.Call,
+      ) as readonly Signature[];
+      this.calls.set(t, signatures);
+    }
+    return signatures;
   }
 
   // The type an `await` of a value of type t gives: t itself unless it is a

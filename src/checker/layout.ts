@@ -511,6 +511,7 @@ function layoutMismatch(
   source: Type,
   target: Type,
   cast: boolean,
+  depth = 0,
 ): string | undefined {
   // SharedArrays, member by member (a place may be one or null): each array of
   // the value's must have the elements, laid out the same, of one of the
@@ -525,7 +526,14 @@ function layoutMismatch(
     for (const e of sourceElements) {
       const from = getStructOfType(c, e);
       if (!from) continue;
-      const tos = targetElements.map(t => getStructOfType(c, t));
+      // only the place's arrays whose elements these can be: one of numbers
+      // takes no struct, and must not let one through
+      const into = targetElements.filter(t =>
+        c.host.checker.isTypeAssignableTo(e as any, t as any),
+      );
+      const tos = (into.length !== 0 ? into : targetElements).map(t =>
+        getStructOfType(c, t),
+      );
       if (
         !tos.some(
           to =>
@@ -537,10 +545,52 @@ function layoutMismatch(
     return undefined;
   }
   const tos = structsOf(c, target);
-  if (tos.length === 0) return undefined;
+  if (tos.length === 0) return callableMismatch(c, source, target, cast, depth);
   for (const from of structsOf(c, source))
     if (!tos.some(to => fits(from, to) || (cast && fits(to, from))))
       return difference(from, tos[0]!);
+  return undefined;
+}
+
+// A function used as one of another type: what it returns is taken for what
+// the other returns, and what the other is called with is passed as its
+// parameters, so both go as a value into a place (a callback's own, nested a
+// few deep). The value's one signature against each of the place's; an
+// overloaded value is left to TypeScript.
+function callableMismatch(
+  c: Own,
+  source: Type,
+  target: Type,
+  cast: boolean,
+  depth: number,
+): string | undefined {
+  if (
+    depth >= 3 ||
+    !(source.flags & TypeFlags.Object) ||
+    !(target.flags & TypeFlags.Object)
+  )
+    return undefined;
+  const host = c.host;
+  const froms = host.callSignatures(source);
+  if (froms.length !== 1) return undefined;
+  const from = froms[0]!;
+  for (const to of host.callSignatures(target)) {
+    const result = layoutMismatch(
+      c,
+      host.checker.getReturnTypeOfSignature(from as any) as Type,
+      host.checker.getReturnTypeOfSignature(to as any) as Type,
+      cast,
+      depth + 1,
+    );
+    if (result) return `what it returns: ${result}`;
+    for (let i = 0; i < to.parameters.length; i++) {
+      const passed = host.parameterTypeAt(to, i),
+        taken = host.parameterTypeAt(from, i);
+      if (!passed || !taken) break;
+      const why = layoutMismatch(c, passed, taken, cast, depth + 1);
+      if (why) return `what it is called with, parameter ${i + 1}: ${why}`;
+    }
+  }
   return undefined;
 }
 

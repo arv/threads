@@ -47,3 +47,18 @@ const Twice = struct<Twice>({ a: f64, b: f64 });
 const TwiceAgain = struct<Twice>({ b: f64, a: f64 });             // error: the same type, laid out otherwise
 const TwiceSame = struct<Twice>({ a: f64, b: f64 });              // fine: the same layout
 export { Twice, TwiceAgain, TwiceSame };
+// a union of arrays: the elements must be laid out as those of one the value's
+// elements can be, not of any
+export function mixedArrays(): SharedArray<Node> | SharedArray<number> { return new SharedArray(Child, 4); }  // error
+export function mixedNodeArrays(): SharedArray<Node> | SharedArray<number> { return new SharedArray(Node, 4); }  // fine
+// a function used as one of another type: what it returns is taken for what
+// that one returns, and what that one is called with is passed to it
+function makeChild() { return new Child(); }
+function makeLeaf() { return new Leaf(); }
+function readNode(n: Node) { return n.value; }
+export const makeNode: () => Node = makeChild;                          // error
+export const makeNodeOfLeaf: () => Node = makeLeaf;                     // fine: a Leaf lays out a Node's fields first
+export const readChild: (c: Child) => number = readNode;               // error: a Child passed as a Node
+export const readLeaf: (l: Leaf) => number = readNode;                 // fine
+export function take(make: () => Node) { return make(); }
+export function passMaker() { return take(makeChild); }                 // error
