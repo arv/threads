@@ -795,8 +795,8 @@ describe('sizes are checked', () => {
 describe('a wait that throws', () => {
   // Atomics.wait throws where a thread may not block (a page's main thread);
   // the runtime refuses such calls first ($mustNotBlock), but should a wait
-  // throw regardless, the thread is left running, not waiting, and select's
-  // count of waiters balanced. the wait is made to throw here
+  // throw regardless, the thread is left running, not waiting, and a select's
+  // records out of its channels' lists. the wait is made to throw here
   const QS_1 = 2048 + 8 + 5, // thread 1's quiescent state (T_QS of its entry)
     IDLE = 0x7fffffff;
   const atomics = Atomics as unknown as {wait: typeof Atomics.wait};
