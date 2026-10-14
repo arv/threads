@@ -386,15 +386,15 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
         }
         return false;
       case K.YieldExpression:
-        if (!node.asteriskToken) yielded(node.expression);
-        break;
-      case K.ReturnStatement:
+      case K.ReturnStatement: {
+        const flags = getFunctionFlags(getContainingFunction(node));
         if (
-          getFunctionFlags(getContainingFunction(node)) &
-          FunctionFlags.Generator
+          flags & FunctionFlags.Generator &&
+          !(node.kind === K.YieldExpression && node.asteriskToken)
         )
-          yielded(node.expression);
+          yielded(node.expression, !!(flags & FunctionFlags.Async));
         break;
+      }
       case K.ArrayLiteralExpression:
         if (isAssignmentTarget(node)) {
           checkPattern(node);
