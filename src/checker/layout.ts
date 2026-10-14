@@ -315,6 +315,7 @@ function getStructOfUnion(
     name: '',
     fields: first.fields.slice(0, n),
     kinds: first.kinds.slice(0, n),
+    types: first.types.slice(0, n),
   };
   for (const s of structs.slice(1)) {
     for (let k = 0; k < n; k++) {
@@ -322,6 +323,7 @@ function getStructOfUnion(
         info.fields[k] = '';
         info.kinds[k] = '';
       }
+      if (s.types[k] !== info.types[k]) info.types[k] = undefined;
     }
   }
   c.structUnions.set(t, info);
@@ -483,17 +485,44 @@ function structsOf(c: Own, t: Type): StructInfo[] {
   return result;
 }
 
-// whether a value of struct `from` may be used as struct `to`: the same, or
-// `to`'s fields first in `from`, in order and of the same kinds
-const fits = (from: StructInfo, to: StructInfo): boolean =>
-  from === to ||
-  (to.fields.length <= from.fields.length &&
-    to.fields.every(
-      (f, k) => from.fields[k] === f && from.kinds[k] === to.kinds[k],
-    ));
+// The pairs being compared (a struct's reference field may refer to the
+// struct, a function return one): a pair met again is taken to hold, as what
+// it holds by is being compared already.
+interface Seen {
+  structs: Map<StructInfo, Set<StructInfo>>;
+  types: Map<Type, Set<Type>>;
+}
+const newSeen = (): Seen => ({structs: new Map(), types: new Map()});
+function within<K, R>(
+  pairs: Map<K, Set<K>>,
+  a: K,
+  b: K,
+  held: R,
+  compare: () => R,
+): R {
+  let bs = pairs.get(a);
+  if (bs?.has(b)) return held;
+  if (!bs) pairs.set(a, (bs = new Set()));
+  bs.add(b);
+  try {
+    return compare();
+  } finally {
+    bs.delete(b);
+  }
+}
 
-// what is laid out differently, for the message
-function difference(from: StructInfo, to: StructInfo): string {
+// why a value of struct `from` may not be used as struct `to`, or undefined if
+// it may: `to`'s fields first in `from`, in order and of the same kinds, and
+// what each reference field refers to as what `to`'s field is read as, so on
+// down (a cast may go either way there too)
+function unfit(
+  c: Own,
+  from: StructInfo,
+  to: StructInfo,
+  cast: boolean,
+  seen: Seen,
+): string | undefined {
+  if (from === to) return undefined;
   for (let k = 0; k < to.fields.length; k++) {
     const f = to.fields[k]!;
     if (from.fields[k] === f && from.kinds[k] === to.kinds[k]) continue;
@@ -503,7 +532,17 @@ function difference(from: StructInfo, to: StructInfo): string {
       return `field '${f}' is at place ${at} of '${from.name}' and ${k} of '${to.name}'`;
     return `field '${f}' is of another kind in '${from.name}' than in '${to.name}'`;
   }
-  return `'${from.name}' and '${to.name}' are laid out differently`;
+  return within(seen.structs, from, to, undefined, () => {
+    for (let k = 0; k < to.fields.length; k++) {
+      const a = from.types[k],
+        b = to.types[k];
+      if (to.kinds[k] !== 'r' || !a || !b) continue;
+      const why = layoutMismatch(c, a, b, cast, seen);
+      if (why)
+        return `field '${to.fields[k]}' of '${from.name}' refers to what that of '${to.name}' cannot stand for: ${why}`;
+    }
+    return undefined;
+  });
 }
 
 function layoutMismatch(
@@ -511,7 +550,7 @@ function layoutMismatch(
   source: Type,
   target: Type,
   cast: boolean,
-  depth = 0,
+  seen: Seen = newSeen(),
 ): string | undefined {
   // SharedArrays, member by member (a place may be one or null): each array of
   // the value's must have the elements, laid out the same, of one of the
@@ -537,7 +576,9 @@ function layoutMismatch(
       if (
         !tos.some(
           to =>
-            !to || (fits(from, to) && from.fields.length === to.fields.length),
+            !to ||
+            (from.fields.length === to.fields.length &&
+              !unfit(c, from, to, false, seen)),
         )
       )
         return `the elements are '${from.name}' structs, which '${tos[0]!.name}' structs, of another layout or size, cannot stand for`;
@@ -545,53 +586,76 @@ function layoutMismatch(
     return undefined;
   }
   const tos = structsOf(c, target);
-  if (tos.length === 0) return callableMismatch(c, source, target, cast, depth);
-  for (const from of structsOf(c, source))
-    if (!tos.some(to => fits(from, to) || (cast && fits(to, from))))
-      return difference(from, tos[0]!);
+  if (tos.length === 0) return callableMismatch(c, source, target, cast, seen);
+  for (const from of structsOf(c, source)) {
+    let why: string | undefined;
+    for (const to of tos) {
+      const up = unfit(c, from, to, cast, seen);
+      if (!up || (cast && !unfit(c, to, from, cast, seen))) {
+        why = undefined;
+        break;
+      }
+      why ??= up;
+    }
+    if (why) return why;
+  }
   return undefined;
 }
 
 // A function used as one of another type: what it returns is taken for what
 // the other returns, and what the other is called with is passed as its
-// parameters, so both go as a value into a place (a callback's own, nested a
-// few deep). The value's one signature against each of the place's; an
-// overloaded value is left to TypeScript.
+// parameters, so both go as a value into a place (a callback's own, as deep
+// as they go). Each of the place's signatures against the value's one that
+// TypeScript relates to it: the first whose parameters and result are
+// assignable to it, or its only one.
 function callableMismatch(
   c: Own,
   source: Type,
   target: Type,
   cast: boolean,
-  depth: number,
+  seen: Seen,
 ): string | undefined {
-  if (
-    depth >= 3 ||
-    !(source.flags & TypeFlags.Object) ||
-    !(target.flags & TypeFlags.Object)
-  )
+  if (!(source.flags & TypeFlags.Object) || !(target.flags & TypeFlags.Object))
     return undefined;
   const host = c.host;
   const froms = host.callSignatures(source);
-  if (froms.length !== 1) return undefined;
-  const from = froms[0]!;
-  for (const to of host.callSignatures(target)) {
-    const result = layoutMismatch(
-      c,
-      host.checker.getReturnTypeOfSignature(from as any) as Type,
-      host.checker.getReturnTypeOfSignature(to as any) as Type,
-      cast,
-      depth + 1,
-    );
-    if (result) return `what it returns: ${result}`;
-    for (let i = 0; i < to.parameters.length; i++) {
-      const passed = host.parameterTypeAt(to, i),
-        taken = host.parameterTypeAt(from, i);
-      if (!passed || !taken) break;
-      const why = layoutMismatch(c, passed, taken, cast, depth + 1);
-      if (why) return `what it is called with, parameter ${i + 1}: ${why}`;
+  if (froms.length === 0) return undefined;
+  const assignable = (a: Type | undefined, b: Type | undefined) =>
+    !a || !b || host.checker.isTypeAssignableTo(a as any, b as any);
+  const returnOf = (s: (typeof froms)[number]) =>
+    host.checker.getReturnTypeOfSignature(s as any) as Type;
+  return within(seen.types, source, target, undefined, () => {
+    for (const to of host.callSignatures(target)) {
+      const from =
+        froms.length === 1
+          ? froms[0]
+          : froms.find(
+              f =>
+                to.parameters.every((_, i) => {
+                  const passed = host.parameterTypeAt(to, i),
+                    taken = host.parameterTypeAt(f, i);
+                  return assignable(passed, taken) || assignable(taken, passed);
+                }) && assignable(returnOf(f), returnOf(to)),
+            );
+      if (!from) continue;
+      const result = layoutMismatch(
+        c,
+        returnOf(from),
+        returnOf(to),
+        cast,
+        seen,
+      );
+      if (result) return `what it returns: ${result}`;
+      for (let i = 0; i < to.parameters.length; i++) {
+        const passed = host.parameterTypeAt(to, i),
+          taken = host.parameterTypeAt(from, i);
+        if (!passed || !taken) break;
+        const why = layoutMismatch(c, passed, taken, cast, seen);
+        if (why) return `what it is called with, parameter ${i + 1}: ${why}`;
+      }
     }
-  }
-  return undefined;
+    return undefined;
+  });
 }
 
 export function getConversion(c: Own, expr: Node): Conversion {

@@ -16,7 +16,7 @@
 // by name.
 
 import {CellKind} from './context.ts';
-import type {Own, StructInfo} from './context.ts';
+import type {FieldKind, Own, StructInfo} from './context.ts';
 import {ObjectFlags, SymbolFlags, TypeFlags} from './host.ts';
 import type {TsSymbol, Type} from './host.ts';
 import {getCellType, getFieldKind, isFieldType} from './layout.ts';
@@ -269,7 +269,7 @@ export function getStructOfCall(c: Own, call: Node): StructInfo | undefined {
     call.arguments.length >= 1 &&
     skipParentheses(call.arguments[0]).kind === K.ObjectLiteralExpression
   ) {
-    info = {decl: call, name: 'Struct', fields: [], kinds: []};
+    info = {decl: call, name: 'Struct', fields: [], kinds: [], types: []};
     // before its fields: a field may refer to the struct itself
     c.structCalls.set(call, info);
     const parent = walkUpParenthesizedExpressions(call.parent as Node);
@@ -294,14 +294,47 @@ export function getStructOfCall(c: Own, call: Node): StructInfo | undefined {
       }
       const field = name.text as string;
       const symbol = c.host.checker.getPropertyOfType(t, field);
+      const type = symbol && c.host.typeOfSymbol(symbol);
       info.fields.push(field);
+      info.types.push(type);
+      // the kind its marker gives it, which the runtime lays out: the type's
+      // field may be a number for an i32 marker
       info.kinds.push(
-        symbol ? getFieldKind(c, c.host.typeOfSymbol(symbol)) : 'f',
+        markerKind(
+          c,
+          property.kind === K.PropertyAssignment ? property.initializer : name,
+        ) ?? (type ? getFieldKind(c, type) : 'f'),
       );
     }
   }
   c.structCalls.set(call, info);
   return info;
+}
+
+// A struct's fields with their markers, for a message.
+const markerNames: Record<FieldKind, string> = {
+  'f': 'f64',
+  'i': 'i32',
+  'u': 'u8',
+  'b': 'bool',
+  's': 'str',
+  'r': 'ref',
+  'c': 'ref',
+  '': '?',
+};
+const laidOut = (s: StructInfo) =>
+  s.fields.map((f, k) => `${f}: ${markerNames[s.kinds[k]!]}`).join(', ');
+
+// The kind of a field's marker (f64, i32, u8, bool, str, ref<T>()): of what
+// its Field<T> holds, T.
+function markerKind(c: Own, marker: Node): FieldKind | undefined {
+  const host = c.host;
+  const brand = host.checker
+    .getPropertiesOfType(
+      host.checker.getApparentType(host.typeOf(marker) as any) as any,
+    )
+    .find(p => p.name.startsWith('__@fieldBrand@'));
+  return brand ? getFieldKind(c, host.typeOfSymbol(brand)) : undefined;
 }
 
 // Checks a `struct(...)` call: its fields are given in an object literal, by
@@ -352,7 +385,7 @@ export function checkStructCall(c: Own, call: Node): void {
         call,
         Messages.StructRedeclared,
         c.host.typeToString(t),
-        `[${mine.fields.join(', ')}] here, [${theirs.fields.join(', ')}] at its other declaration`,
+        `[${laidOut(mine)}] here, [${laidOut(theirs)}] at its other declaration`,
       );
   }
 }

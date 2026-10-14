@@ -62,3 +62,25 @@ export const readChild: (c: Child) => number = readNode;               // error:
 export const readLeaf: (l: Leaf) => number = readNode;                 // fine
 export function take(make: () => Node) { return make(); }
 export function passMaker() { return take(makeChild); }                 // error
+// a reference field: what it refers to is read as what the other's refers to
+interface ChildBox { item: Child | null }
+const ChildBox = struct<ChildBox>({ item: ref<Child>() });
+interface NodeBox { item: Node | null }
+const NodeBox = struct<NodeBox>({ item: ref<Node>() });
+interface LeafBox { item: Leaf | null }
+const LeafBox = struct<LeafBox>({ item: ref<Leaf>() });
+export function boxes(): NodeBox { return new ChildBox(); }             // error: its item is a Child
+export function leafBoxes(): NodeBox { return new LeafBox(); }          // fine
+// an overloaded function: the overload TypeScript takes for the place's
+declare function overloaded(x: string): Child;
+declare function overloaded(x: number): Node;
+export const fromOverloads: (x: string) => Node = overloaded;          // error
+export const fromOtherOverload: (x: number) => Node = overloaded;      // fine
+// a function deep in functions
+declare function deep(): () => () => () => Child;
+export const deeply: () => () => () => () => Node = deep;              // error
+// one type's struct declared again, its fields the type's, its markers other
+interface Measure { n: number }
+const Measure = struct<Measure>({ n: f64 });                           // error: the type keeps the i32 one below
+const MeasureAgain = struct<Measure>({ n: i32 });
+export { Measure, MeasureAgain, NodeBox };
