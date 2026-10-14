@@ -390,10 +390,17 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
         return false;
       case K.YieldExpression:
       case K.ReturnStatement: {
+        // a delegated yield (`yield* inner()`, or `return yield* inner()`) is
+        // the inner generator's to report
         const flags = getFunctionFlags(getContainingFunction(node));
+        const delegated = (e: Node | undefined) =>
+          e !== undefined &&
+          skipParentheses(e).kind === K.YieldExpression &&
+          !!skipParentheses(e).asteriskToken;
         if (
           flags & FunctionFlags.Generator &&
-          !(node.kind === K.YieldExpression && node.asteriskToken)
+          !delegated(node) &&
+          !(node.kind === K.ReturnStatement && delegated(node.expression))
         )
           yielded(node.expression, !!(flags & FunctionFlags.Async));
         break;

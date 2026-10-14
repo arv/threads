@@ -27,3 +27,9 @@ declare function isNode(u: unknown): u is Node;
 export async function* narrowed(u: unknown) {
   if (isNode(u)) yield u;                    // fine: a handle, boxed, with a count of its own
 }
+export function* outer(): Generator<Node, Node, void> {
+  return yield* gen();                       // fine: delegated, the inner generator's to report
+}
+export function* outerToo(): Generator<Node, Node, void> {
+  return (yield* gen());                     // fine: the same, in parentheses
+}
