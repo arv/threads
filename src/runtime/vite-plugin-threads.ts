@@ -35,7 +35,7 @@ import {stripTypeScriptTypes} from 'node:module';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {promisify} from 'node:util';
-import {searchForWorkspaceRoot, type Plugin} from 'vite';
+import {parseSync, searchForWorkspaceRoot, type Plugin} from 'vite';
 import {
   diagnostics,
   helpersOf,
@@ -116,11 +116,19 @@ export default function threads(options: Options = {}): Plugin {
     outDir: string,
     playgroundDir: string,
     registering: string[] = [];
-  // an import of the runtime, which a module whose functions threads run has
-  // (the fork registers them in such a module only)
-  const importsRuntime = new RegExp(
-    String.raw`\b(?:from|import)\s*\(?\s*(['"])${runtime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\1`,
-  );
+  // whether a module imports the runtime, or exports from it, as a module
+  // whose functions threads run does (the fork registers them in such a
+  // module only): by its statements as Vite's parser reads them, not by
+  // what its comments or strings say
+  const importsRuntime = (file: string, source: string) => {
+    const {module} = parseSync(file, source);
+    return (
+      module.staticImports.some(i => i.moduleRequest.value === runtime) ||
+      module.staticExports.some(e =>
+        e.entries.some(entry => entry.moduleRequest?.value === runtime),
+      )
+    );
+  };
 
   // threads-check, loaded once, with one TypeScript API session for every
   // check: node imports its TypeScript sources directly (type stripping)
@@ -272,6 +280,7 @@ export default function threads(options: Options = {}): Plugin {
   // stop the emit
   function emit() {
     fs.rmSync(outDir, {recursive: true, force: true});
+    let failed: string | null = null;
     try {
       execFileSync(
         tsgo!,
@@ -300,30 +309,33 @@ export default function threads(options: Options = {}): Plugin {
         {stdio: 'pipe'},
       );
     } catch (e: any) {
-      if (!fs.existsSync(outDir))
-        throw new Error(
-          `threads: tsgo emitted nothing for ${project}:\n${e.stdout}${e.stderr}`,
-        );
+      // what it said, or why it did not run
+      failed = `${e.stdout ?? ''}${e.stderr ?? ''}` || String(e.message ?? e);
     }
-    if (!fs.existsSync(outDir))
-      throw new Error(
-        `threads: tsgo emitted nothing for ${project}, and reported no error: a solution-style tsconfig (references, and "files": []) compiles nothing itself. Name the app's (tsconfig.app.json, say) with the plugin's tsconfig option`,
-      );
+    // what it emitted is its JavaScript: an incremental build that stopped
+    // (noEmitOnError) wrote its build info all the same
     registering = [];
+    let js = 0;
     const walk: (dir: string) => void = dir => {
       for (const entry of fs.readdirSync(dir, {withFileTypes: true})) {
         const p = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(p);
-        else if (
-          /\.(?:m?js|jsx)$/.test(entry.name) &&
-          helpersOf(fs.readFileSync(p, 'utf8'), runtime).register
-        ) {
+        else if (/\.(?:m?js|jsx)$/.test(entry.name)) {
+          js++;
+          if (!helpersOf(fs.readFileSync(p, 'utf8'), runtime).register)
+            continue;
           const source = sourceOf(p);
           if (source) registering.push(source);
         }
       }
     };
-    walk(outDir);
+    if (fs.existsSync(outDir)) walk(outDir);
+    if (js === 0)
+      throw new Error(
+        failed
+          ? `threads: tsgo emitted nothing for ${project}:\n${failed}`
+          : `threads: tsgo emitted nothing for ${project}, and reported no error: a solution-style tsconfig (references, and "files": []) compiles nothing itself. Name the app's (tsconfig.app.json, say) with the plugin's tsconfig option`,
+      );
   }
   // what the fork emitted for a source, if it did
   const emitted = (file: string) => {
@@ -436,7 +448,7 @@ export default function threads(options: Options = {}): Plugin {
         if (
           !file.startsWith(RUNTIME_DIR + path.sep) &&
           fs.existsSync(file) &&
-          importsRuntime.test(fs.readFileSync(file, 'utf8'))
+          importsRuntime(file, fs.readFileSync(file, 'utf8'))
         )
           this.error(
             `threads: ${path.relative(root, file)} was not compiled by tsgo -p ${path.relative(root, project)}: add it to the tsconfig's include or files (or mirror the alias in paths)`,

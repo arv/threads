@@ -142,6 +142,20 @@ describe('the Vite plugin', () => {
     expect(await bundle(root)).toMatch(registered('src/app.ts'));
   });
 
+  it('reports the errors that stopped an incremental emit', async () => {
+    // noEmitOnError: the fork writes its build info, and no JavaScript
+    const root = project({
+      'index.html': INDEX,
+      'tsconfig.json': tsconfig({incremental: true, noEmitOnError: true}),
+      'src/main.ts': page('./app.ts'),
+      'src/app.ts': APP,
+      'src/wrong.ts': `export const n: number = 'one';\n`,
+    });
+    await expect(bundle(root)).rejects.toThrow(
+      /tsgo emitted nothing for .*tsconfig\.json:\n.*wrong\.ts\(1,14\): error TS2322/,
+    );
+  });
+
   it('says to name the app’s tsconfig where tsconfig.json only references others', async () => {
     const root = project({
       'index.html': INDEX,
@@ -187,18 +201,33 @@ describe('the Vite plugin', () => {
   });
 
   it('refuses a thread module the fork did not compile', async () => {
-    // lib/ is outside the tsconfig's include, reached through an alias
+    // lib/ is outside the tsconfig's include, reached through an alias; the
+    // import of the runtime has a comment in it
     const root = project({
       'index.html': INDEX,
       'tsconfig.json': tsconfig(),
       'src/main.ts': page('~lib/app.ts'),
-      'lib/app.ts': APP,
+      'lib/app.ts': APP.replace('from ', 'from /* the runtime */ '),
     });
     await expect(
       bundle(root, {}, [{find: /^~lib\//, replacement: `${root}/lib/`}]),
     ).rejects.toThrow(
       "threads: lib/app.ts was not compiled by tsgo -p tsconfig.json: add it to the tsconfig's include or files (or mirror the alias in paths)",
     );
+  });
+
+  it('lets a module the fork did not compile be, where it does not import the runtime', async () => {
+    // an import in a comment, or in a string, is none
+    const root = project({
+      'index.html': INDEX,
+      'tsconfig.json': tsconfig(),
+      'src/main.ts': `import '~lib/note.ts';\n${page('./app.ts')}`,
+      'src/app.ts': APP,
+      'lib/note.ts': `// import {log} from '@arv/threads';\nexport const note: string = "import '@arv/threads'";\n`,
+    });
+    expect(
+      await bundle(root, {}, [{find: /^~lib\//, replacement: `${root}/lib/`}]),
+    ).toMatch(registered('src/app.ts'));
   });
 
   for (const jsx of ['react-jsx', 'preserve'])
