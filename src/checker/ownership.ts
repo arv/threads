@@ -1404,8 +1404,6 @@ class FunctionAnalysis {
     s.assign(result);
   }
 
-  // try/catch/finally is analyzed conservatively: the catch and finally blocks
-  // start from the join of the try block's entry and exit states.
   // a throw may leave from here: to the innermost try's catch, or out through
   // its finally (see TryContext)
   mayThrow(s: State): void {
@@ -1465,25 +1463,16 @@ class FunctionAnalysis {
       if (outer) (outer.catches ? outer.caught : outer.thrown).push(st);
     };
     if (node.finallyBlock) {
-      // the finally once as the try completes normally, which goes on after
-      // it, and once more for the throws and for each place the early exits go
-      // to, which do not: those runs report what they reach, and what of them
-      // is still reachable (a finally may return or throw instead) goes on to
-      // the next try out, or to its target. A try that does not complete
-      // normally (it never ends, or always leaves early) has its finally run
-      // that first time only for what the finally reports: in a try of its
-      // own, which keeps what it would throw, return or jump to
-      const fs = joinStates(entry, after);
-      const nowhere: TryContext | undefined = after.unreachable
-        ? {catches: false, caught: [], thrown: [], exits: []}
-        : undefined;
-      if (nowhere) this.tries.push(nowhere);
-      this.statement(node.finallyBlock, fs);
-      if (nowhere) {
-        this.tries.pop();
-        fs.unreachable = true;
-      }
-      after = fs;
+      // the finally once as the try completes normally, from the end of its
+      // block or its catch, which goes on after it; and once more for the
+      // throws and for each place the early exits go to, which do not: those
+      // runs report what they reach, and what of them is still reachable (a
+      // finally may return or throw instead) goes on to the next try out, or
+      // to its target. None starts from the try's entry, which is no way in
+      // of its own: a throw is recorded where it may come. A try that does
+      // not complete normally (it never ends, or always leaves early) has no
+      // first run, as nothing reaches its end
+      if (!after.unreachable) this.statement(node.finallyBlock, after);
       const run = (early: State[]) => {
         const fe = joinAllStates(early[0]!, early.slice(1));
         this.statement(node.finallyBlock, fe);

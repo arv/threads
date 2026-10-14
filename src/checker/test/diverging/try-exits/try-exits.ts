@@ -99,3 +99,15 @@ export function tagged() {
   const xs = [1];
   try { kept.value = consume(xs); tag`x`; return; } catch { use(xs); }  // error: the tag may throw
 }
+// a try that completes normally goes on after its finally as its block ended,
+// not as it began
+export function sentInTryThenAfter(ch: Channel<number[]>) {
+  const xs = [1];
+  try { ch.send(xs); } finally {}
+  use(xs);                                                    // error: was sent
+}
+export function sentInTryThenFinallyThenAfter(ch: Channel<number[]>) {
+  const xs = [1];
+  try { ch.send(xs); } finally { use(1); }
+  use(xs);                                                    // error: was sent
+}

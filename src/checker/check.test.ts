@@ -134,7 +134,9 @@ describe('threads-check, where it differs from the fork', () => {
   it('sees a send in a try block that leaves early, in its catch and finally', () => {
     // the fork starts a catch or a finally from the try block's entry when the
     // block ends in a return, a throw or a break, forgetting a send in it, and
-    // takes a break or continue to its target before the finally it crosses
+    // takes a break or continue to its target before the finally it crosses.
+    // it goes on after a finally from the block's entry too, so a send in a
+    // block that completes is one that may have been made
     const dir = join(checker, 'test/diverging/try-exits');
     expect(
       check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
@@ -154,6 +156,8 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(61,7): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 59.",
         "try-exits.ts(65,54): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 65.",
         "try-exits.ts(66,7): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 65.",
+        "try-exits.ts(107,7): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 106.",
+        "try-exits.ts(112,7): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 111.",
       ].sort(),
     );
   });
