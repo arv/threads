@@ -292,6 +292,7 @@ describe('threads-check, where it differs from the fork', () => {
         "markers.ts(10,31): error TS96036: Field 'n' is marked i32 but typed 'number': its values are stored as its marker says and checked as its type says, so type it 'i32' or mark it f64.",
         "markers.ts(12,33): error TS96036: Field 'n' is marked f64 but typed 'i32': its values are stored as its marker says and checked as its type says, so type it 'number' or mark it i32.",
         "markers.ts(14,29): error TS96036: Field 'n' is marked u8 but typed 'i32': its values are stored as its marker says and checked as its type says, so type it 'u8' or mark it i32.",
+        "markers.ts(22,39): error TS96036: Field 'n' is marked u8 but typed 'i32': its values are stored as its marker says and checked as its type says, so type it 'u8' or mark it i32.",
       ].sort(),
     );
   });

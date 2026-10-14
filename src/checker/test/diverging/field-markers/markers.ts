@@ -4,7 +4,7 @@
 // into an integer by its type: a fraction into the first would be truncated
 // unseen, one into the second refused though it is kept. The fork does not
 // compare them.
-import { f64, i32, u8, struct, type i32 as I32, type u8 as U8 } from "threads";
+import { f64, i32, u8, struct, type IntegerField, type i32 as I32, type u8 as U8 } from "threads";
 
 interface Typed { n: number }
 const Typed = struct<Typed>({ n: i32 });                       // error: a number marked i32
@@ -16,3 +16,8 @@ interface Agree { n: I32; b: U8; x: number }
 const Agree = struct<Agree>({ n: i32, b: u8, x: f64 });        // fine
 const Inferred = struct({ n: i32, b: u8, x: f64 });            // fine: its type is its markers'
 export { Typed, Marked, Byte, Agree, Inferred };
+// an integer marker is laid out by its kind, whatever its type says it holds
+const byte: IntegerField<I32, "u8"> = u8;
+interface Annotated { n: I32 }
+const Annotated = struct<Annotated>({ n: byte });               // error: an i32 marked u8
+export { Annotated };

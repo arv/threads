@@ -339,15 +339,25 @@ const numberTypeNames: Partial<Record<FieldKind, string>> = {
 const laidOut = (s: StructInfo) =>
   s.fields.map((f, k) => `${f}: ${markerNames[s.kinds[k]!]}`).join(', ');
 
-// The kind of a field's marker (f64, i32, u8, bool, str, ref<T>()): of what
-// its Field<T> holds, T.
+// The kind of a field's marker (f64, i32, u8, bool, str, ref<T>()): an
+// integer's by its IntegerField's `kind` , which the runtime lays it out by
+// (its T may be the other integer: TypeScript takes a u8 for an i32), else of
+// what its Field<T> holds, T.
 function markerKind(c: Own, marker: Node): FieldKind | undefined {
   const host = c.host;
-  const brand = host.checker
-    .getPropertiesOfType(
-      host.checker.getApparentType(host.typeOf(marker) as any) as any,
-    )
-    .find(p => p.name.startsWith('__@fieldBrand@'));
+  const properties = host.checker.getPropertiesOfType(
+    host.checker.getApparentType(host.typeOf(marker) as any) as any,
+  );
+  const kind = properties.find(
+    p =>
+      p.name === 'kind' &&
+      !!p.valueDeclaration &&
+      c.isRuntimePath(p.valueDeclaration.path),
+  );
+  const literal = kind && (host.typeOfSymbol(kind) as any).value;
+  if (literal === 'i32') return 'i';
+  if (literal === 'u8') return 'u';
+  const brand = properties.find(p => p.name.startsWith('__@fieldBrand@'));
   return brand ? getFieldKind(c, host.typeOfSymbol(brand)) : undefined;
 }
 
