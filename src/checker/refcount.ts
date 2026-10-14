@@ -316,7 +316,10 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
     const count = getCount(c, expr);
     let t = host.typeOf(expr);
     if (count === Count.None || count === Count.Null) {
-      if (!async) return;
+      // uncounted and of a cell type already: a handle (an unknown narrowed to
+      // a struct, boxed), with a count of its own, which is safe to yield.
+      // uncounted and of a promise's type: what the promise resolves to counts
+      if (!async || isCellType(c, t)) return;
       t = host.awaitedType(t);
       if (!isCellType(c, t)) return;
     }

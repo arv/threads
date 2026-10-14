@@ -23,3 +23,7 @@ export async function* awaited() {
   yield Promise.resolve(new Node());         // error: yielded, once awaited
   return Promise.resolve(new Node());        // error: a generator's result, once awaited
 }
+declare function isNode(u: unknown): u is Node;
+export async function* narrowed(u: unknown) {
+  if (isNode(u)) yield u;                    // fine: a handle, boxed, with a count of its own
+}
