@@ -33,7 +33,9 @@ const C_AQ_LOCK = 25,
 const C_HOSTS = 29,
   C_DRAFTS = 30; // workers that host async threads, and idle workers asked to
 const C_PEND_MIN = 31; // the oldest epoch on the C_PEND list (see reclaim)
-const C_NUDGED = 38; // a nudge is on its way to the page (see nudgePage)
+// a nudge is on its way to the page (see nudgePage). word 3, after the bump
+// cursor, is free (32 up to the ring is the counters')
+const C_NUDGED = 3;
 // free list heads: C_FREE + n for blocks of n * 8 bytes (n <= 256), C_FREE for
 // larger
 const C_FREE = 1100;
@@ -336,12 +338,13 @@ export const $waitEnd = () => {
   Atomics.store(I32, ME + T_QS, Atomics.load(I32, C_EPOCH));
 };
 // the oldest epoch a running thread may still hold an uncounted address from
-function oldestEpoch() {
+// (`but`: an entry left out)
+function oldestEpoch(but = 0) {
   let min = IDLE;
   const n = Atomics.load(I32, C_NEXT_TID);
   for (let t = 1; t < n; t++) {
     const e = C_THREADS + t * T_ENTRY;
-    if (Atomics.load(I32, e + T_ALIVE) === 1) {
+    if (e !== but && Atomics.load(I32, e + T_ALIVE) === 1) {
       const q = Atomics.load(I32, e + T_QS);
       if (q < min) min = q;
     }
@@ -367,9 +370,15 @@ function reclaim() {
     (Atomics.load(I32, C_PEND_LEN) === 0 ||
       Atomics.load(I32, C_PEND_MIN) >= min)
   ) {
+    // at the reclaim the queue's growth brought on, not at every 64th point:
+    // a loop that defers at every iteration would else nudge at every 64th,
+    // and the page would do little but take nudges. a thread's end, and a
+    // drain, nudge on their own
+    if (pend.length >= pendLimit) {
+      nudgeHosts();
+      if (NUDGE) nudgePage();
+    }
     pendLimit = Math.max(4096, pend.length * 2);
-    nudgeHosts();
-    if (NUDGE) nudgePage();
     return;
   }
   pendLimit = 4096;
@@ -402,9 +411,11 @@ function reclaim() {
     else if (list[k + 1] < 0) retire(-list[k + 1]);
     else deferHandler!(list[k + 1]); // may queue more, in pend
   }
-  // some are held up still, by the page perhaps
-  if (pend.length >= 4096) nudgeHosts();
-  if (NUDGE && pend.length !== 0) nudgePage();
+  // many are held up still, by the page perhaps
+  if (pend.length >= 4096) {
+    nudgeHosts();
+    if (NUDGE) nudgePage();
+  }
 }
 // a host whose async threads all wait passes no quiescent point until one
 // resumes: ring the bells of those behind, so that each passes one (see
@@ -429,15 +440,22 @@ function nudgeHosts() {
 // a hidden page). one nudge at a time, between all workers: until the page
 // has handled it, it will see what is queued meanwhile, as its reclaim comes
 // after it takes the nudge, so none is lost, and none sent twice. a page that
-// waits (stop(), browser.ts) is not nudged. `safe`: nudge a page that is not
-// behind as well, as the shared list holds decrements that are safe now,
-// which no thread but the page is about to free (threadEnd)
-function nudgePage(safe = false) {
+// waits (stop(), browser.ts) is not nudged, nor one that is not behind, unless
+// `anyway`: the shared list holds decrements only the page may hold up, safe
+// already perhaps, which no thread but the page is about to free (threadEnd)
+function nudgePage(anyway = false) {
   const e = C_THREADS + T_ENTRY;
   if (e === ME || Atomics.load(I32, e + T_ALIVE) !== 1) return;
   const q = Atomics.load(I32, e + T_QS);
-  if (q === IDLE || (!safe && q >= Atomics.load(I32, C_EPOCH))) return;
-  if (Atomics.compareExchange(I32, C_NUDGED, 0, 1) === 0) post({type: 'nudge'});
+  if (q === IDLE || (!anyway && q >= Atomics.load(I32, C_EPOCH))) return;
+  if (Atomics.compareExchange(I32, C_NUDGED, 0, 1) !== 0) return;
+  try {
+    post({type: 'nudge'});
+  } catch (err) {
+    // the next one is to go: as it stands, none would (see enqueue)
+    Atomics.store(I32, C_NUDGED, 0);
+    console.warn(`threads: could not nudge the page: ${String(err)}`);
+  }
 }
 // what a page does with a nudge (browser.ts): it passes a quiescent point,
 // and works off what is safe now of the shared list, where a worker put its
@@ -499,6 +517,9 @@ export function $drain() {
     if (before === 0) return;
     reclaim();
     if (pendingCount() === before) {
+      // held up: by hosts, or the page, which are to pass a point
+      nudgeHosts();
+      if (NUDGE) nudgePage();
       if (hosting) return;
       if (CAN_BLOCK) {
         Atomics.store(I32, ME + T_QS, IDLE);
@@ -889,12 +910,17 @@ export function threadEnd() {
   flushCounts();
   // dead first: the page, nudged below, is to see a thread that holds nothing
   Atomics.store(I32, ME + T_ALIVE, 0);
-  // what the shared list holds now is the page's to free: should it hold them
-  // up, or should they be safe already, every other thread's point past them
-  // (the page's too, passed between the reclaim and the hand-off, say). this
-  // worker, idle, will not look again until its next thread
-  if (NUDGE && Atomics.load(I32, C_PEND_LEN) !== 0)
-    nudgePage(Atomics.load(I32, C_PEND_MIN) < oldestEpoch());
+  // what the shared list holds now that every other thread's point is past is
+  // the page's to free: held up by the page alone, or safe already (the page's
+  // point passed between the reclaim and the hand-off, say). this worker,
+  // idle, will not look again until its next thread. not when another thread
+  // holds the list up: the page's point would free nothing
+  if (
+    NUDGE &&
+    Atomics.load(I32, C_PEND_LEN) !== 0 &&
+    Atomics.load(I32, C_PEND_MIN) < oldestEpoch(C_THREADS + T_ENTRY)
+  )
+    nudgePage(true);
 }
 // what a thread's function returns: its result's message address (own.ts), or
 // an async function's promise of one

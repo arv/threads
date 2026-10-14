@@ -267,8 +267,12 @@ describe('reference counts', () => {
     runtime.threadBegin(2);
     const a = own.newStruct(N),
       b = own.newStruct(N);
-    own.store(next(a), b);
-    own.store(next(a), 0); // b's decrement waits for every thread's next point
+    // 2048 decrements of b wait for every thread's next point: the queue's
+    // length at which a reclaim nudges (its growth brought the reclaim on)
+    for (let k = 0; k < 2048; k++) {
+      own.store(next(a), b);
+      own.store(next(a), 0);
+    }
     asPage = () => {
       // the page's point, its word alone: a reclaim of its own here, on the
       // test's one thread, would work off the worker's queue as the page's
