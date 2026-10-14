@@ -34,3 +34,15 @@ export function spreads(ch: Channel<Node>, m: SharedMap<string, Body>, s: Shared
   const cs = [..."abc"];                                                   // fine
   return [all.length, vs.length, ss.length, ks, cs];
 }
+
+declare function returnsNode(): Generator<number, Node, void>;
+export function* delegatedResult() { return yield* returnsNode(); }        // error: its result, a Node, is this one's
+declare const structural: { [Symbol.iterator](): { next(): IteratorResult<Node> } };
+export const fromStructural = () => [...structural];                       // error
+export function rests(ch: Channel<Node>) {
+  const [...taken] = ch;                                                   // error
+  let more: Node[] = [];
+  [...more] = ch;                                                          // error
+  const [...letters] = "abc";                                              // fine
+  return [taken.length, more.length, letters];
+}

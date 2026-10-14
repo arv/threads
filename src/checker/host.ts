@@ -263,33 +263,67 @@ export class Host {
     return awaited;
   }
 
-  // The type an iteration of t gives (for...of, a spread, yield*): the first
-  // type argument of what t's [Symbol.iterator]() returns, or, async, its
-  // [Symbol.asyncIterator]()'s first, else its iterator's awaited. Undefined
-  // for a type that is not iterable.
-  iteratedType(t: Type, async = false): Type | undefined {
+  // The types an iteration of t may give (for...of, a spread, yield*): the
+  // first type argument of what t's [Symbol.iterator]() returns (or, async,
+  // its [Symbol.asyncIterator]()'s, else its iterator's awaited); for an
+  // iterator of a type that names no type argument (a structural one), the
+  // types of the `value` of what its next() returns. Empty for a type that is
+  // not iterable.
+  iteratedTypes(t: Type, async = false): readonly Type[] {
     const properties = this.checker.getPropertiesOfType(
       this.checker.getApparentType(t as any) as any,
     );
-    for (const prefix of async
-      ? ['__@asyncIterator@', '__@iterator@']
-      : ['__@iterator@']) {
-      const p = properties.find(p => p.name.startsWith(prefix));
-      if (!p) continue;
+    const returns = (of: Type, name: string): Type[] => {
+      const result: Type[] = [];
+      const p = this.checker
+        .getPropertiesOfType(this.checker.getApparentType(of as any) as any)
+        .find(p => p.name === name || p.name.startsWith(name));
+      if (!p) return result;
       for (const signature of this.checker.getSignaturesOfType(
         this.typeOfSymbol(p) as any,
         SignatureKind.Call,
-      )) {
-        const args = this.typeArguments(
-          this.checker.getReturnTypeOfSignature(signature) as Type,
-        );
-        if (args.length === 0) continue;
-        return async && prefix === '__@iterator@'
-          ? this.awaitedType(args[0]!)
-          : args[0];
+      ))
+        result.push(this.checker.getReturnTypeOfSignature(signature) as Type);
+      return result;
+    };
+    for (const prefix of async
+      ? ['__@asyncIterator@', '__@iterator@']
+      : ['__@iterator@']) {
+      if (!properties.some(p => p.name.startsWith(prefix))) continue;
+      const awaited = async && prefix === '__@iterator@';
+      const result: Type[] = [];
+      for (const iterator of returns(t, prefix)) {
+        // type arguments only of a reference (Iterator<T>, a generator's)
+        const args =
+          iterator.flags & TypeFlags.Object &&
+          (iterator as {objectFlags?: number}).objectFlags! &
+            ObjectFlags.Reference
+            ? this.typeArguments(iterator)
+            : [];
+        if (args.length !== 0) {
+          result.push(awaited ? this.awaitedType(args[0]!) : args[0]!);
+          continue;
+        }
+        // a structural iterator: what next() returns, its `value`
+        for (let next of returns(iterator, 'next')) {
+          if (async) next = this.awaitedType(next);
+          const members =
+            next.flags & TypeFlags.Union ? this.memberTypes(next) : [next];
+          for (const member of members) {
+            const value = this.checker.getPropertyOfType(
+              this.checker.getApparentType(member as any) as any,
+              'value',
+            );
+            if (value) {
+              const v = this.typeOfSymbol(value);
+              result.push(awaited ? this.awaitedType(v) : v);
+            }
+          }
+        }
       }
+      return result;
     }
-    return undefined;
+    return [];
   }
 
   typeArguments(t: Type): readonly Type[] {

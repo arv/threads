@@ -327,38 +327,35 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
   };
   // A counted value, or a tuple or array holding one (a SharedMap's entries),
   // as an iteration gives it.
-  const countedIn = (t: Type | undefined): Type | undefined =>
-    t === undefined
-      ? undefined
-      : isCellType(c, t)
-        ? t
-        : getCountedElementType(c, t)
-          ? t
-          : undefined;
+  const countedIn = (ts: readonly Type[]): Type | undefined =>
+    ts.find(t => isCellType(c, t) || !!getCountedElementType(c, t));
+  // a call of a generator of this program, whose body is checked: its yields
+  // and its result are reported where they are
+  const programGenerator = (e: Node): boolean => {
+    const target = skipParentheses(e);
+    if (target.kind !== K.CallExpression) return false;
+    const handle = host.signatureOf(target).declaration;
+    const decl =
+      handle && !isAmbientHandle(c, handle)
+        ? host.declarationOf(handle)
+        : undefined;
+    return (
+      !!decl &&
+      !!(getFunctionFlags(decl) & FunctionFlags.Generator) &&
+      !(getFunctionFlags(decl) & FunctionFlags.Invalid)
+    );
+  };
   // `yield* e`: e's own yields are reported where they are when e is a call of
   // a generator of this program (its body is checked); otherwise what e's
   // iteration gives lands in this generator's IteratorResults (a channel's
   // values, a map's, an ambient generator's)
   const delegate = (e: Node, async: boolean): void => {
-    const target = skipParentheses(e);
-    if (target.kind === K.CallExpression) {
-      const handle = host.signatureOf(target).declaration;
-      const decl =
-        handle && !isAmbientHandle(c, handle)
-          ? host.declarationOf(handle)
-          : undefined;
-      if (
-        decl &&
-        getFunctionFlags(decl) & FunctionFlags.Generator &&
-        !(getFunctionFlags(decl) & FunctionFlags.Invalid)
-      )
-        return;
-    }
-    const t = countedIn(host.iteratedType(host.typeOf(e), async));
+    if (programGenerator(e)) return;
+    const t = countedIn(host.iteratedTypes(host.typeOf(e), async));
     if (t) c.error(e, Messages.Yielded, host.typeToString(t));
   };
   const spread = (node: Node): void => {
-    const t = countedIn(host.iteratedType(host.typeOf(node.expression)));
+    const t = countedIn(host.iteratedTypes(host.typeOf(node.expression)));
     if (t)
       c.error(node.expression, Messages.StoredInOrdinary, host.typeToString(t));
   };
@@ -437,20 +434,37 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
         if (node.kind === K.YieldExpression && node.asteriskToken)
           delegate(node.expression, async);
         else if (
-          !delegated(node) &&
-          !(node.kind === K.ReturnStatement && delegated(node.expression))
-        )
-          yielded(node.expression, async);
+          node.kind === K.ReturnStatement &&
+          delegated(node.expression)
+        ) {
+          // `return yield* e`: e's result is this generator's, in its last
+          // IteratorResult; a generator of this program reports its own
+          const star = skipParentheses(node.expression);
+          if (!programGenerator(star.expression)) {
+            const t = countedIn([host.typeOf(star)]);
+            if (t)
+              c.error(node.expression, Messages.Yielded, host.typeToString(t));
+          }
+        } else if (!delegated(node)) yielded(node.expression, async);
         break;
       }
       case K.SpreadElement:
         // [...x] and f(...x): what x's iteration gives goes into an ordinary
-        // array, or an arguments list
+        // array, or an arguments list; [...xs] = x, the rest of a destructuring
+        // assignment, into the array xs is
         if (
           node.parent?.kind === K.ArrayLiteralExpression &&
           isAssignmentTarget(node.parent)
-        )
+        ) {
+          const e = getCountedElementType(c, host.typeOf(node.expression));
+          if (e)
+            c.error(
+              node.expression,
+              Messages.StoredInOrdinary,
+              host.typeToString(e),
+            );
           break;
+        }
         spread(node);
         break;
       case K.ArrayLiteralExpression:
@@ -546,7 +560,20 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
       case K.BindingElement:
         if (node.name?.kind === K.Identifier) {
           const symbol = host.symbolOfDeclaration(node);
-          if (symbol) destructured(node.name, host.typeOfSymbol(symbol));
+          if (symbol) {
+            const t = host.typeOfSymbol(symbol);
+            destructured(node.name, t);
+            // const [...xs] = x: what x's iteration gives, in the array xs is
+            const e = node.dotDotDotToken
+              ? getCountedElementType(c, t)
+              : undefined;
+            if (e)
+              c.error(
+                node.name,
+                Messages.StoredInOrdinary,
+                host.typeToString(e),
+              );
+          }
         }
         break;
       case K.ForOfStatement:
