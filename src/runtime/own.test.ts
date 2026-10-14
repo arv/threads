@@ -343,6 +343,50 @@ describe('reference counts', () => {
     );
   });
 
+  it('a reclaim nudges the page for a shared list it alone holds up', () => {
+    // thread 2 ends while thread 3 is behind: no nudge, as the page's point
+    // would free nothing. thread 3 passes a point and reclaims: the list is
+    // the page's to free now, and the reclaim nudges, its own queue empty
+    const NEXT_TID = 4; // C_NEXT_TID (see the test below)
+    if (Atomics.load(runtime.I32, NEXT_TID) < 4)
+      Atomics.store(runtime.I32, NEXT_TID, 4);
+    const posted: unknown[] = [];
+    const nudges = () =>
+      posted.filter(m => (m as {type: string}).type === 'nudge').length;
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {nudge: true},
+      m => posted.push(m),
+      text => logged.push(text),
+    );
+    runtime.$nudged(); // the page is at a point of its own
+    runtime.threadBegin(3); // a worker in a long thread, at this point
+    runtime.threadBegin(2);
+    const a = own.newStruct(N),
+      b = own.newStruct(N);
+    own.store(next(a), b);
+    own.store(next(a), 0);
+    runtime.threadEnd(); // b's decrement to the shared list, held up by 3
+    expect(nudges()).toBe(0);
+    runtime.threadBegin(3); // thread 3 at a point
+    runtime.$waitBegin(); // its reclaim: the page alone holds the list up
+    expect(nudges()).toBe(1);
+    expect(runtime.I32[b >> 2]).toBe(N.kind);
+    runtime.threadBegin(1);
+    runtime.$nudged();
+    expect(runtime.I32[b >> 2]).toBe(runtime.K_FREE);
+    runtime.threadBegin(3);
+    runtime.threadEnd();
+    runtime.threadBegin(1);
+    own.release(a);
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {},
+      () => {},
+      text => logged.push(text),
+    );
+  });
+
   it('frees, and boxes, a struct whose type another thread declared', () => {
     // its type is not declared here (a worker that never loaded its module):
     // the kind is the address of the layout the declaring thread pinned

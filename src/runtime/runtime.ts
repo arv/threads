@@ -373,11 +373,13 @@ function reclaim() {
     // at the reclaim the queue's growth brought on, not at every 64th point:
     // a loop that defers at every iteration would else nudge at every 64th,
     // and the page would do little but take nudges. a thread's end, and a
-    // drain, nudge on their own
+    // drain, nudge on their own; and the shared list, once the page alone
+    // holds it up, is nudged for from any reclaim
     if (pend.length >= pendLimit) {
       nudgeHosts();
       if (NUDGE) nudgePage();
     }
+    nudgePageForShared();
     pendLimit = Math.max(4096, pend.length * 2);
     return;
   }
@@ -416,6 +418,7 @@ function reclaim() {
     nudgeHosts();
     if (NUDGE) nudgePage();
   }
+  nudgePageForShared();
 }
 // a host whose async threads all wait passes no quiescent point until one
 // resumes: ring the bells of those behind, so that each passes one (see
@@ -456,6 +459,21 @@ function nudgePage(anyway = false) {
     Atomics.store(I32, C_NUDGED, 0);
     console.warn(`threads: could not nudge the page: ${String(err)}`);
   }
+}
+// what the shared list holds that every running thread but the page is past
+// is the page's to free: held up by the page alone, or safe already (the
+// page's point passed between a thread's reclaim and its hand-off, say), and
+// no thread but the page is about to look at it, as the thread that handed
+// it off is gone, and another's reclaim takes only what is safe for all.
+// not when another thread holds the list up: the page's point would free
+// nothing, and that thread's reclaim comes here once it is past
+function nudgePageForShared() {
+  if (
+    NUDGE &&
+    Atomics.load(I32, C_PEND_LEN) !== 0 &&
+    Atomics.load(I32, C_PEND_MIN) < oldestEpoch(C_THREADS + T_ENTRY)
+  )
+    nudgePage(true);
 }
 // what a page does with a nudge (browser.ts): it passes a quiescent point,
 // and works off what is safe now of the shared list, where a worker put its
@@ -910,17 +928,9 @@ export function threadEnd() {
   flushCounts();
   // dead first: the page, nudged below, is to see a thread that holds nothing
   Atomics.store(I32, ME + T_ALIVE, 0);
-  // what the shared list holds now that every other thread's point is past is
-  // the page's to free: held up by the page alone, or safe already (the page's
-  // point passed between the reclaim and the hand-off, say). this worker,
-  // idle, will not look again until its next thread. not when another thread
-  // holds the list up: the page's point would free nothing
-  if (
-    NUDGE &&
-    Atomics.load(I32, C_PEND_LEN) !== 0 &&
-    Atomics.load(I32, C_PEND_MIN) < oldestEpoch(C_THREADS + T_ENTRY)
-  )
-    nudgePage(true);
+  // what the shared list holds now is the page's to free, perhaps: this
+  // worker, idle, will not look again until its next thread
+  nudgePageForShared();
 }
 // what a thread's function returns: its result's message address (own.ts), or
 // an async function's promise of one
