@@ -287,7 +287,7 @@ export function $allocBlock(bytes: number, zero = true) {
 // one goes in address order, merged with the free blocks right before and after
 // it
 function freeLocked(p: number, bytes: number) {
-  I32[p >> 2] = K_FREE;
+  Atomics.store(I32, p >> 2, K_FREE); // atomic, as the kind's every change
   const c = bytes >> 3;
   if (c <= SMALL) {
     I32[(p >> 2) + 1] = I32[C_FREE + c];
@@ -319,7 +319,7 @@ export function $freeBlock(p: number, bytes: number) {
   count(N_BFREE);
   const c = bytes >> 3;
   if (CHECK) F64.fill(POISON, p >> 3, (p + bytes) >> 3);
-  I32[p >> 2] = K_FREE;
+  Atomics.store(I32, p >> 2, K_FREE); // atomic, as the kind's every change
   if (c <= SMALL) {
     const cache = cacheFor(c);
     cache.push(p);
@@ -347,8 +347,17 @@ export function $freeBlock(p: number, bytes: number) {
 // without counting it. each thread's T_QS word is the epoch it saw at its last
 // one, IDLE while it waits; a decrement queued in epoch g is safe once every
 // running thread's word is past g. a thread that ends, or waits, hands what it
-// still has to the shared list (C_PEND), which any thread works off
-const IDLE = 0x7fffffff;
+// still has to the shared list (C_PEND), which any thread works off. the epoch
+// is an i32 that wraps: epochs are even, two are compared by their difference
+// (before), and IDLE, odd, is never one. two epochs compare while they are
+// less than half the i32 range apart; a thread that falls a quarter of it
+// behind (2^29 reclaims without a quiescent point of its own) stalls the
+// epoch (see reclaim), so that no running thread's word is ever taken for a
+// newer one, with the other quarter left for the reclaims of other threads
+// that race the check
+const IDLE = 1;
+const before = (a: number, b: number) => ((a - b) | 0) < 0;
+const STALL = 1 << 30;
 // this thread's queued decrements: epoch, address, epoch, address, ... (an
 // address -p is a block to free, see retire)
 let pend: number[] = [];
@@ -399,15 +408,15 @@ export const $waitEnd = () => {
   if (ME !== 0) Atomics.store(I32, ME + T_QS, Atomics.load(I32, C_EPOCH));
 };
 // the oldest epoch a running thread may still hold an uncounted address from
-// (`but`: an entry left out)
+// (`but`: an entry left out); the epoch itself, with none behind it
 function oldestEpoch(but = 0) {
-  let min = IDLE;
+  let min = Atomics.load(I32, C_EPOCH);
   const n = Atomics.load(I32, C_NEXT_TID);
   for (let t = 1; t < n; t++) {
     const e = C_THREADS + t * T_ENTRY;
     if (e !== but && Atomics.load(I32, e + T_ALIVE) === 1) {
       const q = Atomics.load(I32, e + T_QS);
-      if (q < min) min = q;
+      if (q !== IDLE && before(q, min)) min = q;
     }
   }
   return min;
@@ -419,10 +428,16 @@ function reclaim() {
     pendLimit = 4096;
     return;
   }
-  // so what is queued now is older than every later quiescent point
-  Atomics.add(I32, C_EPOCH, 1);
+  // the oldest epoch another running thread may hold an address from (this
+  // thread is at a point, so its own word is not the bound), then a new epoch,
+  // so that what is queued now is older than every later quiescent point;
+  // unless a thread is a quarter of the range behind (STALL): it would be
+  // taken for a newer one once passed, so the epoch waits for it, and memory
+  // grows meanwhile
+  const e = Atomics.load(I32, C_EPOCH),
+    min = oldestEpoch(ME);
+  if (((e - min) | 0) < STALL) Atomics.add(I32, C_EPOCH, 2);
   Atomics.store(I32, ME + T_QS, Atomics.load(I32, C_EPOCH));
-  const min = oldestEpoch();
   // this thread's queue is in epoch order, and the shared list's oldest epoch
   // is kept: when neither has a decrement that is safe yet, a thread that has
   // yet to pass a quiescent point holds them all up (a page between tasks, a
@@ -431,9 +446,9 @@ function reclaim() {
   // loop a walk of the queue per iteration: nudge the thread instead, and look
   // again once the queue has doubled
   if (
-    (pend.length === 0 || pend[0] >= min) &&
+    (pend.length === 0 || !before(pend[0], min)) &&
     (Atomics.load(I32, C_PEND_LEN) === 0 ||
-      Atomics.load(I32, C_PEND_MIN) >= min)
+      !before(Atomics.load(I32, C_PEND_MIN), min))
   ) {
     // at the reclaim the queue's growth brought on, not at every 64th point:
     // a loop that defers at every iteration would else nudge at every 64th,
@@ -449,7 +464,7 @@ function reclaim() {
       NUDGE &&
       pend.length !== 0 &&
       pend.length === stuckLen &&
-      pend[0] < oldestEpoch(C_THREADS + T_ENTRY)
+      before(pend[0], oldestEpoch(C_THREADS + T_ENTRY))
     )
       nudgePage(true);
     nudgePageForShared();
@@ -467,16 +482,16 @@ function reclaim() {
     const b = I32[C_PEND] >> 2,
       n = I32[C_PEND_LEN];
     let kept = 0,
-      keptMin = IDLE;
+      keptMin = Atomics.load(I32, C_EPOCH);
     for (let k = 0; k < n; k++) {
       const g = I32[b + 2 * k],
         p = I32[b + 2 * k + 1];
-      if (g < min) list.push(g, p);
+      if (before(g, min)) list.push(g, p);
       else {
         I32[b + 2 * kept] = g;
         I32[b + 2 * kept + 1] = p;
         kept++;
-        if (g < keptMin) keptMin = g;
+        if (before(g, keptMin)) keptMin = g;
       }
     }
     Atomics.store(I32, C_PEND_LEN, kept);
@@ -484,7 +499,7 @@ function reclaim() {
     munlock(C_PEND_LOCK);
   }
   for (let k = 0; k < list.length; k += 2) {
-    if (list[k] >= min) pend.push(list[k], list[k + 1]);
+    if (!before(list[k], min)) pend.push(list[k], list[k + 1]);
     else if (list[k + 1] < 0) retire(-list[k + 1]);
     else deferHandler!(list[k + 1]); // may queue more, in pend
   }
@@ -506,7 +521,7 @@ function nudgeHosts() {
     if (
       e !== ME &&
       Atomics.load(I32, e + T_HOST) === 1 &&
-      Atomics.load(I32, e + T_QS) < epoch
+      before(Atomics.load(I32, e + T_QS), epoch)
     )
       ring(e);
   }
@@ -526,7 +541,7 @@ function nudgePage(anyway = false) {
   const e = C_THREADS + T_ENTRY;
   if (e === ME || Atomics.load(I32, e + T_ALIVE) !== 1) return;
   const q = Atomics.load(I32, e + T_QS);
-  if (q === IDLE || (!anyway && q >= Atomics.load(I32, C_EPOCH))) return;
+  if (q === IDLE || (!anyway && !before(q, Atomics.load(I32, C_EPOCH)))) return;
   if (Atomics.compareExchange(I32, C_NUDGED, 0, 1) !== 0) return;
   try {
     post({type: 'nudge'});
@@ -548,7 +563,7 @@ function nudgePageForShared() {
   if (
     NUDGE &&
     Atomics.load(I32, C_PEND_LEN) !== 0 &&
-    Atomics.load(I32, C_PEND_MIN) < oldestEpoch(C_THREADS + T_ENTRY)
+    before(Atomics.load(I32, C_PEND_MIN), oldestEpoch(C_THREADS + T_ENTRY))
   )
     nudgePage(true);
 }
@@ -614,7 +629,7 @@ function handOffPending() {
     for (let k = 0; k < pend.length; k++) I32[b + 2 * n + k] = pend[k];
     // the queue is in epoch order: its first epoch is its oldest. atomic, as
     // reclaim reads it outside the lock
-    if (n === 0 || pend[0] < Atomics.load(I32, C_PEND_MIN))
+    if (n === 0 || before(pend[0], Atomics.load(I32, C_PEND_MIN)))
       Atomics.store(I32, C_PEND_MIN, pend[0]);
     Atomics.store(I32, C_PEND_LEN, want);
     pend = [];
@@ -732,8 +747,10 @@ function known(s: string) {
   const k = strAddr.get(s);
   if (k === undefined) return 0;
   const a = k[0];
-  return I32[a >> 2] === K_STR &&
-    I32[(a >> 2) + 5] === k[1] &&
+  // the kind first, atomically: written last by strAdd, so the serial and the
+  // count read after it are the string's that the block is
+  return Atomics.load(I32, a >> 2) === K_STR &&
+    Atomics.load(I32, (a >> 2) + 5) === k[1] &&
     Atomics.load(I32, (a >> 2) + 1) > 0
     ? a
     : 0;
@@ -813,17 +830,23 @@ function strAdd(t: number, at: number, s: string, h: number, count: number) {
   const ascii = $isAscii(s),
     bytes = STR_HEAD + s.length * (ascii ? 1 : 2),
     a = count >= PIN ? $alloc(bytes) : $allocBlock(bytes, false);
-  I32[a >> 2] = K_STR;
+  // the kind last, atomically: a thread whose cache has a string that died at
+  // this block (known) takes it for that string again while the block says
+  // K_STR, carries that string's serial and has a count, and a recycled block
+  // carries the old serial until the new one is written. so the serial, the
+  // count and the rest come first, and the block is a string once they are
+  // there
   I32[(a >> 2) + 1] = count;
   I32[(a >> 2) + 2] = s.length;
   I32[(a >> 2) + 3] = h;
   I32[(a >> 2) + 4] = ascii ? 1 : 0;
-  I32[(a >> 2) + 5] = Atomics.add(I32, C_STR_SERIAL, 1) + 1;
+  Atomics.store(I32, (a >> 2) + 5, Atomics.add(I32, C_STR_SERIAL, 1) + 1);
   if (ascii)
     for (let k = 0; k < s.length; k++) U8[a + STR_HEAD + k] = s.charCodeAt(k);
   else
     for (let k = 0, u = (a + STR_HEAD) >> 1; k < s.length; k++)
       U16[u + k] = s.charCodeAt(k);
+  Atomics.store(I32, a >> 2, K_STR);
   Atomics.store(I32, (t >> 2) + 4 + (-1 - at), a);
   I32[(t >> 2) + 3]++;
   I32[(t >> 2) + 2]++;
@@ -1037,7 +1060,7 @@ export function initShared(sab: SharedArrayBuffer) {
   i32[C_ALLOC] = table + 16 + cap * 4;
   i32[C_HEAP_END] = sab.byteLength;
   i32[C_NEXT_TID] = 2; // the program's main thread is 1
-  i32[C_EPOCH] = 1;
+  i32[C_EPOCH] = 2; // even: IDLE, 1, is never an epoch
 }
 // opts: check, the runtime's check option; nudge, in a page's pool worker:
 // post the page a nudge when it holds up freeing (see nudgePage)
@@ -1100,6 +1123,19 @@ let beforeTask: ((t: number) => Promise<void>) | null = null;
 export const setBeforeTask: (f: (t: number) => Promise<void>) => void = f => {
   beforeTask = f;
 };
+// what a worker does before a thread, done; or what it threw (a module that
+// does not load, say), which is the thread's error then: were it the worker's,
+// the worker would be gone with a thread taken from the queue, which would
+// never end, and its joiner would wait for good. exported for its test
+export async function $prepare(t: number): Promise<unknown> {
+  if (beforeTask === null) return null;
+  try {
+    await beforeTask(t);
+    return null;
+  } catch (e) {
+    return e ?? new Error('threads: a thread could not be prepared');
+  }
+}
 const eventLoopTurn = () =>
   new Promise<void>(resolve => {
     const ch = new MessageChannel();
@@ -1393,12 +1429,13 @@ async function hostTurn(): Promise<boolean> {
     b = Atomics.load(I32, bell);
   const t = takeAsync();
   if (t !== 0) {
-    if (beforeTask !== null) await beforeTask(t);
+    const failed = await $prepare(t);
     // the pool may have been stopped during the wait: its thread is lost (the
     // thread is not a pool operation: see poolLoop)
     if (!busy()) return false;
     done();
-    runThread(t);
+    if (failed !== null) endThread(t, 0, false, true, failed);
+    else runThread(t);
     $quiescent();
     // resumed threads run between new ones
     if ((++started & 31) === 0) await eventLoopTurn();
@@ -1499,7 +1536,7 @@ export async function poolLoop() {
       done();
       continue;
     }
-    if (beforeTask !== null) await beforeTask(t);
+    const failed = await $prepare(t);
     // the pool may have been stopped during the wait: its thread is lost. the
     // thread itself is not a pool operation: a reset waits for a thread that
     // runs (resetPool, running), and not for one that blocks, which a busy
@@ -1516,7 +1553,10 @@ export async function poolLoop() {
     } finally {
       done();
     }
-    runThread(t, true);
+    // a module that did not load: the thread ends as one that threw, the
+    // joiner told why, and the loop goes on, with the worker
+    if (failed !== null) endThread(t, 0, false, true, failed);
+    else runThread(t, true);
   }
 }
 // a program's main, on the coordinator's main worker (src/worker.ts,
