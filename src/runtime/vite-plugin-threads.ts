@@ -118,17 +118,17 @@ export default function threads(options: Options = {}): Plugin {
     registering: string[] = [];
   // whether a module imports the runtime, or exports from it, as a module
   // whose functions threads run does (the fork registers them in such a
-  // module only): by its statements as Vite's parser reads them, not by
-  // what its comments or strings say
-  const importsRuntime = (file: string, source: string) => {
-    const {module} = parseSync(file, source);
-    return (
-      module.staticImports.some(i => i.moduleRequest.value === runtime) ||
-      module.staticExports.some(e =>
-        e.entries.some(entry => entry.moduleRequest?.value === runtime),
-      )
+  // module only, by any import or export from, for a side effect, of types
+  // only or of nothing): by its declarations as Vite's parser reads them,
+  // not by what its comments or strings say
+  const importsRuntime = (file: string, source: string) =>
+    parseSync(file, source).program.body.some(
+      node =>
+        (node.type === 'ImportDeclaration' ||
+          node.type === 'ExportNamedDeclaration' ||
+          node.type === 'ExportAllDeclaration') &&
+        node.source?.value === runtime,
     );
-  };
   // whether the fork's last compile emitted the project, so that what it did
   // not emit is not the project's
   let emittedProject = false;

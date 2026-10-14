@@ -236,19 +236,31 @@ describe('the Vite plugin', () => {
   });
 
   it('refuses a thread module the fork did not compile', async () => {
-    // lib/ is outside the tsconfig's include, reached through an alias; the
-    // import of the runtime has a comment in it
-    const root = project({
-      'index.html': INDEX,
-      'tsconfig.json': tsconfig(),
-      'src/main.ts': page('~lib/app.ts'),
-      'lib/app.ts': APP.replace('from ', 'from /* the runtime */ '),
-    });
-    await expect(
-      bundle(root, {}, [{find: /^~lib\//, replacement: `${root}/lib/`}]),
-    ).rejects.toThrow(
-      "threads: lib/app.ts was not compiled by tsgo -p tsconfig.json: add it to the tsconfig's include or files (or mirror the alias in paths)",
-    );
+    // lib/ is outside the tsconfig's include, reached through an alias. its
+    // import of the runtime, or export from it, in each form the fork
+    // registers a module's functions for: one with a comment in it, a
+    // side effect's, types only, an empty one, all of it
+    const MAIN = `export function main(n: number): number {\n  return n * 2;\n}\n`;
+    for (const app of [
+      APP.replace('from ', 'from /* the runtime */ '),
+      `import '@arv/threads';\n${MAIN}`,
+      `import type {Shared} from '@arv/threads';\n${MAIN}`,
+      `export {} from '@arv/threads';\n${MAIN}`,
+      `export * as threads from '@arv/threads';\n${MAIN}`,
+    ]) {
+      const root = project({
+        'index.html': INDEX,
+        'tsconfig.json': tsconfig(),
+        'src/main.ts': page('~lib/app.ts'),
+        'lib/app.ts': app,
+      });
+      await expect(
+        bundle(root, {}, [{find: /^~lib\//, replacement: `${root}/lib/`}]),
+        app,
+      ).rejects.toThrow(
+        "threads: lib/app.ts was not compiled by tsgo -p tsconfig.json: add it to the tsconfig's include or files (or mirror the alias in paths)",
+      );
+    }
   });
 
   it('lets a module the fork did not compile be, where it does not import the runtime', async () => {
