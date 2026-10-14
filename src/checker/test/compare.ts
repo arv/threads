@@ -327,9 +327,14 @@ try {
     const extra = actual.filter(l => !expected.includes(l));
     const unexplained = missing.filter(l => !known?.missing?.includes(l));
     // the fork's lines are the expectation; what test/expected lists besides
-    // (the known extra lines) is not extra
+    // (the known extra lines) is not extra, and is required: a line threads-check
+    // is known to report and does not is a regression, not a difference
     const unexplainedExtra = extra.filter(l => !known?.extra?.includes(l));
-    const ok = unexplained.length === 0 && unexplainedExtra.length === 0;
+    const lostExtra = (known?.extra ?? []).filter(l => !actual.includes(l));
+    const ok =
+      unexplained.length === 0 &&
+      unexplainedExtra.length === 0 &&
+      lostExtra.length === 0;
     if (!ok) failures++;
     const timing = fork
       ? `${ms.toFixed(0)} ms (fork ${fork.ms.toFixed(0)} ms)`
@@ -344,6 +349,8 @@ try {
     );
     if (explained) rows.push(`    (${known!.reason})`);
     for (const l of unexplained) rows.push(`    missing: ${l}`);
+    for (const l of lostExtra)
+      rows.push(`    missing (threads-check's own): ${l}`);
     for (const l of unexplainedExtra) rows.push(`    extra:   ${l}`);
   }
 } finally {
