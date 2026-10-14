@@ -721,8 +721,12 @@ describe('strings are collected', () => {
     };
     const load = atomics.load;
     let armed = true;
+    // at the count's load: the kind and the serial were read, the old
+    // string's, and the block is retired and a new string's count written
+    // before the count is read; only the serial read again after it shows
+    // the block is no longer that string's
     atomics.load = (arr, i) => {
-      if (armed && arr === runtime.I32 && i === (a >> 2) + 5) {
+      if (armed && arr === runtime.I32 && i === (a >> 2) + 1) {
         armed = false;
         own.__collect(); // retired
         runtime.I32[(a >> 2) + 1] = 1; // a new string's count, its first word
