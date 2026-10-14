@@ -707,6 +707,90 @@ describe('strings are collected', () => {
     own.__collect();
   });
 
+  it('a cached string is not taken for one its block is becoming', () => {
+    // a thread's cache maps a dead string to its block. as it checks the cache
+    // (kind, serial, count), the block is retired and its reuse begun (the new
+    // count written, the rest not yet): the check must fail, not take the
+    // block, half written, for the dead string
+    const s = 'a string that dies mid-check';
+    const a = runtime.$internRef(s);
+    expect(runtime.$str(a)).toBe(s); // cached here
+    own.release(a); // dead, not yet retired
+    const atomics = Atomics as unknown as {
+      load: (arr: Int32Array, i: number) => number;
+    };
+    const load = atomics.load;
+    let armed = true;
+    // at the count's load: the kind and the serial were read, the old
+    // string's, and the block is retired and a new string's count written
+    // before the count is read; only the serial read again after it shows
+    // the block is no longer that string's
+    atomics.load = (arr, i) => {
+      if (armed && arr === runtime.I32 && i === (a >> 2) + 1) {
+        armed = false;
+        own.__collect(); // retired
+        runtime.I32[(a >> 2) + 1] = 1; // a new string's count, its first word
+      }
+      return load(arr, i);
+    };
+    let b = 0;
+    try {
+      b = runtime.$internRef(s);
+    } finally {
+      atomics.load = load;
+    }
+    expect(armed).toBe(false);
+    expect(runtime.I32[b >> 2]).toBe(9); // K_STR: a string's block, written
+    expect(runtime.$str(b)).toBe(s);
+    expect(runtime.$internFind(s)).toBe(b);
+    own.release(b);
+  });
+
+  it('a cached string is not taken for a block of its serial and another text', () => {
+    // a serial comes round again after 2^32 strings: a block of the cached
+    // serial, kind and length, even of the same hash, is another string if its
+    // text is ("yaczfa" and "glbppa" have one FNV-1a hash)
+    const s = 'yaczfa',
+      other = 'glbppa';
+    const a = runtime.$internRef(s);
+    expect(runtime.$str(a)).toBe(s); // cached here, both ways
+    const U8 = new Uint8Array(runtime.I32.buffer);
+    const at = (i: number) => U8[a + 24 + i]!; // the text after a 24-byte head
+    expect(runtime.I32[(a >> 2) + 4]).not.toBe(0); // ASCII, a byte a char
+    const write = (t: string) => {
+      for (let i = 0; i < t.length; i++) U8[a + 24 + i] = t.charCodeAt(i);
+    };
+    write(other); // as the block reused for other, its serial come round, is
+    let b = 0,
+      read = '';
+    try {
+      expect(String.fromCharCode(...[0, 1, 2, 3, 4, 5].map(at))).toBe(other);
+      read = runtime.$str(a);
+      b = runtime.$internRef(s);
+    } finally {
+      write(s);
+    }
+    expect(read).toBe(other); // the text read, not the cached one
+    expect(b).not.toBe(a); // looked up, not taken from the cache
+    own.release(a);
+    own.release(b);
+  });
+
+  it('no string has serial 0, which a retired block has', () => {
+    // the serial counter is an i32 and wraps: the string made as it reaches 0
+    // takes the next one
+    const SERIAL = 15; // C_STR_SERIAL
+    const before = Atomics.load(runtime.I32, SERIAL);
+    Atomics.store(runtime.I32, SERIAL, -1);
+    try {
+      const a = runtime.$internRef('a string made as the serials wrap');
+      expect(runtime.I32[(a >> 2) + 5]).not.toBe(0);
+      own.release(a);
+    } finally {
+      Atomics.store(runtime.I32, SERIAL, before);
+    }
+  });
+
   it('an address a string left is never that string again', () => {
     for (let i = 0; i < 200; i++) {
       const a = runtime.$internRef(`gone ${i}`);
@@ -814,10 +898,9 @@ describe('a thread alone', () => {
 describe('a wait that throws', () => {
   // Atomics.wait throws where a thread may not block (a page's main thread);
   // the runtime refuses such calls first ($mustNotBlock), but should a wait
-  // throw regardless, the thread is left running, not waiting, and select's
-  // count of waiters balanced. the wait is made to throw here
+  // throw regardless, the thread is left running, not waiting, and a select's
+  // records out of its channels' lists. the wait is made to throw here
   const QS_1 = 2048 + 8 + 5, // thread 1's quiescent state (T_QS of its entry)
-    SELECTING = 24, // C_SELECTING
     IDLE = 1;
   const atomics = Atomics as unknown as {wait: typeof Atomics.wait};
   const throwing = (f: () => void) => {
@@ -839,12 +922,55 @@ describe('a wait that throws', () => {
     runtime.$freeBlock(t, 32);
   });
 
-  it('a select leaves the thread running, and no waiter counted', () => {
+  it('a select leaves the thread running, and no record on its channel', () => {
     const ch = new T.Channel();
-    const selecting = runtime.I32[SELECTING];
     throwing(() => expect(() => T.select(ch)).toThrow(TypeError));
     expect(runtime.I32[QS_1]).not.toBe(IDLE);
-    expect(runtime.I32[SELECTING]).toBe(selecting);
+    expect(runtime.I32[(ch.$cell >> 2) + 11]).toBe(0); // its list of selects
+  });
+});
+
+describe('atomic.wait', () => {
+  // a thread in atomic.wait is quiescent throughout, as in the runtime's own
+  // waits: marked waiting (IDLE) for the wait's length, so that other threads'
+  // frees do not wait for it, and running again after
+  it('marks the thread waiting while it waits', () => {
+    const QS_1 = 2048 + 8 + 5, // thread 1's quiescent state (T_QS of its entry)
+      IDLE = 1;
+    const W = T.struct({n: T.i32}, 'Waited');
+    const w = new W();
+    const atomics = Atomics as unknown as {wait: typeof Atomics.wait};
+    const wait = atomics.wait;
+    let during = -1;
+    atomics.wait = (() => {
+      during = runtime.I32[QS_1];
+      return 'timed-out';
+    }) as typeof Atomics.wait;
+    try {
+      expect(T.atomic.wait(w, 'n', 0, 0)).toBe('timed-out');
+    } finally {
+      atomics.wait = wait;
+    }
+    expect(during).toBe(IDLE);
+    expect(runtime.I32[QS_1]).not.toBe(IDLE);
+  });
+
+  it('leaves the thread running when the wait throws', () => {
+    const QS_1 = 2048 + 8 + 5,
+      IDLE = 1;
+    const W = T.struct({n: T.i32}, 'Waited');
+    const w = new W();
+    const atomics = Atomics as unknown as {wait: typeof Atomics.wait};
+    const wait = atomics.wait;
+    atomics.wait = (() => {
+      throw new TypeError('cannot block here');
+    }) as typeof Atomics.wait;
+    try {
+      expect(() => T.atomic.wait(w, 'n', 0, 0)).toThrow(TypeError);
+    } finally {
+      atomics.wait = wait;
+    }
+    expect(runtime.I32[QS_1]).not.toBe(IDLE);
   });
 });
 
