@@ -158,11 +158,12 @@ let acur = 0,
   aend = 0;
 const heapFullMessage = () =>
   `threads: the shared heap is full (${I32[C_HEAP_END] >> 20} MB)`;
-// a size that is not a positive number (NaN, a negative, more than an i32) is
-// refused: rounded, it would be 0, or wrap, and the bump pointer would stand
-// still or move back, and the next block would overlap this one
+// a size that is not a positive whole number within an i32 (NaN, a negative,
+// a fraction, too large) is refused: rounded, it would be 0, or short, or
+// wrap, and the bump pointer would stand still or move back, and the next
+// block would overlap this one
 const sized = (bytes: number) => {
-  if (!(bytes > 0 && bytes <= 0x7ffffff8))
+  if (!(Number.isInteger(bytes) && bytes > 0 && bytes <= 0x7ffffff8))
     throw new RangeError(`threads: cannot allocate ${bytes} bytes`);
   return (bytes + 7) & ~7;
 };

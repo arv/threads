@@ -651,6 +651,10 @@ describe('sizes are checked', () => {
     expect(() => runtime.$alloc(NaN)).toThrow(RangeError);
     expect(() => runtime.$allocBlock(0)).toThrow(RangeError);
     expect(() => own.sharedFloat64Array(-1)).toThrow(RangeError);
+    // a fraction would round to no bytes, or to fewer than asked
+    expect(() => runtime.$alloc(0.5)).toThrow(/cannot allocate/);
+    expect(() => runtime.$alloc(8.5)).toThrow(/cannot allocate/);
+    expect(() => runtime.$allocBlock(31.9)).toThrow(/cannot allocate/);
   });
   it('the allocator refuses sizes past an i32, and takes the last one short of it', () => {
     // rounded, a size past 0x7ffffff8 would wrap; the largest accepted size is
