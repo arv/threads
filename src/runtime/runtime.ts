@@ -278,7 +278,7 @@ export function $allocBlock(bytes: number, zero = true) {
 // one goes in address order, merged with the free blocks right before and after
 // it
 function freeLocked(p: number, bytes: number) {
-  I32[p >> 2] = K_FREE;
+  Atomics.store(I32, p >> 2, K_FREE); // atomic, as the kind's every change
   const c = bytes >> 3;
   if (c <= SMALL) {
     I32[(p >> 2) + 1] = I32[C_FREE + c];
@@ -310,7 +310,7 @@ export function $freeBlock(p: number, bytes: number) {
   count(N_BFREE);
   const c = bytes >> 3;
   if (CHECK) F64.fill(POISON, p >> 3, (p + bytes) >> 3);
-  I32[p >> 2] = K_FREE;
+  Atomics.store(I32, p >> 2, K_FREE); // atomic, as the kind's every change
   if (c <= SMALL) {
     const cache = cacheFor(c);
     cache.push(p);
