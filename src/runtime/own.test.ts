@@ -641,6 +641,12 @@ describe('sizes are checked', () => {
     ).toThrow(TypeError);
     expect(new T.SharedArray(Number, 0).length).toBe(0);
   });
+  it('takes a struct type whose layout another, later one shares', () => {
+    // the two share a kind, and the later is the kind's class; both are types
+    const A = T.struct({x: T.f64}, 'Twin');
+    T.struct({x: T.f64}, 'Twin');
+    expect(new T.SharedArray(A, 1).length).toBe(1);
+  });
   it('refuses a struct type that is not one declared', () => {
     // an object with a size, but not the type registered for a kind
     expect(

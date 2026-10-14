@@ -173,6 +173,10 @@ type CellClass = {prototype: object} & Partial<StructType>;
 // a cell is a JS object of one of these classes; it crosses as its block's
 // address
 const cellKinds = new Map<number, CellClass>(); // kind -> class
+// every struct type declared on this thread (sharedStruct): two with one
+// layout share a kind, and the later one is the kind's class, but both are
+// types (newSharedArray checks)
+const structTypes = new WeakSet<object>();
 const sharedAddr = new WeakMap<object, number>(); // a shared value -> its blob
 const REVOKED = new Proxy(Object.create(null), {
   get: (_, key) => {
@@ -939,6 +943,7 @@ export function sharedStruct<T = unknown>(
     }),
   );
   cellKinds.set(kind, Struct);
+  structTypes.add(Struct);
   return Struct;
 }
 // the struct type of kind: declared here, or by another thread, whose module
@@ -1039,12 +1044,12 @@ export function newSharedArray(type: StructType | number, length: number) {
     throw new RangeError(
       `own: a SharedArray's length is a whole number, not ${length}`,
     );
-  // a struct type is the one declared for its kind (sharedStruct, structType):
-  // an object of a size and no kind, or of another's, would write a kind into
-  // every element that nothing reads back
+  // a struct type is one sharedStruct declared (structTypes): an object of a
+  // size and no kind, or of another's, would write a kind into every element
+  // that nothing reads back
   if (
     !(size > 0) ||
-    (struct ? cellKinds.get(type.kind) !== type : !elementCodes.has(type))
+    (struct ? !structTypes.has(type) : !elementCodes.has(type))
   )
     throw new TypeError(
       'own: a SharedArray holds numbers, booleans, strings, i32s, u8s or a shared struct',
