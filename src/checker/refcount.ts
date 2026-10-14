@@ -327,10 +327,33 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
   };
   // A counted value, or a tuple or array holding one (a SharedMap's entries),
   // as an iteration gives it.
-  const countedIn = (ts: readonly Type[]): Type | undefined =>
-    ts
-      .flatMap(t => (t.flags & TypeFlags.Union ? host.memberTypes(t) : [t]))
-      .find(t => isCellType(c, t) || !!getCountedElementType(c, t));
+  const countedIn = (ts: readonly Type[]): Type | undefined => {
+    for (const t of ts) {
+      const found = counted(t, new Set());
+      if (found) return found;
+    }
+    return undefined;
+  };
+  // t if it is counted, or holds a counted value in a tuple's or an array's
+  // elements, or the member of a union that is or does
+  const counted = (t: Type, seen: Set<Type>): Type | undefined => {
+    if (seen.has(t)) return undefined;
+    seen.add(t);
+    if (t.flags & TypeFlags.Union) {
+      for (const m of host.memberTypes(t)) {
+        const found = counted(m, seen);
+        if (found) return found;
+      }
+      return undefined;
+    }
+    if (isCellType(c, t) || getCountedElementType(c, t)) return t;
+    if (
+      host.checker.isTupleType(t as any) ||
+      host.checker.isArrayType(t as any)
+    )
+      for (const e of host.typeArguments(t)) if (counted(e, seen)) return t;
+    return undefined;
+  };
   // a call of a generator of this program, whose body is checked: its yields
   // and its result are reported where they are. Not one in the scope of type
   // parameters (its own, an enclosing function's or class's): its body sees
@@ -399,32 +422,40 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
     }
     return [];
   };
-  // the key of a property in a pattern: its name, a computed key's literal
-  // value, or undefined for one known only as it runs
-  const keyOf = (name: Node | undefined): string | undefined => {
-    if (name?.kind !== K.ComputedPropertyName) return name?.text;
+  // the keys a property in a pattern may have: its name, a computed key's
+  // literal value or values (of a union of them), or undefined for one known
+  // only as it runs
+  const keyOf = (name: Node | undefined): string[] | undefined => {
+    if (!name) return [];
+    if (name.kind !== K.ComputedPropertyName) return [name.text];
     const t = host.typeOf(name.expression);
-    return t.flags & (TypeFlags.StringLiteral | TypeFlags.NumberLiteral)
-      ? String((t as {value?: unknown}).value)
-      : undefined;
+    const keys: string[] = [];
+    for (const m of t.flags & TypeFlags.Union ? host.memberTypes(t) : [t]) {
+      if (!(m.flags & (TypeFlags.StringLiteral | TypeFlags.NumberLiteral)))
+        return undefined;
+      keys.push(String((m as {value?: unknown}).value));
+    }
+    return keys;
   };
   // what an element of a pattern takes from the pattern's source: a tuple's
   // element at its place, or what the source's iteration gives; a property's,
   // or the index's, or for a key known only as it runs, any property's
   const placeOf = (element: Node): Type[] => {
     let holder = element.parent as Node;
-    let key: string | number | undefined;
+    let keys: string[] | undefined,
+      at = -1;
     if (holder.kind === K.PropertyAssignment) {
       // `{k: p}`: p is the property's initializer
-      key = keyOf(holder.name);
+      keys = keyOf(holder.name);
       holder = holder.parent as Node;
     } else if (holder.kind === K.ObjectBindingPattern) {
-      key = keyOf(element.propertyName ?? element.name);
+      keys = keyOf(element.propertyName ?? element.name);
     } else if (
       holder.kind === K.ArrayLiteralExpression ||
       holder.kind === K.ArrayBindingPattern
     ) {
-      key = (holder.elements as Node[]).indexOf(element);
+      at = (holder.elements as Node[]).indexOf(element);
+      keys = [String(at)];
     } else {
       return [];
     }
@@ -435,16 +466,18 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
         [IndexKind.String, IndexKind.Number]
           .map(k => host.checker.getIndexTypeOfType(apparent, k) as Type)
           .filter(Boolean);
-      if (key === undefined) {
+      if (keys === undefined) {
         for (const property of host.checker.getPropertiesOfType(apparent))
           result.push(host.typeOfSymbol(property));
         result.push(...indexes());
         continue;
       }
-      const property = host.checker.getPropertyOfType(apparent, String(key));
-      if (property) result.push(host.typeOfSymbol(property));
-      else if (typeof key === 'number') result.push(...host.iteratedTypes(t));
-      else result.push(...indexes());
+      for (const key of keys) {
+        const property = host.checker.getPropertyOfType(apparent, key);
+        if (property) result.push(host.typeOfSymbol(property));
+        else if (at >= 0) result.push(...host.iteratedTypes(t));
+        else result.push(...indexes());
+      }
     }
     return result;
   };

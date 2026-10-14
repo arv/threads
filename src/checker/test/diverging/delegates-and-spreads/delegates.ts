@@ -115,3 +115,16 @@ export function wholeTupleRest() {
   [...all] = mixed;                                                        // error: the Node is in this one
   return all;
 }
+// a computed key of a few literals: those properties only
+declare const three: { a: number[]; b: number[]; c: Iterable<Node> };
+declare const ab: "a" | "b";
+export function literalKeys() {
+  let nums: number[] = [];
+  ({ [ab]: [...nums] } = three);                                           // fine: not c
+  return nums;
+}
+// a union inside an entry: a map's values of a struct or a number
+export function mixedEntries(m: SharedMap<string, Body | number>) {
+  return [...m];                                                           // error: the entries may hold a Body
+}
+export function* mixedEntriesDelegated(m: SharedMap<string, Body | number>) { yield* m; }  // error
