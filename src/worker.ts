@@ -51,5 +51,9 @@ try {
     parentPort!.postMessage({type: 'done'});
   } else await R.poolLoop();
 } catch (e: any) {
-  parentPort!.postMessage({type: 'crash', message: String(e?.stack ?? e)});
+  parentPort!.postMessage({
+    type: 'crash',
+    message: String(e),
+    stack: typeof e?.stack === 'string' ? e.stack : undefined,
+  });
 }

@@ -15,6 +15,7 @@ import {
   resetPool,
   workersComing,
   STOPPED,
+  $failed,
   $nudged,
   $waitBegin,
 } from './runtime.ts';
@@ -79,7 +80,7 @@ export function start({
       if (generation === g)
         add().catch(e => {
           if (generation === g) workersComing(sab, -1);
-          console.error(String(e));
+          console.error(e);
         });
     }
     // the page holds up freeing: between tasks, as now, it holds no uncounted
@@ -87,7 +88,7 @@ export function start({
     // that makes safe
     else if (m.type === 'nudge') $nudged();
     else if (m.type === 'crash')
-      console.error(`threads: a worker crashed: ${m.message}`);
+      console.error($failed(m.message, m.stack, 'threads: a worker crashed: '));
   };
   const add = () =>
     new Promise<void>((resolve, reject) => {
@@ -104,7 +105,9 @@ export function start({
         } else if (m.type === 'crash' && !ready)
           // the worker could not start (the runtime did not load, say): a
           // start that waits for it would wait for good
-          reject(new Error(`threads: a worker failed to start: ${m.message}`));
+          reject(
+            $failed(m.message, m.stack, 'threads: a worker failed to start: '),
+          );
         else onMessage(m);
       };
       w.onerror = e =>

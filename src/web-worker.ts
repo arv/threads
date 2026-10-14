@@ -28,6 +28,10 @@ onmessage = async ({data}) => {
       await R.poolLoop();
     }
   } catch (e: any) {
-    postMessage({type: 'crash', message: String(e?.stack ?? e)});
+    postMessage({
+      type: 'crash',
+      message: String(e),
+      stack: typeof e?.stack === 'string' ? e.stack : undefined,
+    });
   }
 };
