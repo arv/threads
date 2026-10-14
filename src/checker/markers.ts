@@ -233,12 +233,13 @@ const staysWith: Record<string, string> = {
 };
 
 // "Thread" or "Scope" if t is the runtime's, an interface that extends it, or
-// a mapped view of it (Readonly<T>, Partial<T>, Shared<T>), else "".
+// a view of it that keeps its properties (Readonly<T>, Partial<T>, Shared<T>),
+// else "".
 function threadOrScope(c: Own, t: Type, depth = 0): string {
   if (!(t.flags & TypeFlags.Object) || depth > 8) return '';
   if ((t as any).objectFlags & ObjectFlags.Mapped) {
-    const source = mappedSource((t as any).getTemplateType() as Type);
-    return source ? threadOrScope(c, source, depth + 1) : '';
+    const source = viewOf(c, t);
+    return source ? viewed(c, source, depth + 1) : '';
   }
   const symbol = c.host.typeSymbol(t);
   if (!symbol) return '';
@@ -255,6 +256,59 @@ function threadOrScope(c: Own, t: Type, depth = 0): string {
     if (name) return name;
   }
   return '';
+}
+
+// What the source of a view may be at run time, as threadOrScope names it: a
+// type parameter by its constraint, a union or an intersection by a member.
+function viewed(c: Own, t: Type, depth: number): string {
+  if (depth > 8) return '';
+  if (t.flags & TypeFlags.Instantiable) {
+    const constraint = c.host.checker.getBaseConstraintOfType(t as any) as
+      | Type
+      | undefined;
+    return constraint ? viewed(c, constraint, depth + 1) : '';
+  }
+  if (t.flags & (TypeFlags.Union | TypeFlags.Intersection)) {
+    for (const m of c.host.memberTypes(t)) {
+      const name = viewed(c, m, depth + 1);
+      if (name) return name;
+    }
+    return '';
+  }
+  return threadOrScope(c, t, depth);
+}
+
+// The T a mapped type is a view of, keeping T's properties: its template is
+// T[P] (with undefined for an optional property, as Partial<T>'s), or else
+// every property is of the type T's of that name has (Shared<T> of a Thread,
+// whose properties are methods). Not one that makes other properties of T's,
+// which is checked by what it makes.
+function viewOf(c: Own, t: Type): Type | undefined {
+  const host = c.host;
+  const parameter = (t as any).getTypeParameter() as Type;
+  const template = (t as any).getTemplateType() as Type;
+  const exact = (x: Type | undefined) =>
+    x &&
+    x.flags & TypeFlags.IndexedAccess &&
+    (x as any).getIndexType() === parameter
+      ? ((x as any).getObjectType() as Type)
+      : undefined;
+  const defined =
+    template.flags & TypeFlags.Union
+      ? host.memberTypes(template).filter(m => !(m.flags & TypeFlags.Undefined))
+      : [template];
+  const source = defined.length === 1 ? exact(defined[0]) : undefined;
+  if (source) return source;
+  const read = mappedSource(template);
+  if (!read) return undefined;
+  const properties = host.checker.getPropertiesOfType(t as any);
+  return properties.length > 0 &&
+    properties.every(p => {
+      const theirs = host.checker.getPropertyOfType(read as any, p.name);
+      return !!theirs && host.typeOfSymbol(theirs) === host.typeOfSymbol(p);
+    })
+    ? read
+    : undefined;
 }
 
 // The T a mapped type over T reads, by its template: the T of `T[P]` , in a

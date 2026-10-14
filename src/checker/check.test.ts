@@ -268,6 +268,14 @@ describe('threads-check, where it differs from the fork', () => {
         "threads.ts(78,9): error TS96037: A value of type 'Partial<Thread<number>>' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.",
         `threads.ts(84,30): ${thread}`,
         `threads.ts(88,18): ${thread}`,
+        // from the fourth review: views of a constrained type parameter, of an
+        // intersection and Shared<T>'s (and not line 105's, which makes
+        // booleans of a Thread's properties)
+        "threads.ts(96,9): error TS96037: A value of type 'Readonly<T>' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.",
+        "threads.ts(97,9): error TS96037: A value of type 'Readonly<S>' cannot be sent to another thread or shared: it stays on the thread that made it, which spawns on it in its body.",
+        "threads.ts(100,9): error TS96037: A value of type 'Readonly<Thread<number> & { tag: number; }>' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.",
+        "threads.ts(101,9): error TS96037: A value of type 'Partial<Scope & { tag: number; }>' cannot be sent to another thread or shared: it stays on the thread that made it, which spawns on it in its body.",
+        "threads.ts(102,9): error TS96037: A value of type '{ readonly join: () => number; readonly joinAsync: () => Promise<number>; }' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.",
       ].sort(),
     );
   });

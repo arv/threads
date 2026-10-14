@@ -1,6 +1,6 @@
 // A Thread or a Scope stays on the thread that made it: neither is a cell, and the runtime refuses
 // to send or share one, or to store one in a struct's field.
-import { Channel, f64, go, partition, ref, scope, share, SharedMap, SharedSet, spawn, struct, type Scope, type Sending, type Thread } from "threads";
+import { Channel, f64, go, partition, ref, scope, share, SharedMap, SharedSet, spawn, struct, type Scope, type Sending, type Shared, type Thread } from "threads";
 
 function inner(): number { return 1; }
 function joiner(t: Thread<number>): number { return t.join(); }
@@ -86,4 +86,21 @@ export function overloads(m: SharedMap<number, number>, n: SharedMap<string, Thr
 function pair(t: Thread<number>, n?: number): number { return t.join() + (n ?? 0); }
 export function unionSpread(both: Sending<[Thread<number>] | [Thread<number>, number]>) {
   spawn(pair, ...both);                      // error: a thread's argument, in either tuple
+}
+
+// From the fourth review: a mapped view of a constrained type parameter or of an intersection, one
+// of Shared<T>, whose properties are a Thread's own, and a mapped type that makes something else of
+// a Thread's properties, which is checked by what it makes.
+type Flags<T> = { [K in keyof T]: T[K] extends (...args: any[]) => any ? boolean : string };
+export function sourced<T extends Thread<number>, S extends Scope>(t: Sending<Readonly<T>>, s: Sending<Readonly<S>>) {
+  share(t);                                  // error: a Thread, as T's constraint says
+  share(s);                                  // error: a Scope, as S's constraint says
+}
+export function viewsOfMore(t: Sending<Readonly<Thread<number> & { tag: number }>>, s: Sending<Partial<Scope & { tag: number }>>, u: Sending<Shared<Thread<number>>>) {
+  share(t);                                  // error: a Thread, with more
+  share(s);                                  // error: a Scope, with more
+  share(u);                                  // error: a Thread, shared
+}
+export function transformed(flags: Sending<Flags<Thread<number>>>) {
+  share(flags);                              // fine: booleans, made of a Thread's properties
 }
