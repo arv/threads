@@ -91,3 +91,27 @@ export function nestedRests(nodes: Iterable<Node>, pairs: [number, Iterable<Node
   const [n, [...rest]] = pairs;                                            // error
   return [plain, also, more, n, rest];
 }
+// a computed key: a literal's property, or what any key may give
+declare const holder: { [k: string]: Iterable<Node> };
+declare const named: { a: number[]; b: Iterable<Node> };
+declare const key: string;
+export function computedKeys() {
+  let plain: { value: number }[] = [];
+  ({ [key]: [...plain] } = holder);                                        // error
+  const { ["b"]: [...also] }: { b: Iterable<{ value: number }> } = named;  // error
+  let nums: number[] = [];
+  ({ ["a"]: [...nums] } = named);                                          // fine
+  return [plain, also, nums];
+}
+// the rest of a tuple: its elements from the rest's place on
+declare const mixed: [Node, number];
+export function tupleRest() {
+  let others: number[] = [];
+  [, ...others] = mixed;                                                   // fine: the Node is not in the rest
+  return others;
+}
+export function wholeTupleRest() {
+  let all: { value: number }[] = [];
+  [...all] = mixed;                                                        // error: the Node is in this one
+  return all;
+}

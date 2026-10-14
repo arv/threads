@@ -16,7 +16,7 @@
 import type {SourceFile} from 'typescript/ast';
 import {Conversion} from './context.ts';
 import type {CaptureInfo, Own} from './context.ts';
-import {ObjectFlags, TypeFlags} from './host.ts';
+import {IndexKind, ObjectFlags, TypeFlags} from './host.ts';
 import type {NodeHandle, TsSymbol, Type} from './host.ts';
 import {
   getAssignmentTargetType,
@@ -328,7 +328,9 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
   // A counted value, or a tuple or array holding one (a SharedMap's entries),
   // as an iteration gives it.
   const countedIn = (ts: readonly Type[]): Type | undefined =>
-    ts.find(t => isCellType(c, t) || !!getCountedElementType(c, t));
+    ts
+      .flatMap(t => (t.flags & TypeFlags.Union ? host.memberTypes(t) : [t]))
+      .find(t => isCellType(c, t) || !!getCountedElementType(c, t));
   // a call of a generator of this program, whose body is checked: its yields
   // and its result are reported where they are. Not one in the scope of type
   // parameters (its own, an enclosing function's or class's): its body sees
@@ -397,17 +399,27 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
     }
     return [];
   };
+  // the key of a property in a pattern: its name, a computed key's literal
+  // value, or undefined for one known only as it runs
+  const keyOf = (name: Node | undefined): string | undefined => {
+    if (name?.kind !== K.ComputedPropertyName) return name?.text;
+    const t = host.typeOf(name.expression);
+    return t.flags & (TypeFlags.StringLiteral | TypeFlags.NumberLiteral)
+      ? String((t as {value?: unknown}).value)
+      : undefined;
+  };
   // what an element of a pattern takes from the pattern's source: a tuple's
-  // element at its place, or what the source's iteration gives; a property's
+  // element at its place, or what the source's iteration gives; a property's,
+  // or the index's, or for a key known only as it runs, any property's
   const placeOf = (element: Node): Type[] => {
     let holder = element.parent as Node;
     let key: string | number | undefined;
     if (holder.kind === K.PropertyAssignment) {
       // `{k: p}`: p is the property's initializer
-      key = holder.name?.text;
+      key = keyOf(holder.name);
       holder = holder.parent as Node;
     } else if (holder.kind === K.ObjectBindingPattern) {
-      key = (element.propertyName ?? element.name)?.text;
+      key = keyOf(element.propertyName ?? element.name);
     } else if (
       holder.kind === K.ArrayLiteralExpression ||
       holder.kind === K.ArrayBindingPattern
@@ -416,24 +428,48 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
     } else {
       return [];
     }
-    if (key === undefined) return [];
     const result: Type[] = [];
     for (const t of flowsInto(holder)) {
-      const property = host.checker.getPropertyOfType(
-        host.checker.getApparentType(t as any) as any,
-        String(key),
-      );
+      const apparent = host.checker.getApparentType(t as any) as any;
+      const indexes = () =>
+        [IndexKind.String, IndexKind.Number]
+          .map(k => host.checker.getIndexTypeOfType(apparent, k) as Type)
+          .filter(Boolean);
+      if (key === undefined) {
+        for (const property of host.checker.getPropertiesOfType(apparent))
+          result.push(host.typeOfSymbol(property));
+        result.push(...indexes());
+        continue;
+      }
+      const property = host.checker.getPropertyOfType(apparent, String(key));
       if (property) result.push(host.typeOfSymbol(property));
       else if (typeof key === 'number') result.push(...host.iteratedTypes(t));
+      else result.push(...indexes());
     }
     return result;
   };
+  // what an iteration of t gives from place `at` on: a tuple's elements from
+  // there, or all an iteration gives
+  const from = (t: Type, at: number): readonly Type[] =>
+    (t.flags & TypeFlags.Union ? host.memberTypes(t) : [t]).flatMap(m =>
+      host.checker.isTupleType(m as any)
+        ? host.typeArguments(m).slice(at)
+        : host.iteratedTypes(m),
+    );
   // what the rest of an array pattern holds: what the iteration of what flows
-  // into the pattern gives, whatever the rest's own type says (an array of a
-  // wider type), or its own elements
-  const rest = (pattern: Node, target: Type): Type | undefined =>
-    getCountedElementType(c, target) ??
-    countedIn(flowsInto(pattern).flatMap(t => host.iteratedTypes(t)));
+  // into the pattern gives from the rest's place on, whatever the rest's own
+  // type says (an array of a wider type), or its own elements
+  const rest = (
+    pattern: Node,
+    element: Node,
+    target: Type,
+  ): Type | undefined => {
+    const at = (pattern.elements as Node[]).indexOf(element);
+    return (
+      getCountedElementType(c, target) ??
+      countedIn(flowsInto(pattern).flatMap(t => from(t, at)))
+    );
+  };
   const spread = (node: Node): void => {
     const t = countedIn(host.iteratedTypes(host.typeOf(node.expression)));
     if (t)
@@ -536,7 +572,7 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
           node.parent?.kind === K.ArrayLiteralExpression &&
           isAssignmentTarget(node.parent)
         ) {
-          const e = rest(node.parent, host.typeOf(node.expression));
+          const e = rest(node.parent, node, host.typeOf(node.expression));
           if (e)
             c.error(
               node.expression,
@@ -644,7 +680,9 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
             const t = host.typeOfSymbol(symbol);
             destructured(node.name, t);
             // const [...xs] = x: what x's iteration gives, in the array xs is
-            const e = node.dotDotDotToken ? rest(node.parent, t) : undefined;
+            const e = node.dotDotDotToken
+              ? rest(node.parent, node, t)
+              : undefined;
             if (e)
               c.error(
                 node.name,
