@@ -51,6 +51,7 @@ export class Host {
   private readonly aliases = new Map<TsSymbol, TsSymbol | undefined>();
   private readonly typeArgs = new Map<Type, readonly Type[]>();
   private readonly awaited = new Map<Type, Type>();
+  private readonly wellKnown = new Map<string, string | undefined>();
   private readonly typeStrings = new Map<Type, string>();
   private readonly libraryPaths = new Map<string, boolean>();
   private readonly symbolIds = new Map<TsSymbol, number>();
@@ -274,15 +275,12 @@ export class Host {
     const properties = this.checker.getPropertiesOfType(
       this.checker.getApparentType(t as any) as any,
     );
-    // the return types of a method: one of a well-known symbol, by the prefix
-    // of its name, or one named
+    // the return types of the method of that name
     const returns = (of: Type, name: string): Type[] => {
       const result: Type[] = [];
       const p = this.checker
         .getPropertiesOfType(this.checker.getApparentType(of as any) as any)
-        .find(p =>
-          name.startsWith('__@') ? p.name.startsWith(name) : p.name === name,
-        );
+        .find(p => p.name === name);
       if (!p) return result;
       for (const signature of this.checker.getSignaturesOfType(
         this.typeOfSymbol(p) as any,
@@ -291,13 +289,15 @@ export class Host {
         result.push(this.checker.getReturnTypeOfSignature(signature) as Type);
       return result;
     };
-    for (const prefix of async
-      ? ['__@asyncIterator@', '__@iterator@']
-      : ['__@iterator@']) {
-      if (!properties.some(p => p.name.startsWith(prefix))) continue;
-      const awaited = async && prefix === '__@iterator@';
+    const sync = this.wellKnownName('Iterable', '__@iterator@');
+    for (const name of async
+      ? [this.wellKnownName('AsyncIterable', '__@asyncIterator@'), sync]
+      : [sync]) {
+      if (name === undefined || !properties.some(p => p.name === name))
+        continue;
+      const awaited = async && name === sync;
       const result: Type[] = [];
-      for (const iterator of returns(t, prefix)) {
+      for (const iterator of returns(t, name)) {
         for (let next of returns(iterator, 'next')) {
           if (async) next = this.awaitedType(next);
           const members =
@@ -317,6 +317,22 @@ export class Host {
       return result;
     }
     return [];
+  }
+
+  // The name of the property that a well-known symbol (Symbol.iterator,
+  // Symbol.asyncIterator) keys, as the lib's interface of it has it: only
+  // that one, not every name of the prefix, which a unique symbol of the
+  // program's of the same name has too. Undefined if the lib has none.
+  private wellKnownName(iface: string, prefix: string): string | undefined {
+    if (this.wellKnown.has(iface)) return this.wellKnown.get(iface);
+    const symbol = this.checker.resolveName(iface, SymbolFlags.Interface);
+    const name = symbol
+      ? this.checker
+          .getPropertiesOfType(this.checker.getDeclaredTypeOfSymbol(symbol))
+          .find(p => p.name.startsWith(prefix))?.name
+      : undefined;
+    this.wellKnown.set(iface, name);
+    return name;
   }
 
   // Whether t is the literal type true.

@@ -65,3 +65,17 @@ export function* passesNumbers() { yield* pass(1); }                       // fi
 // an async generator awaits its result
 declare function later(): AsyncGenerator<number, Promise<Node>, void>;
 export async function* awaitedResult() { return yield* later(); }          // error
+// a unique symbol of the program's named as a well-known one is not that one
+declare const asyncIterator: unique symbol;
+declare const lookalike: {
+  [asyncIterator](): AsyncIterator<number>;
+  [Symbol.iterator](): Iterator<Node>;
+};
+export async function* viaLookalike() { yield* lookalike; }                // error: what it iterates is the Iterator<Node>
+// the rest of a destructuring, in an array typed wider: what is iterated goes in
+export function widened(ch: Channel<Node>) {
+  let plain: { value: number }[] = [];
+  [...plain] = ch;                                                         // error
+  const [...also]: { value: number }[] = ch;                               // error
+  return [plain, also];
+}

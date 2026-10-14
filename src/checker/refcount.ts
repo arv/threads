@@ -360,6 +360,24 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
     const t = countedIn(host.iteratedTypes(host.typeOf(e), async));
     if (t) c.error(e, Messages.Yielded, host.typeToString(t));
   };
+  // what the rest of an array pattern holds: what the iteration of the
+  // pattern's source gives (`[...xs] = x`, `const [...xs] = x`), whatever xs's
+  // own type says, or for a pattern nested in another, xs's elements
+  const rest = (pattern: Node, target: Type): Type | undefined => {
+    const parent = pattern.parent as Node | undefined;
+    const source =
+      parent?.kind === K.BinaryExpression &&
+      parent.operatorToken.kind === K.EqualsToken &&
+      parent.left === pattern
+        ? (parent.right as Node)
+        : parent?.kind === K.VariableDeclaration && parent.name === pattern
+          ? (parent.initializer as Node | undefined)
+          : undefined;
+    return (
+      getCountedElementType(c, target) ??
+      (source && countedIn(host.iteratedTypes(host.typeOf(source))))
+    );
+  };
   const spread = (node: Node): void => {
     const t = countedIn(host.iteratedTypes(host.typeOf(node.expression)));
     if (t)
@@ -462,7 +480,7 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
           node.parent?.kind === K.ArrayLiteralExpression &&
           isAssignmentTarget(node.parent)
         ) {
-          const e = getCountedElementType(c, host.typeOf(node.expression));
+          const e = rest(node.parent, host.typeOf(node.expression));
           if (e)
             c.error(
               node.expression,
@@ -570,9 +588,7 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
             const t = host.typeOfSymbol(symbol);
             destructured(node.name, t);
             // const [...xs] = x: what x's iteration gives, in the array xs is
-            const e = node.dotDotDotToken
-              ? getCountedElementType(c, t)
-              : undefined;
+            const e = node.dotDotDotToken ? rest(node.parent, t) : undefined;
             if (e)
               c.error(
                 node.name,
