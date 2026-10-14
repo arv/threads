@@ -137,6 +137,10 @@ export const Messages = {
     code: 96037,
     text: "A value of type '{0}' cannot be sent to another thread or shared: it stays on the thread that made it, which {1}.",
   },
+  UnknownMarker: {
+    code: 96038,
+    text: "Field '{0}' is marked with a value whose kind the checker cannot tell: a Field of a number may be an f64, an i32 or a u8. Mark it with one of them, or with a const that holds one.",
+  },
 } as const;
 
 export type Message = (typeof Messages)[keyof typeof Messages];

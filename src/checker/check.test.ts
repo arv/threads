@@ -340,8 +340,9 @@ describe('threads-check, where it differs from the fork', () => {
   it('refuses a number field whose marker and type disagree', () => {
     // TypeScript takes an i32 marker for a number field and an f64 one for an
     // i32 field; the runtime lays the field out by its marker, the checker
-    // checks the integers stored into it by its type. the fork does not
-    // compare them
+    // checks the integers stored into it by its type. a marker typed a Field
+    // of a number is followed to the runtime's own, else refused. the fork
+    // does not compare them
     const dir = join(checker, 'test/diverging/field-markers');
     expect(
       check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
@@ -353,6 +354,8 @@ describe('threads-check, where it differs from the fork', () => {
         "markers.ts(12,33): error TS96036: Field 'n' is marked f64 but typed 'i32': its values are stored as its marker says and checked as its type says, so type it 'number' or mark it i32.",
         "markers.ts(14,29): error TS96036: Field 'n' is marked u8 but typed 'i32': its values are stored as its marker says and checked as its type says, so type it 'u8' or mark it i32.",
         "markers.ts(22,39): error TS96036: Field 'n' is marked u8 but typed 'i32': its values are stored as its marker says and checked as its type says, so type it 'u8' or mark it i32.",
+        "markers.ts(28,33): error TS96036: Field 'n' is marked i32 but typed 'number': its values are stored as its marker says and checked as its type says, so type it 'i32' or mark it f64.",
+        "markers.ts(31,35): error TS96038: Field 'n' is marked with a value whose kind the checker cannot tell: a Field of a number may be an f64, an i32 or a u8. Mark it with one of them, or with a const that holds one.",
       ].sort(),
     );
   });

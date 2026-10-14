@@ -26,6 +26,7 @@ import {
   isPropertyNameLiteral,
   isThisParameter,
   K,
+  NodeFlags,
   skipParentheses,
   walkUpParenthesizedExpressions,
 } from './syntax.ts';
@@ -615,7 +616,7 @@ export function getStructOfCall(c: Own, call: Node): StructInfo | undefined {
         markerKind(
           c,
           property.kind === K.PropertyAssignment ? property.initializer : name,
-        ) ?? (type ? getFieldKind(c, type) : 'f'),
+        ).kind ?? (type ? getFieldKind(c, type) : 'f'),
       );
     }
   }
@@ -643,11 +644,61 @@ const numberTypeNames: Partial<Record<FieldKind, string>> = {
 const laidOut = (s: StructInfo) =>
   s.fields.map((f, k) => `${f}: ${markerNames[s.kinds[k]!]}`).join(', ');
 
-// The kind of a field's marker (f64, i32, u8, bool, str, ref<T>()): an
-// integer's by its IntegerField's `kind` , which the runtime lays it out by
-// (its T may be the other integer: TypeScript takes a u8 for an i32), else of
-// what its Field<T> holds, T.
-function markerKind(c: Own, marker: Node): FieldKind | undefined {
+// The runtime's markers of a value's kind, by the names it exports them by.
+const scalarMarkers: Record<string, FieldKind> = {
+  f64: 'f',
+  i32: 'i',
+  u8: 'u',
+  bool: 'b',
+  str: 's',
+};
+
+// The runtime's marker of a value's kind an expression is, by the name it
+// exports it by: the export itself (through an import alias, or a namespace's
+// member), or a const that holds one; "" when the checker cannot tell.
+function scalarMarkerOf(c: Own, expr: Node, seen = new Set<Node>()): string {
+  while (
+    expr.kind === K.ParenthesizedExpression ||
+    expr.kind === K.AsExpression ||
+    expr.kind === K.SatisfiesExpression ||
+    expr.kind === K.NonNullExpression ||
+    expr.kind === K.TypeAssertionExpression
+  )
+    expr = expr.expression;
+  if (seen.has(expr)) return '';
+  seen.add(expr);
+  let symbol =
+    expr.kind === K.Identifier
+      ? c.host.resolvedSymbol(expr)
+      : expr.kind === K.PropertyAccessExpression
+        ? c.host.symbolAt(expr.name)
+        : undefined;
+  const name = getRuntimeExportName(c, symbol);
+  if (name in scalarMarkers) return name;
+  if (symbol && symbol.flags & SymbolFlags.Alias)
+    symbol = c.host.resolveAlias(symbol);
+  const decl = symbol && c.host.valueDeclaration(symbol);
+  if (
+    decl?.kind === K.VariableDeclaration &&
+    decl.initializer &&
+    (decl.parent as Node).flags & NodeFlags.Const
+  )
+    return scalarMarkerOf(c, decl.initializer, seen);
+  return '';
+}
+
+// The kind of a field's marker (f64, i32, u8, bool, str, ref<T>()), and
+// whether it is known: by the runtime's marker it is, where the checker can
+// follow it there, else by its type: an IntegerField's literal `kind` , which
+// the runtime lays an integer out by, or what its Field<T> holds, T. A
+// number's Field<T> alone does not tell: TypeScript takes an i32 or a u8 for
+// an f64, and one for the other.
+function markerKind(
+  c: Own,
+  marker: Node,
+): {kind: FieldKind | undefined; known: boolean} {
+  const scalar = scalarMarkerOf(c, marker);
+  if (scalar !== '') return {kind: scalarMarkers[scalar], known: true};
   const host = c.host;
   const properties = host.checker.getPropertiesOfType(
     host.checker.getApparentType(host.typeOf(marker) as any) as any,
@@ -659,10 +710,12 @@ function markerKind(c: Own, marker: Node): FieldKind | undefined {
       c.isRuntimePath(p.valueDeclaration.path),
   );
   const literal = kind && (host.typeOfSymbol(kind) as any).value;
-  if (literal === 'i32') return 'i';
-  if (literal === 'u8') return 'u';
+  if (literal === 'i32') return {kind: 'i', known: true};
+  if (literal === 'u8') return {kind: 'u', known: true};
   const brand = properties.find(p => p.name.startsWith('__@fieldBrand@'));
-  return brand ? getFieldKind(c, host.typeOfSymbol(brand)) : undefined;
+  if (!brand) return {kind: undefined, known: true};
+  const held = getFieldKind(c, host.typeOfSymbol(brand));
+  return {kind: held, known: !(held in numberTypeNames)};
 }
 
 // Checks a `struct(...)` call: its fields are given in an object literal, by
@@ -700,12 +753,14 @@ export function checkStructCall(c: Own, call: Node): void {
     // a number's marker lays it out as an f64, an i32 or a u8, which its type
     // must say too: TypeScript takes one for another, and what is stored into
     // an integer is checked by the type
-    const marked = markerKind(
+    const {kind: marked, known} = markerKind(
       c,
       property.kind === K.PropertyAssignment ? property.initializer : name,
     );
     const typed = getFieldKind(c, type);
-    if (
+    if (!known && typed in numberTypeNames)
+      c.error(property, Messages.UnknownMarker, name.text);
+    else if (
       marked !== undefined &&
       marked !== typed &&
       marked in numberTypeNames &&

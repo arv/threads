@@ -4,7 +4,7 @@
 // into an integer by its type: a fraction into the first would be truncated
 // unseen, one into the second refused though it is kept. The fork does not
 // compare them.
-import { f64, i32, u8, struct, type IntegerField, type i32 as I32, type u8 as U8 } from "threads";
+import { f64, i32, u8, struct, type Field, type IntegerField, type i32 as I32, type u8 as U8 } from "threads";
 
 interface Typed { n: number }
 const Typed = struct<Typed>({ n: i32 });                       // error: a number marked i32
@@ -21,3 +21,15 @@ const byte: IntegerField<I32, "u8"> = u8;
 interface Annotated { n: I32 }
 const Annotated = struct<Annotated>({ n: byte });               // error: an i32 marked u8
 export { Annotated };
+// a marker typed a Field of a number: by the runtime's marker it holds, where
+// the checker can follow it there, else of no kind it can tell
+const erased: Field<number> = i32;
+interface Erased { n: number }
+const Erased = struct<Erased>({ n: erased });                  // error: a number marked i32
+declare const someMarker: Field<number>;
+interface Unknown { n: number }
+const Unknown = struct<Unknown>({ n: someMarker });            // error: of no kind it can tell
+const double = f64;
+interface Doubled { n: number }
+const Doubled = struct<Doubled>({ n: double });                // fine: the runtime's f64
+export { Erased, Unknown, Doubled };
