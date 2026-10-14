@@ -232,15 +232,25 @@ const staysWith: Record<string, string> = {
   Scope: 'spawns on it in its body',
 };
 
-// "Thread" or "Scope" if t is the runtime's, else "".
-function threadOrScope(c: Own, t: Type): string {
+// "Thread" or "Scope" if t is the runtime's, or an interface that extends it,
+// else "".
+function threadOrScope(c: Own, t: Type, depth = 0): string {
   if (!(t.flags & TypeFlags.Object)) return '';
   const symbol = c.host.typeSymbol(t);
-  return symbol &&
+  if (!symbol) return '';
+  if (
     Object.hasOwn(staysWith, symbol.name) &&
     getRuntimeExportName(c, symbol) === symbol.name
-    ? symbol.name
-    : '';
+  )
+    return symbol.name;
+  if (!(symbol.flags & SymbolFlags.Interface) || depth > 8) return '';
+  for (const base of c.host.checker.getBaseTypes(
+    (c.host.typeTarget(t) ?? t) as any,
+  ) as readonly Type[]) {
+    const name = threadOrScope(c, base, depth + 1);
+    if (name) return name;
+  }
+  return '';
 }
 
 // A Thread or a Scope of the runtime's in a value of type t, where a message or
@@ -302,7 +312,8 @@ function findStaysHere(c: Own, t: Type, seen: Set<Type>): Type | undefined {
 // to another thread or share, which the runtime refuses: an argument to a
 // `Sending` parameter, which a thread, a goroutine, a channel or a map takes,
 // or share() freezes (partition's but for, which splits an array on its
-// thread), and what an iterable argument gives, for a map's or a set's entries;
+// thread), or for an iterable, what its iteration gives (a map's or a set's
+// entries);
 // and the result of a function argument declared to return `Sending<T>` , a
 // thread's, which moves to the thread that joins it, or a map's computed value.
 export function checkStaysHere(c: Own, call: Node): void {
@@ -360,9 +371,13 @@ export function checkStaysHere(c: Own, call: Node): void {
       return;
     }
     if (!sent) return;
-    if (report(node, t)) return;
-    if (sent.kind === K.TypeReference && sent.typeName.text === 'Iterable')
+    // an iterable's values are taken one by one (a map's or a set's entries):
+    // not the iterable itself
+    if (sent.kind === K.TypeReference && sent.typeName.text === 'Iterable') {
       for (const e of host.iteratedTypes(t)) if (report(node, e)) return;
+      return;
+    }
+    report(node, t);
   };
   // a spread tuple's elements at their places; a spread array, which TypeScript
   // passes to a rest parameter, at the rest

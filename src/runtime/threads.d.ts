@@ -301,7 +301,9 @@ export declare function spawn<A extends unknown[], R>(
 
 /**
  * Spawns threads that cannot outlive the scope, in its body: once the body
- * returns, a spawn throws. Like a Thread, it stays on its thread.
+ * returns, a spawn throws. Its threads are joined with `join()` , or by the
+ * scope as the body returns; `joinAsync()` throws on one. Like a Thread, it
+ * stays on its thread.
  */
 export interface Scope {
   spawn<A extends unknown[], R>(

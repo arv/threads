@@ -55,3 +55,16 @@ export function spreads(s: Scope) {
   s.spawn(...toScope);                       // error: a Scope, spread
   spawn(joiner, ...[spawn(inner)] as const); // error: spread after an argument
 }
+
+// From the second review: an interface that extends a Thread or a Scope, and an iterable that holds a
+// Thread beside what its iteration gives, which is all a set takes.
+interface LocalThread extends Thread<number> { readonly local?: true }
+interface LocalScope extends Scope { readonly local?: true }
+export function inherited(t: Sending<LocalThread>, s: Sending<LocalScope>) {
+  share(t);                                  // error: a Thread, as LocalThread extends one
+  share([s]);                                // error: a Scope, as LocalScope extends one
+}
+export function iteratedOnly() {
+  const values = { thread: spawn(inner), *[Symbol.iterator]() { yield 1; } };
+  return new SharedSet(values);              // fine: only what its iteration gives is shared
+}

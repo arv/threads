@@ -1547,9 +1547,12 @@ export function setModuleLoader(load: ModuleLoader) {
 class Thread<R = unknown> {
   declare t: number;
   declare joined: boolean;
+  // spawned by a scope, which joins it
+  declare scoped: boolean;
   constructor(t: number) {
     this.t = t;
     this.joined = false;
+    this.scoped = false;
   }
   join(): R {
     // first: a host must not block, and the thread goes on, so nothing below
@@ -1569,6 +1572,12 @@ class Thread<R = unknown> {
   }
   // for a page's main thread, and an async function, which must not block
   async joinAsync(): Promise<R> {
+    // a scope's thread: the scope, which joins every thread not joined yet,
+    // would pass by one an async join had started, and leave it running
+    if (this.scoped)
+      throw new TypeError(
+        "own: a scope's thread is joined with join(), or by the scope as its body returns: joinAsync() would let it outlive the scope",
+      );
     if (this.joined)
       throw new TypeError(
         'own: a thread is joined once (its result moves out)',
@@ -1683,6 +1692,7 @@ class Scope {
         'own: a scope spawns in its body: this one has returned, and joined its threads',
       );
     const th = spawn(fn, ...args);
+    th.scoped = true;
     this.threads.push(th);
     return th;
   }

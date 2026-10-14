@@ -257,6 +257,10 @@ describe('threads-check, where it differs from the fork', () => {
         `threads.ts(54,9): ${thread}`,
         `threads.ts(55,14): ${scope}`,
         `threads.ts(56,20): ${thread}`,
+        // from the second review: interfaces that extend a Thread or a Scope
+        // (and not an iterable's own properties, line 69)
+        "threads.ts(64,9): error TS96037: A value of type 'LocalThread' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.",
+        "threads.ts(65,9): error TS96037: A value of type 'LocalScope' cannot be sent to another thread or shared: it stays on the thread that made it, which spawns on it in its body.",
       ].sort(),
     );
   });
