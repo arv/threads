@@ -203,7 +203,7 @@ describe('threads-check, where it differs from the fork', () => {
     // the fork reports too
     const dir = join(checker, 'test/diverging/threads-stay');
     const thread =
-      "error TS96035: A value of type 'Thread<number>' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.";
+      "error TS96037: A value of type 'Thread<number>' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.";
     expect(
       check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
         .map(d => formatDiagnostic(d, dir))
@@ -211,7 +211,7 @@ describe('threads-check, where it differs from the fork', () => {
     ).toEqual(
       [
         `threads.ts(13,17): ${thread}`,
-        "threads.ts(14,18): error TS96035: A value of type 'Scope' cannot be sent to another thread or shared: it stays on the thread that made it, which spawns on it in its body.",
+        "threads.ts(14,18): error TS96037: A value of type 'Scope' cannot be sent to another thread or shared: it stays on the thread that made it, which spawns on it in its body.",
         `threads.ts(15,14): ${thread}`,
         `threads.ts(16,11): ${thread}`,
         `threads.ts(17,14): ${thread}`,

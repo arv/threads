@@ -9,7 +9,7 @@
 //   - a generator's counted parameter (96025), and a `struct(...)` field that
 //     is not a number, a boolean, a string or a reference (96015);
 //   - and, no rule of counting but checked at the same calls, a Thread or a
-//     Scope sent to another thread or shared (96035), which the runtime
+//     Scope sent to another thread or shared (96037), which the runtime
 //     refuses.
 //
 // Only the part of the counting rules that these errors depend on is here:
