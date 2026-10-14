@@ -68,3 +68,22 @@ export function iteratedOnly() {
   const values = { thread: spawn(inner), *[Symbol.iterator]() { yield 1; } };
   return new SharedSet(values);              // fine: only what its iteration gives is shared
 }
+
+// From the third review: a mapped view of a Thread or a Scope, an overloaded callback whose other
+// overload returns a Thread, and a spread of a union of tuples (into a generic rest: TypeScript
+// refuses one into a tuple's, as `m.set(...entry)`, TS2556).
+export function views(t: Sending<Readonly<Thread<number>>>, s: Sending<Readonly<Scope>>, p: Sending<Partial<Thread<number>>>) {
+  share(t);                                  // error: a Thread, read only
+  share(s);                                  // error: a Scope, read only
+  share(p);                                  // error: a Thread, in part
+}
+declare function computed(key: string): Thread<number>;
+declare function computed(key: number): number;
+export function overloads(m: SharedMap<number, number>, n: SharedMap<string, Thread<number>>) {
+  m.getOrInsertComputed(1, computed);        // fine: called with a number, it returns a number
+  n.getOrInsertComputed("t", computed);      // error: called with a string, it returns a Thread
+}
+function pair(t: Thread<number>, n?: number): number { return t.join() + (n ?? 0); }
+export function unionSpread(both: Sending<[Thread<number>] | [Thread<number>, number]>) {
+  spawn(pair, ...both);                      // error: a thread's argument, in either tuple
+}

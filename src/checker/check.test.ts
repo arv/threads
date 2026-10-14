@@ -261,6 +261,13 @@ describe('threads-check, where it differs from the fork', () => {
         // (and not an iterable's own properties, line 69)
         "threads.ts(64,9): error TS96037: A value of type 'LocalThread' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.",
         "threads.ts(65,9): error TS96037: A value of type 'LocalScope' cannot be sent to another thread or shared: it stays on the thread that made it, which spawns on it in its body.",
+        // from the third review: mapped views, the overload a callback is
+        // called by (not line 83's), and a union of tuples spread
+        "threads.ts(76,9): error TS96037: A value of type 'Readonly<Thread<number>>' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.",
+        "threads.ts(77,9): error TS96037: A value of type 'Readonly<Scope>' cannot be sent to another thread or shared: it stays on the thread that made it, which spawns on it in its body.",
+        "threads.ts(78,9): error TS96037: A value of type 'Partial<Thread<number>>' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.",
+        `threads.ts(84,30): ${thread}`,
+        `threads.ts(88,18): ${thread}`,
       ].sort(),
     );
   });

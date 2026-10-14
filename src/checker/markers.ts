@@ -18,7 +18,7 @@
 import {CellKind} from './context.ts';
 import type {FieldKind, Own, StructInfo} from './context.ts';
 import {IndexKind, ObjectFlags, SymbolFlags, TypeFlags} from './host.ts';
-import type {TsSymbol, Type} from './host.ts';
+import type {Signature, TsSymbol, Type} from './host.ts';
 import {getCellType, getFieldKind, isFieldType} from './layout.ts';
 import {Messages} from './messages.ts';
 import {
@@ -232,10 +232,14 @@ const staysWith: Record<string, string> = {
   Scope: 'spawns on it in its body',
 };
 
-// "Thread" or "Scope" if t is the runtime's, or an interface that extends it,
-// else "".
+// "Thread" or "Scope" if t is the runtime's, an interface that extends it, or
+// a mapped view of it (Readonly<T>, Partial<T>, Shared<T>), else "".
 function threadOrScope(c: Own, t: Type, depth = 0): string {
-  if (!(t.flags & TypeFlags.Object)) return '';
+  if (!(t.flags & TypeFlags.Object) || depth > 8) return '';
+  if ((t as any).objectFlags & ObjectFlags.Mapped) {
+    const source = mappedSource((t as any).getTemplateType() as Type);
+    return source ? threadOrScope(c, source, depth + 1) : '';
+  }
   const symbol = c.host.typeSymbol(t);
   if (!symbol) return '';
   if (
@@ -243,7 +247,7 @@ function threadOrScope(c: Own, t: Type, depth = 0): string {
     getRuntimeExportName(c, symbol) === symbol.name
   )
     return symbol.name;
-  if (!(symbol.flags & SymbolFlags.Interface) || depth > 8) return '';
+  if (!(symbol.flags & SymbolFlags.Interface)) return '';
   for (const base of c.host.checker.getBaseTypes(
     (c.host.typeTarget(t) ?? t) as any,
   ) as readonly Type[]) {
@@ -251,6 +255,21 @@ function threadOrScope(c: Own, t: Type, depth = 0): string {
     if (name) return name;
   }
   return '';
+}
+
+// The T a mapped type over T reads, by its template: the T of `T[P]` , in a
+// union (`T[P] | undefined`) or checked by a conditional type (`Shared<T[P]>`).
+function mappedSource(template: Type): Type | undefined {
+  if (template.flags & TypeFlags.IndexedAccess)
+    return (template as any).getObjectType() as Type;
+  if (template.flags & TypeFlags.Conditional)
+    return mappedSource((template as any).getCheckType() as Type);
+  if (template.flags & TypeFlags.Union)
+    for (const m of (template as any).getTypes() as Type[]) {
+      const source = mappedSource(m);
+      if (source) return source;
+    }
+  return undefined;
 }
 
 // A Thread or a Scope of the runtime's in a value of type t, where a message or
@@ -318,7 +337,8 @@ function findStaysHere(c: Own, t: Type, seen: Set<Type>): Type | undefined {
 // thread's, which moves to the thread that joins it, or a map's computed value.
 export function checkStaysHere(c: Own, call: Node): void {
   const host = c.host;
-  const handle = host.signatureOf(call).declaration;
+  const resolved = host.signatureOf(call);
+  const handle = resolved.declaration;
   if (!handle || !c.isRuntimePath(handle.path)) return;
   const decl = host.declarationOf(handle);
   if (
@@ -341,6 +361,17 @@ export function checkStaysHere(c: Own, call: Node): void {
     p => !isThisParameter(p),
   );
   const last = params[params.length - 1];
+  // whether a signature takes the arguments of another's fixed parameters
+  const takes = (signature: Signature, args: Signature): boolean => {
+    const n = args.parameters.length - (args.hasRestParameter ? 1 : 0);
+    for (let i = 0; i < n; i++) {
+      const arg = host.parameterTypeAt(args, i),
+        to = host.parameterTypeAt(signature, i);
+      if (arg && to && !host.checker.isTypeAssignableTo(arg as any, to as any))
+        return false;
+    }
+    return true;
+  };
   // an argument of type t at a position (Infinity: somewhere in the rest)
   const check = (pos: number, t: Type, node: Node): void => {
     const param =
@@ -358,8 +389,18 @@ export function checkStaysHere(c: Own, call: Node): void {
     }
     const declared = sent ?? param.type;
     if (returnsSending(c, declared)) {
+      // what the runtime calls it with, as the call instantiates the
+      // parameter: an overload that does not take it is not called
+      const expected = Number.isFinite(pos)
+        ? host.parameterTypeAt(resolved, pos)
+        : undefined;
+      const called =
+        expected && host.callSignatures(expected).length === 1
+          ? host.callSignatures(expected)[0]
+          : undefined;
       for (const signature of host.callSignatures(t))
         if (
+          (!called || takes(signature, called)) &&
           report(
             node,
             host.awaitedType(
