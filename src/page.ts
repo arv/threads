@@ -5,7 +5,7 @@
 // program by its path in the repository (chrome.ts's server points its imports
 // of the runtime at src/runtime/)
 import {
-  initShared,
+  sharedHeap,
   shutdown,
   counters,
   workersComing,
@@ -31,8 +31,7 @@ const threads = (params.get('threads') ?? '1,2,4,8').split(',').map(Number);
 const pool = Number(params.get('pool') ?? navigator.hardwareConcurrency ?? 8);
 const out = document.getElementById('out')!;
 
-const sab = new SharedArrayBuffer(Number(params.get('heap') ?? 512) << 20);
-initShared(sab);
+const sab = sharedHeap(Number(params.get('heap') ?? 512));
 
 const workers: Worker[] = [];
 let text = '',
