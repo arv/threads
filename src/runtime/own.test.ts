@@ -387,6 +387,46 @@ describe('reference counts', () => {
     );
   });
 
+  it('a reclaim nudges the page for a queue that stops growing', () => {
+    // a thread defers once, and then computes, deferring no more: its queue
+    // never reaches the length at which a reclaim nudges. the second reclaim
+    // that finds the queue as it was, held up by the page alone, nudges
+    const posted: unknown[] = [];
+    const nudges = () =>
+      posted.filter(m => (m as {type: string}).type === 'nudge').length;
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {nudge: true},
+      m => posted.push(m),
+      text => logged.push(text),
+    );
+    runtime.$nudged(); // the page is at a point of its own
+    runtime.threadBegin(2);
+    const a = own.newStruct(N),
+      b = own.newStruct(N);
+    own.store(next(a), b);
+    own.store(next(a), 0); // b's decrement waits for every thread's next point
+    runtime.$waitBegin(); // a reclaim: held up, the queue as new; no nudge
+    expect(nudges()).toBe(0);
+    runtime.$waitEnd();
+    runtime.$waitBegin(); // the queue as it was: a nudge
+    expect(nudges()).toBe(1);
+    expect(runtime.I32[b >> 2]).toBe(N.kind);
+    runtime.threadBegin(1);
+    runtime.$nudged();
+    expect(runtime.I32[b >> 2]).toBe(runtime.K_FREE);
+    runtime.threadBegin(2);
+    runtime.threadEnd();
+    runtime.threadBegin(1);
+    own.release(a);
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {},
+      () => {},
+      text => logged.push(text),
+    );
+  });
+
   it('frees, and boxes, a struct whose type another thread declared', () => {
     // its type is not declared here (a worker that never loaded its module):
     // the kind is the address of the layout the declaring thread pinned

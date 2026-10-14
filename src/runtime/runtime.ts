@@ -317,7 +317,10 @@ let deferHandler: ((p: number) => void) | null = null,
   qsTick = 0,
   // the queue's length at which a quiescent point reclaims: 4096, or twice
   // what a reclaim found held up (see reclaim)
-  pendLimit = 4096;
+  pendLimit = 4096,
+  // the queue's length at the last reclaim that freed nothing; -1 after one
+  // that freed something (see reclaim)
+  stuckLen = -1;
 export const setDeferHandler: (f: (p: number) => void) => void = f => {
   deferHandler = f;
 };
@@ -353,7 +356,10 @@ function oldestEpoch(but = 0) {
 }
 // apply the queued decrements that are safe now (at a quiescent point)
 function reclaim() {
-  if (pend.length === 0 && Atomics.load(I32, C_PEND_LEN) === 0) return;
+  if (pend.length === 0 && Atomics.load(I32, C_PEND_LEN) === 0) {
+    stuckLen = -1;
+    return;
+  }
   // so what is queued now is older than every later quiescent point
   Atomics.add(I32, C_EPOCH, 1);
   Atomics.store(I32, ME + T_QS, Atomics.load(I32, C_EPOCH));
@@ -372,17 +378,27 @@ function reclaim() {
   ) {
     // at the reclaim the queue's growth brought on, not at every 64th point:
     // a loop that defers at every iteration would else nudge at every 64th,
-    // and the page would do little but take nudges. a thread's end, and a
-    // drain, nudge on their own; and the shared list, once the page alone
-    // holds it up, is nudged for from any reclaim
+    // and the page would do little but take nudges. and at a reclaim that
+    // finds the queue as the last one left it, held up by the page alone: a
+    // thread that defers no more would else hold what it deferred until its
+    // end. a thread's end, and a drain, nudge on their own; and the shared
+    // list, once the page alone holds it up, is nudged for from any reclaim
     if (pend.length >= pendLimit) {
       nudgeHosts();
       if (NUDGE) nudgePage();
-    }
+    } else if (
+      NUDGE &&
+      pend.length !== 0 &&
+      pend.length === stuckLen &&
+      pend[0] < oldestEpoch(C_THREADS + T_ENTRY)
+    )
+      nudgePage(true);
     nudgePageForShared();
+    stuckLen = pend.length;
     pendLimit = Math.max(4096, pend.length * 2);
     return;
   }
+  stuckLen = -1;
   pendLimit = 4096;
   const list = pend;
   pend = [];
