@@ -334,4 +334,25 @@ export function checkStructCall(c: Own, call: Node): void {
     if (isFieldType(c, c.host.typeOfSymbol(symbol))) continue;
     c.error(property, Messages.StructField);
   }
+  // another struct(...) for the same type: the registry keeps one, by which
+  // every value of the type is read; one laid out otherwise is refused
+  const registered = getStructRegistry(c).get(t);
+  if (registered !== undefined && registered !== call) {
+    const mine = getStructOfCall(c, call),
+      theirs = getStructOfCall(c, registered);
+    if (
+      mine &&
+      theirs &&
+      (mine.fields.length !== theirs.fields.length ||
+        mine.fields.some(
+          (f, k) => f !== theirs.fields[k] || mine.kinds[k] !== theirs.kinds[k],
+        ))
+    )
+      c.error(
+        call,
+        Messages.StructRedeclared,
+        c.host.typeToString(t),
+        `[${mine.fields.join(', ')}] here, [${theirs.fields.join(', ')}] at its other declaration`,
+      );
+  }
 }

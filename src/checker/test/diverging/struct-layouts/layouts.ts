@@ -39,3 +39,11 @@ export function nullable(): Node | null { return flag ? new Leaf() : null; }  //
 export function leafArrays(): SharedArray<Leaf> { return new SharedArray(Leaf, 4); }  // fine
 export function downcast(n: Node) { return (n as Leaf).depth; }           // fine: a Leaf lays out a Node's fields first
 export function badDowncast(n: Node) { return (n as Child).extra; }       // error: a Child does not
+
+export function andRight(child: Child | null): Node | null { return child && new Node(); }  // fine: the left is never the result
+export function nullableArrays(): SharedArray<Node> | null { return new SharedArray(Child, 4); }  // error
+interface Twice { a: number; b: number }
+const Twice = struct<Twice>({ a: f64, b: f64 });
+const TwiceAgain = struct<Twice>({ b: f64, a: f64 });             // error: the same type, laid out otherwise
+const TwiceSame = struct<Twice>({ a: f64, b: f64 });              // fine: the same layout
+export { Twice, TwiceAgain, TwiceSame };

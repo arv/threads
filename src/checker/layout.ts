@@ -445,6 +445,9 @@ function checkLayoutTarget(
     case K.BinaryExpression:
       switch (expr.operatorToken.kind) {
         case K.AmpersandAmpersandToken:
+          // a struct is truthy: a struct on the left is never the result
+          checkLayoutTarget(c, expr.right, target, cast);
+          return;
         case K.BarBarToken:
         case K.QuestionQuestionToken:
           checkLayoutTarget(c, expr.left, target, cast);
@@ -509,17 +512,28 @@ function layoutMismatch(
   target: Type,
   cast: boolean,
 ): string | undefined {
-  const sourceElement = getSharedArrayElementType(c, source),
-    targetElement = getSharedArrayElementType(c, target);
-  if (sourceElement && targetElement) {
-    const from = getStructOfType(c, sourceElement),
-      to = getStructOfType(c, targetElement);
-    if (
-      from &&
-      to &&
-      !(fits(from, to) && from.fields.length === to.fields.length)
-    )
-      return `the elements are '${from.name}' structs, which '${to.name}' structs, of another layout or size, cannot stand for`;
+  // SharedArrays, member by member (a place may be one or null): each array of
+  // the value's must have the elements, laid out the same, of one of the
+  // place's, as its element size is theirs
+  const elements = (t: Type) =>
+    nonNullishMembers(c, t)
+      .map(m => getSharedArrayElementType(c, m))
+      .filter((e): e is Type => e !== undefined);
+  const sourceElements = elements(source),
+    targetElements = elements(target);
+  if (sourceElements.length !== 0 && targetElements.length !== 0) {
+    for (const e of sourceElements) {
+      const from = getStructOfType(c, e);
+      if (!from) continue;
+      const tos = targetElements.map(t => getStructOfType(c, t));
+      if (
+        !tos.some(
+          to =>
+            !to || (fits(from, to) && from.fields.length === to.fields.length),
+        )
+      )
+        return `the elements are '${from.name}' structs, which '${tos[0]!.name}' structs, of another layout or size, cannot stand for`;
+    }
     return undefined;
   }
   const tos = structsOf(c, target);
