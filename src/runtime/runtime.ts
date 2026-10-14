@@ -1159,6 +1159,19 @@ export function threadEnd() {
   // worker, idle, will not look again until its next thread
   nudgePageForShared();
 }
+// after a thread's end, on a worker between threads: what was freed since (a
+// result dropped, what the registries finalized: own.ts) is counted, and what
+// was deferred (a string that died) is freed if it is safe, and else handed to
+// the shared list, as at the end. the worker would not look at its queue
+// again until its next thread, which may never come
+function settle() {
+  if (pend.length !== 0) {
+    reclaim();
+    handOffPending();
+    nudgePageForShared();
+  }
+  flushCounts();
+}
 // what a thread's function returns: its result's message address (own.ts), or
 // an async function's promise of one
 type Result = number | PromiseLike<number>;
@@ -1325,13 +1338,7 @@ function endThread(
         Atomics.notify(I32, s);
       else {
         dropThread(t);
-        // after the thread's end: what the drop freed is counted, and what it
-        // deferred (a string that died) handed on, as at the end
-        if (ended) {
-          handOffPending();
-          flushCounts();
-          nudgePageForShared();
-        }
+        if (ended) settle();
       }
     } finally {
       // a thread of a pool that was stopped is not counted in the next pool
@@ -1596,7 +1603,7 @@ export async function poolLoop() {
     done();
     if (afterTask()) {
       await eventLoopTurn();
-      flushCounts();
+      settle();
     }
     let p: number;
     for (;;) {
@@ -1624,7 +1631,7 @@ export async function poolLoop() {
           if (Atomics.wait(I32, C_PENDING, 0, finalizeWait) === 'timed-out') {
             const before = finalized();
             await eventLoopTurn();
-            flushCounts();
+            settle();
             finalizeWait =
               finalized() !== before
                 ? FINALIZE

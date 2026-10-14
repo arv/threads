@@ -42,11 +42,20 @@ function detaching() {
   own.__abandon(current!);
   return result();
 }
+// a struct whose one handle the thread makes, and lets go of, before it returns
+// the struct in its result
+let boxedAt = 0;
+function boxed() {
+  boxedAt = own.newStruct(P);
+  const h = own.box(boxedAt);
+  own.release(boxedAt); // the handle's count is the one left
+  return {h};
+}
 const THROWN = 'Error: thrown by a thread not joined';
 function throwing(): never {
   throw new Error(THROWN.slice('Error: '.length));
 }
-own.fns({result, detaching, throwing});
+own.fns({result, detaching, boxed, throwing});
 
 describe('a thread not joined', () => {
   it('detached before it starts: its end frees the block, and drops the result', () => {
@@ -149,6 +158,21 @@ describe('the registry', () => {
     }
     expect(count(heldAt)).toBe(1);
     expect(settled()).toBe(before);
+  });
+
+  it("a result's cell is released though this thread has no handle on it", async () => {
+    let th: ReturnType<typeof own.spawn> | null = null;
+    (() => {
+      th = own.spawn(boxed);
+      run(th.t);
+    })();
+    // the thread's handle is collected: the result's count is the one left
+    await collectUntil(() => count(boxedAt) === 1);
+    expect(count(boxedAt)).toBe(1);
+    // dropped, the result makes no handle of its own, which would keep the
+    // struct until it was collected in turn
+    own.__abandon(th!);
+    expect(runtime.I32[boxedAt >> 2]).toBe(runtime.K_FREE);
   });
 
   it('a Thread joined leaves its thread alone once it is collected', async () => {

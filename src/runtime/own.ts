@@ -1685,16 +1685,46 @@ function discardThread(t: number) {
 function dropArguments(t: number) {
   dropMessage(I32[(t + 16) >> 2], I32[(t + 20) >> 2]);
 }
-// a message nothing else will read, read back and freed, with the counts it
-// carried: its counted values' too, which a reader would own
+// a message nothing else will read, freed with the counts it carried: its
+// strings', its shapes' keys', its cells' and its counted values' (which a
+// reader would own). its words are walked, not read: reading a cell would make
+// it a handle here, whose count of its own only V8's collector gives back
 function dropMessage(a: number, bytes: number) {
-  const outer = countedInto,
-    mine = (countedInto = []);
   try {
-    __unmessage(a, bytes);
+    dropWord(a, 0, new Set());
   } finally {
-    countedInto = outer;
-    for (const p of mine) release(p);
+    $freeBlock(a, bytes);
+  }
+}
+// a value word of a message's blob, as get() reads it: a shape's keys are
+// counted once in the blob, at its first object (shapes: the ones seen)
+function dropWord(base: number, at: number, shapes: Set<number>) {
+  const v = F64[(base >> 3) + at];
+  if (v === v) return;
+  const i = (base >> 2) + at * 2,
+    hi = I32[i + 1],
+    p = I32[i];
+  if ((hi & BOX) !== BOX) return;
+  switch ((hi >>> 11) & 0xff) {
+    case T_ISTR:
+    case T_CELL_COUNTED:
+    case T_COUNTED:
+      release(p);
+      return;
+    case T_ARR:
+      for (let k = 0, n = I32[(base >> 2) + p * 2]; k < n; k++)
+        dropWord(base, p + 1 + k, shapes);
+      return;
+    case T_OBJ: {
+      const shape = I32[(base >> 2) + p * 2],
+        n = I32[(base >> 2) + shape * 2];
+      if (!shapes.has(shape)) {
+        shapes.add(shape);
+        for (let k = 0; k < n; k++)
+          release(I32[(base >> 2) + (shape + 1 + k) * 2]);
+      }
+      for (let k = 0; k < n; k++) dropWord(base, p + 1 + k, shapes);
+    }
   }
 }
 
