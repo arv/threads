@@ -720,15 +720,16 @@ export function $decodeUtf16(u: number, n: number) {
 // leaves the table at once, its count DEAD so that nothing counts it again, and
 // its block goes a grace period later, once every thread has passed a
 // quiescent point (see $defer): a lookup that found it before it left may be
-// reading it still. no two strings have one serial, so this thread's caches
-// (address -> string, string -> address) tell by it whether a block is still
-// the string they knew ----
+// reading it still. a string's serial tells this thread's caches (address ->
+// string, string -> address) whether its block was reused while they read it;
+// serials come round after 2^32 strings, which an entry may outlive, so the
+// caches also compare the text ----
 const STR_HEAD = 24,
   PIN = 1 << 30,
   DEAD = 1 << 31,
   TOMB = 1; // a slot whose string left
 // this thread's caches, each with the string's serial
-const strAddr = new Map<string, [number, number, number]>(),
+const strAddr = new Map<string, [number, number]>(),
   addrStr = new Map<number, [string, number]>();
 const remember = (s: string, a: number) => {
   if (addrStr.size >= 1 << 14) {
@@ -737,7 +738,7 @@ const remember = (s: string, a: number) => {
   }
   const serial = I32[(a >> 2) + 5];
   addrStr.set(a, [s, serial]);
-  strAddr.set(s, [a, serial, I32[(a >> 2) + 3]]); // and its hash (see known)
+  strAddr.set(s, [a, serial]);
 };
 // the address of s, if this thread knows it, its block is still s, and the
 // string is alive: one that died (count 0, DEAD) is still s until its block is
@@ -747,20 +748,18 @@ function known(s: string) {
   const k = strAddr.get(s);
   if (k === undefined) return 0;
   const a = k[0];
-  // the three words are read one by one, and the block may be retired and
-  // reused as another string meanwhile (the thread may have passed a quiescent
-  // point since the string died): the serial is read again after the count.
-  // serials are unique and a retired block's is cleared (retire), so the
-  // serial the same both times means the count read between is that string's
-  // count, not the next one's. a serial comes round again after 2^32 strings,
-  // and a thread's cache may keep an entry that long: the length and the hash
-  // are read in the same window too, so that a block reused for another
-  // string of that serial must also be of that length and that hash to pass
+  // the block is read a word at a time, and may be retired and reused as
+  // another string meanwhile (the thread may have passed a quiescent point
+  // since the string died): the serial is read again after the count and the
+  // text. a retired block's serial is cleared (retire), and a new string's is
+  // the next one, so the serial the same both times means the count and the
+  // text read between are of one string. that serial may have come round
+  // since the entry was made (2^32 strings later), so the text is compared:
+  // no other string has it, not even one of that length and hash
   return Atomics.load(I32, a >> 2) === K_STR &&
     Atomics.load(I32, (a >> 2) + 5) === k[1] &&
     Atomics.load(I32, (a >> 2) + 1) > 0 &&
-    Atomics.load(I32, (a >> 2) + 2) === s.length &&
-    Atomics.load(I32, (a >> 2) + 3) === k[2] &&
+    strIsNow(a, s) &&
     Atomics.load(I32, (a >> 2) + 5) === k[1]
     ? a
     : 0;
@@ -782,6 +781,20 @@ const strIs = (a: number, s: string) => {
     const u = (a + STR_HEAD) >> 1;
     for (let i = 0; i < s.length; i++)
       if (U16[u + i] !== s.charCodeAt(i)) return false;
+  }
+  return true;
+};
+// strIs for a block that may be reused while it is read (known): each read is
+// atomic, so none comes after the serial is read again
+const strIsNow = (a: number, s: string) => {
+  if (Atomics.load(I32, (a >> 2) + 2) !== s.length) return false;
+  if (Atomics.load(I32, (a >> 2) + 4) !== 0) {
+    for (let i = 0; i < s.length; i++)
+      if (Atomics.load(U8, a + STR_HEAD + i) !== s.charCodeAt(i)) return false;
+  } else {
+    const u = (a + STR_HEAD) >> 1;
+    for (let i = 0; i < s.length; i++)
+      if (Atomics.load(U16, u + i) !== s.charCodeAt(i)) return false;
   }
   return true;
 };
@@ -923,8 +936,12 @@ export function $internFind(s: string) {
 // alive, else 0: a lookup, no hashing
 export const $internedHere: (s: string) => number = known;
 export function $str(a: number) {
+  // the caller holds string a, so its block stays the one string while this
+  // reads it; the cached text is compared, as the serial may have come round
+  // since the entry was made (see known)
   const k = addrStr.get(a);
-  if (k !== undefined && k[1] === I32[(a >> 2) + 5]) return k[0];
+  if (k !== undefined && k[1] === I32[(a >> 2) + 5] && strIs(a, k[0]))
+    return k[0];
   const n = I32[(a >> 2) + 2],
     s =
       I32[(a >> 2) + 4] !== 0
