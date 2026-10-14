@@ -322,6 +322,12 @@ const markerNames: Record<FieldKind, string> = {
   'c': 'ref',
   '': '?',
 };
+// The type of a number field of each kind.
+const numberTypeNames: Partial<Record<FieldKind, string>> = {
+  f: 'number',
+  i: 'i32',
+  u: 'u8',
+};
 const laidOut = (s: StructInfo) =>
   s.fields.map((f, k) => `${f}: ${markerNames[s.kinds[k]!]}`).join(', ');
 
@@ -339,7 +345,7 @@ function markerKind(c: Own, marker: Node): FieldKind | undefined {
 
 // Checks a `struct(...)` call: its fields are given in an object literal, by
 // name, and each is a number, a boolean, a string or a reference (a shared
-// struct or a SharedArray, possibly null).
+// struct or a SharedArray, possibly null), a number marked as its type says.
 export function checkStructCall(c: Own, call: Node): void {
   const t = getStructTypeOfCall(c, call);
   if (!t || call.arguments.length < 1) return;
@@ -364,8 +370,34 @@ export function checkStructCall(c: Own, call: Node): void {
     }
     const symbol = c.host.checker.getPropertyOfType(t, name.text);
     if (!symbol) continue;
-    if (isFieldType(c, c.host.typeOfSymbol(symbol))) continue;
-    c.error(property, Messages.StructField);
+    const type = c.host.typeOfSymbol(symbol);
+    if (!isFieldType(c, type)) {
+      c.error(property, Messages.StructField);
+      continue;
+    }
+    // a number's marker lays it out as an f64, an i32 or a u8, which its type
+    // must say too: TypeScript takes one for another, and what is stored into
+    // an integer is checked by the type
+    const marked = markerKind(
+      c,
+      property.kind === K.PropertyAssignment ? property.initializer : name,
+    );
+    const typed = getFieldKind(c, type);
+    if (
+      marked !== undefined &&
+      marked !== typed &&
+      marked in numberTypeNames &&
+      typed in numberTypeNames
+    )
+      c.error(
+        property,
+        Messages.MarkerMismatch,
+        name.text,
+        markerNames[marked],
+        c.host.typeToString(type),
+        numberTypeNames[marked]!,
+        markerNames[typed],
+      );
   }
   // another struct(...) for the same type: the registry keeps one, by which
   // every value of the type is read; one laid out otherwise is refused

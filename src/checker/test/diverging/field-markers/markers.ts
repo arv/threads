@@ -1,0 +1,18 @@
+// A number field whose marker and type disagree: TypeScript takes an i32 marker
+// for a number field, and an f64 or a u8 one for an i32 field. The runtime
+// stores the field as its marker says, and the checker checks what is stored
+// into an integer by its type: a fraction into the first would be truncated
+// unseen, one into the second refused though it is kept. The fork does not
+// compare them.
+import { f64, i32, u8, struct, type i32 as I32, type u8 as U8 } from "threads";
+
+interface Typed { n: number }
+const Typed = struct<Typed>({ n: i32 });                       // error: a number marked i32
+interface Marked { n: I32 }
+const Marked = struct<Marked>({ n: f64 });                     // error: an i32 marked f64
+interface Byte { n: I32 }
+const Byte = struct<Byte>({ n: u8 });                          // error: an i32 marked u8
+interface Agree { n: I32; b: U8; x: number }
+const Agree = struct<Agree>({ n: i32, b: u8, x: f64 });        // fine
+const Inferred = struct({ n: i32, b: u8, x: f64 });            // fine: its type is its markers'
+export { Typed, Marked, Byte, Agree, Inferred };

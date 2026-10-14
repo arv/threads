@@ -187,6 +187,7 @@ describe('threads-check, where it differs from the fork', () => {
         "layouts.ts(77,51): error TS96033: A value of type '{ (x: string): Child; (x: number): Node; }' cannot be used as '(x: string) => Node': what it returns: field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
         "layouts.ts(81,53): error TS96033: A value of type '() => () => () => () => Child' cannot be used as '() => () => () => () => Node': what it returns: what it returns: what it returns: what it returns: field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
         "layouts.ts(84,17): error TS96034: 'Measure' is declared a shared struct again, laid out otherwise: [n: f64] here, [n: i32] at its other declaration. The checker reads a struct type's values by one layout, so a type has one; declare the other as a type of its own.",
+        "layouts.ts(85,40): error TS96036: Field 'n' is marked i32 but typed 'number': its values are stored as its marker says and checked as its type says, so type it 'i32' or mark it f64.",
         "layouts.ts(52,81): error TS96033: A value of type 'SharedArray<Child & Cell, \"other\">' cannot be used as 'SharedArray<number, \"other\"> | SharedArray<Node, \"other\">': the elements are 'Child' structs, which 'Node' structs, of another layout or size, cannot stand for. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
         "layouts.ts(59,37): error TS96033: A value of type '() => Child & Cell' cannot be used as '() => Node': what it returns: field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
         "layouts.ts(61,48): error TS96033: A value of type '(n: Node) => number' cannot be used as '(c: Child) => number': what it is called with, parameter 1: field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
@@ -232,6 +233,25 @@ describe('threads-check, where it differs from the fork', () => {
         notAStruct('27,37', literal, 'Node', 'Node'),
         notAStruct('28,61', literal, 'Node', 'Node'),
         notAStruct('29,64', 'Plain', 'Node | null', 'Node'),
+      ].sort(),
+    );
+  });
+
+  it('refuses a number field whose marker and type disagree', () => {
+    // TypeScript takes an i32 marker for a number field and an f64 one for an
+    // i32 field; the runtime lays the field out by its marker, the checker
+    // checks the integers stored into it by its type. the fork does not
+    // compare them
+    const dir = join(checker, 'test/diverging/field-markers');
+    expect(
+      check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
+        .map(d => formatDiagnostic(d, dir))
+        .sort(),
+    ).toEqual(
+      [
+        "markers.ts(10,31): error TS96036: Field 'n' is marked i32 but typed 'number': its values are stored as its marker says and checked as its type says, so type it 'i32' or mark it f64.",
+        "markers.ts(12,33): error TS96036: Field 'n' is marked f64 but typed 'i32': its values are stored as its marker says and checked as its type says, so type it 'number' or mark it i32.",
+        "markers.ts(14,29): error TS96036: Field 'n' is marked u8 but typed 'i32': its values are stored as its marker says and checked as its type says, so type it 'u8' or mark it i32.",
       ].sort(),
     );
   });
