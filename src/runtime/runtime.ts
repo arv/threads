@@ -1004,8 +1004,11 @@ function enqueue(t: number) {
   const pending = Atomics.add(I32, C_PENDING, 1) + 1;
   Atomics.notify(I32, C_PENDING, 1);
   // queued now, for good: should asking for one more worker fail, the thread
-  // waits for one that is, rather than be taken back from under a worker
-  if (Atomics.load(I32, C_IDLE) + Atomics.load(I32, C_COMING) < pending) {
+  // waits for one that is, rather than be taken back from under a worker.
+  // idle read before coming: a worker that joins the pool stops being coming
+  // before it is idle (poolLoop), so it is counted once at most
+  const idle = Atomics.load(I32, C_IDLE);
+  if (idle + Atomics.load(I32, C_COMING) < pending) {
     Atomics.add(I32, C_COMING, 1);
     try {
       post({type: 'grow'});
@@ -1497,15 +1500,17 @@ export async function poolLoop() {
       continue;
     }
     if (Atomics.load(I32, C_SHUTDOWN) || !busy()) return leave();
-    // idle first: a thread queued meanwhile waits for this worker rather than
-    // asking for one more
-    Atomics.add(I32, C_IDLE, 1);
-    // new to the pool, it was counted as coming: now as idle instead, after
-    // the above, so that a thread queued meanwhile sees it as one or the other
+    // new to the pool, it was counted as coming: now as idle instead. out of
+    // the one before into the other, and enqueue reads idle before coming, so
+    // that a thread queued meanwhile never counts this worker twice (and skips
+    // an ask it needed); at worst not at all, and asks for one more
     if (!joined) {
       joined = true;
       Atomics.sub(I32, C_COMING, 1);
     }
+    // idle first: a thread queued meanwhile waits for this worker rather than
+    // asking for one more
+    Atomics.add(I32, C_IDLE, 1);
     done();
     if (afterTask()) {
       await eventLoopTurn();
@@ -1536,11 +1541,16 @@ export async function poolLoop() {
         } else Atomics.wait(I32, C_PENDING, 0, POLL);
         continue;
       }
+      // no longer idle before the thread is taken: a thread queued between
+      // the two would see a queue without that thread and this worker idle
+      // still, and skip an ask it needed (enqueue). idle again if another
+      // worker took it
+      Atomics.sub(I32, C_IDLE, 1);
       if (Atomics.compareExchange(I32, C_PENDING, p, p - 1) === p) break;
+      Atomics.add(I32, C_IDLE, 1);
       done();
     }
     // a thread taken: the pool operation goes on to the slot
-    Atomics.sub(I32, C_IDLE, 1);
     const q = C_RING + (Atomics.add(I32, C_RING_HEAD, 1) & (RING - 1));
     let t: number;
     while ((t = Atomics.load(I32, q)) === 0) Atomics.wait(PRIV, 0, 0, 0.01);
@@ -1696,8 +1706,9 @@ export async function resetPool(sab: SharedArrayBuffer) {
   return true;
 }
 // the counters, and the pool's state: threads live (spawned and not
-// finished), queued (waiting for a worker), workers idle, and whether the
-// pool was shut down
+// finished), queued (waiting for a worker), workers idle, workers coming
+// (asked for or started, and not yet in the pool), and whether the pool was
+// shut down
 export function counters(sab: SharedArrayBuffer) {
   const i32 = new Int32Array(sab),
     out: Record<string, number> = {};
@@ -1708,6 +1719,7 @@ export function counters(sab: SharedArrayBuffer) {
   out.live = i32[C_LIVE];
   out.queued = i32[C_PENDING];
   out.idle = i32[C_IDLE];
+  out.coming = i32[C_COMING];
   out.shutdown = i32[C_SHUTDOWN];
   return out;
 }

@@ -1,34 +1,31 @@
 // The hand-written programs on node worker threads (run.ts): every thread
 // count computes the same thing.
-import {execFileSync, spawnSync} from 'node:child_process';
+import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {stripVTControlCharacters} from 'node:util';
 import {describe, expect, it} from 'vite-plus/test';
 
-const runTs = fileURLToPath(new URL('./run.ts', import.meta.url));
-const run = (...args: string[]) =>
-  stripVTControlCharacters(
-    execFileSync(process.execPath, [runTs, ...args], {
-      encoding: 'utf8',
-      timeout: 60_000,
-    }),
+// runs a program (run.ts): what it printed, to stdout and to stderr
+const exec = (args: string[]) => {
+  const r = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./run.ts', import.meta.url)), ...args],
+    {encoding: 'utf8', timeout: 60_000},
   );
-// the same with --stats: what the program printed, and the runtime's counters
-// and the workers started, which run.ts prints to stderr as it exits
-const runStats = (...args: string[]) => {
-  const r = spawnSync(process.execPath, [runTs, ...args, '--stats'], {
-    encoding: 'utf8',
-    timeout: 60_000,
-  });
   if (r.error) throw r.error;
-  if (r.status !== 0) throw new Error(`run.ts exited ${r.status}: ${r.stderr}`);
-  return {
-    out: stripVTControlCharacters(r.stdout),
-    stats: JSON.parse(r.stderr.trim().split('\n').at(-1)!) as Record<
-      string,
-      number
-    >,
-  };
+  if (r.status !== 0)
+    throw new Error(`run.ts exited with ${r.status ?? r.signal}: ${r.stderr}`);
+  return {out: stripVTControlCharacters(r.stdout), err: r.stderr};
+};
+const run = (...args: string[]) => exec(args).out;
+// the same with --stats: what the program printed, and the runtime's counters
+// and the workers started, which run.ts prints to stderr as it exits (a line
+// of JSON, among whatever the workers wrote there)
+const runStats = (...args: string[]) => {
+  const {out, err} = exec([...args, '--stats']);
+  const line = err.split('\n').findLast(l => l.startsWith('{'));
+  if (line === undefined) throw new Error(`no stats on stderr: ${err}`);
+  return {out, stats: JSON.parse(line) as Record<string, number>};
 };
 
 // N-body's kinetic energy, after the same steps, on each thread count
