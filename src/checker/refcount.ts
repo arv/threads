@@ -309,11 +309,18 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
   // A yielded value, or a generator's result, goes into an IteratorResult, an
   // ordinary object, which the caller keeps after the generator's own count of
   // it ended (REFCOUNT.md: an owned local is released when its block ends).
-  const yielded = (expr: Node | undefined): void => {
+  // An async generator awaits what it yields or returns before the result holds
+  // it: a promise of a counted value counts too.
+  const yielded = (expr: Node | undefined, async: boolean): void => {
     if (!expr) return;
     const count = getCount(c, expr);
-    if (count === Count.None || count === Count.Null) return;
-    c.error(expr, Messages.Yielded, host.typeToString(host.typeOf(expr)));
+    let t = host.typeOf(expr);
+    if (count === Count.None || count === Count.Null) {
+      if (!async) return;
+      t = host.awaitedType(t);
+      if (!isCellType(c, t)) return;
+    }
+    c.error(expr, Messages.Yielded, host.typeToString(t));
   };
   const destructured = (name: Node, t: Type): void => {
     if (isCellType(c, t))
