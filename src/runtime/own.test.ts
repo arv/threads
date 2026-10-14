@@ -661,6 +661,9 @@ describe('sizes are checked', () => {
     expect(() => new T.Channel(NaN)).toThrow(RangeError);
     expect(() => new T.Channel(-1)).toThrow(RangeError);
     expect(() => new T.Channel(Infinity)).toThrow(RangeError);
+    expect(() => new T.Channel(1.5)).toThrow(RangeError);
+    expect(() => own.sharedFloat64Array(1.5)).toThrow(RangeError);
+    expect(() => own.sharedFloat64Array(NaN)).toThrow(RangeError);
   });
   it('the allocator refuses sizes that are not positive', () => {
     expect(() => runtime.$alloc(-8)).toThrow(RangeError);
