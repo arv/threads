@@ -1,6 +1,6 @@
 # On every push to main and every pull request: vp check (formatting, lint and
 # types) and vp test (the unit tests), as they run locally, and the tsgo fork
-# (arv/threads-checker) on the programs
+# (arv/threads-checker) on the programs and the Vite plugin
 name: CI
 
 on:
@@ -40,7 +40,8 @@ jobs:
 
   # the tsgo fork, built from arv/threads-checker's main: its ownership check
   # and its emit of the programs (tsconfig.programs.json), the emitted programs
-  # on node, and threads-check compared with it (vp run compare)
+  # on node, threads-check compared with it (vp run compare), and the Vite
+  # plugin's tests
   fork:
     runs-on: ubuntu-latest
     steps:
@@ -80,5 +81,10 @@ jobs:
             esac
           done
       - run: vp run --filter @arv/threads-check compare
+        env:
+          TSGO_FORK: ${{ github.workspace }}/threads-checker
+      # they build projects with the fork: the test job, which has none,
+      # skips them
+      - run: vp test src/runtime/vite-plugin-threads.test.ts
         env:
           TSGO_FORK: ${{ github.workspace }}/threads-checker

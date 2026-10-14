@@ -9,8 +9,10 @@
 // - compiles the project's TypeScript with the tsgo fork, which lays shared
 //   structs and SharedArrays out in shared memory, counts their references and
 //   registers the functions threads run, and serves that output for each .ts
-//   module (type errors are left to tsc, ownership errors to `tsgo own check`
-//   );
+//   or .tsx module (type errors are left to tsc, ownership errors to `tsgo own
+//   check` ). The project is `tsconfig` (tsconfig.json by default; the app's,
+//   tsconfig.app.json say, where tsconfig.json only references others), as
+//   create-vite writes it, noEmit and all;
 // - keys each module's registered functions by its path in the project rather
 //   than import.meta.url, so the page's bundle and the workers' agree on them;
 // - makes virtual:threads/modules, the modules a pool worker
@@ -52,6 +54,18 @@ const MODULES = 'virtual:threads/modules',
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PLAYGROUND = 'virtual:threads/playground/';
 const exec = promisify(execFile);
+// the sources the fork compiles, and what it emits for each (a .tsx's JSX
+// stays JSX with jsx: preserve, in a .jsx, for Vite to compile)
+const OUTPUTS: Record<string, string[]> = {
+  '.ts': ['.js'],
+  '.mts': ['.mjs'],
+  '.tsx': ['.js', '.jsx'],
+};
+const isSource = (file: string) =>
+  path.extname(file) in OUTPUTS && !/\.d\.m?ts$/.test(file);
+// Vite's own queries (its SPECIAL_QUERY_RE): a module's text, its URL, or a
+// worker Vite makes of it
+const SPECIAL_QUERY = /[?&](?:worker|sharedworker|raw|url)\b/;
 
 // The plugin's options, described above.
 export interface Options {
@@ -96,11 +110,17 @@ export default function threads(options: Options = {}): Plugin {
   } = options;
   if (!tsgo)
     throw new Error("threads: the tsgo option names the tsgo fork's binary");
-  let project: string,
+  let root: string,
+    project: string,
     rootDir: string,
     outDir: string,
     playgroundDir: string,
     registering: string[] = [];
+  // an import of the runtime, which a module whose functions threads run has
+  // (the fork registers them in such a module only)
+  const importsRuntime = new RegExp(
+    String.raw`\b(?:from|import)\s*\(?\s*(['"])${runtime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\1`,
+  );
 
   // threads-check, loaded once, with one TypeScript API session for every
   // check: node imports its TypeScript sources directly (type stripping)
@@ -265,6 +285,16 @@ export default function threads(options: Options = {}): Plugin {
           '--rootDir',
           rootDir,
           '--sourceMap',
+          // a Vite project's tsconfig emits nothing (noEmit), and imports .ts
+          // files (allowImportingTsExtensions), which a compile that emits
+          // must rewrite: to .js, which Vite resolves to the .ts again
+          '--noEmit',
+          'false',
+          '--rewriteRelativeImportExtensions',
+          // an incremental build's state goes with what it emitted (kept
+          // elsewhere, the next build would emit only what changed since)
+          '--tsBuildInfoFile',
+          path.join(outDir, 'tsbuildinfo'),
           ...args,
         ],
         {stdio: 'pipe'},
@@ -272,33 +302,48 @@ export default function threads(options: Options = {}): Plugin {
     } catch (e: any) {
       if (!fs.existsSync(outDir))
         throw new Error(
-          `threads: tsgo emitted nothing:\n${e.stdout}${e.stderr}`,
+          `threads: tsgo emitted nothing for ${project}:\n${e.stdout}${e.stderr}`,
         );
     }
+    if (!fs.existsSync(outDir))
+      throw new Error(
+        `threads: tsgo emitted nothing for ${project}, and reported no error: a solution-style tsconfig (references, and "files": []) compiles nothing itself. Name the app's (tsconfig.app.json, say) with the plugin's tsconfig option`,
+      );
     registering = [];
     const walk: (dir: string) => void = dir => {
       for (const entry of fs.readdirSync(dir, {withFileTypes: true})) {
         const p = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(p);
         else if (
-          /\.m?js$/.test(entry.name) &&
+          /\.(?:m?js|jsx)$/.test(entry.name) &&
           helpersOf(fs.readFileSync(p, 'utf8'), runtime).register
-        )
-          registering.push(sourceOf(p));
+        ) {
+          const source = sourceOf(p);
+          if (source) registering.push(source);
+        }
       }
     };
     walk(outDir);
   }
-  const emitted: (file: string) => string = file =>
-    path
-      .join(outDir, path.relative(rootDir, file))
-      .replace(/\.ts$/, '.js')
-      .replace(/\.mts$/, '.mjs');
-  const sourceOf: (out: string) => string = out =>
-    path
-      .join(rootDir, path.relative(outDir, out))
-      .replace(/\.js$/, '.ts')
-      .replace(/\.mjs$/, '.mts');
+  // what the fork emitted for a source, if it did
+  const emitted = (file: string) => {
+    const ext = path.extname(file),
+      base = path
+        .join(outDir, path.relative(rootDir, file))
+        .slice(0, -ext.length);
+    return OUTPUTS[ext]?.map(out => base + out).find(out => fs.existsSync(out));
+  };
+  // the source the fork emitted a file for (a .js may be a .ts's or a .tsx's)
+  const sourceOf = (out: string) => {
+    const ext = path.extname(out),
+      base = path
+        .join(rootDir, path.relative(outDir, out))
+        .slice(0, -ext.length);
+    return Object.keys(OUTPUTS)
+      .filter(source => OUTPUTS[source].includes(ext))
+      .map(source => base + source)
+      .find(source => fs.existsSync(source));
+  };
   const moduleKey: (file: string) => string = file =>
     path.relative(rootDir, file).split(path.sep).join('/');
 
@@ -325,7 +370,8 @@ export default function threads(options: Options = {}): Plugin {
       optimizeDeps: {exclude: [runtime]},
     }),
     configResolved(config) {
-      project = path.resolve(config.root, tsconfig);
+      root = config.root;
+      project = path.resolve(root, tsconfig);
       rootDir = path.dirname(project);
       outDir = path.join(
         config.cacheDir,
@@ -380,14 +426,23 @@ export default function threads(options: Options = {}): Plugin {
         return `export default {\n${registering.map(f => `  ${JSON.stringify(moduleKey(f))}: () => import(${JSON.stringify(f)}),`).join('\n')}\n};\n`;
       }
       const file = id.split('?')[0];
-      if (
-        !/\.m?ts$/.test(file) ||
-        /\.d\.m?ts$/.test(file) ||
-        /[?&]raw\b/.test(id)
-      )
-        return; // ?raw: the source text
+      if (!isSource(file) || SPECIAL_QUERY.test(id)) return;
       const out = emitted(file);
-      if (!fs.existsSync(out)) return;
+      if (!out) {
+        // a module the fork did not compile runs with its types only erased,
+        // and its functions not registered: a module that imports the
+        // runtime cannot (one the tsconfig leaves out, or one reached through
+        // an alias of Vite's that its paths do not have)
+        if (
+          !file.startsWith(RUNTIME_DIR + path.sep) &&
+          fs.existsSync(file) &&
+          importsRuntime.test(fs.readFileSync(file, 'utf8'))
+        )
+          this.error(
+            `threads: ${path.relative(root, file)} was not compiled by tsgo -p ${path.relative(root, project)}: add it to the tsconfig's include or files (or mirror the alias in paths)`,
+          );
+        return;
+      }
       const code = keyRegistration(
         fs.readFileSync(out, 'utf8'),
         runtime,
@@ -409,14 +464,25 @@ export default function threads(options: Options = {}): Plugin {
     // which runs first, does the work for all. a changed runtime file restarts
     // the server instead: Vite would mark the imports of the changed module
     // with ?t=, and a page or worker that loaded it before would run a second
-    // copy of the runtime (whose threads' output, for one, goes nowhere)
-    hotUpdate({file, server}) {
+    // copy of the runtime (whose threads' output, for one, goes nowhere). a
+    // source the fork did not compile and no environment loaded (a script the
+    // tsconfig leaves out, say) changes nothing; one that appeared may be what
+    // a module failed to import
+    hotUpdate({type, file, server}) {
       if (this.environment.name !== 'client') return [];
       if (file.startsWith(RUNTIME_DIR + path.sep)) {
         void server.restart();
         return [];
       }
-      if (!/\.m?ts$/.test(file) || /\.d\.m?ts$/.test(file)) return;
+      if (!isSource(file)) return;
+      if (
+        type !== 'create' &&
+        !emitted(file) &&
+        Object.values(server.environments).every(
+          env => !env.moduleGraph.getModulesByFile(file)?.size,
+        )
+      )
+        return;
       emit();
       for (const env of Object.values(server.environments)) {
         env.moduleGraph.invalidateAll();

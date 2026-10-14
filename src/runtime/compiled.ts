@@ -70,11 +70,13 @@ export function keyRegistration(code: string, runtime: string, key: string) {
 
 // What a program with its types only erased needs at its end: the one line
 // that registers its top-level functions, which is how a thread finds the one
-// it runs (the fork's emit adds it itself); and how many lines that is.
+// it runs (the fork's emit adds it itself); and how many lines that is. The
+// fork registers every named one: exported, a default export, a generator
+// however its * is spaced.
 export function registration(source: string, runtime: string) {
   const names = [
     ...source.matchAll(
-      /^(?:export\s+)?(?:async\s+)?function\*?\s+([A-Za-z_$][\w$]*)/gm,
+      /^(?:export\s+(?:default\s+)?)?(?:async\s+)?function(?:\s*\*\s*|\s+)([A-Za-z_$][\w$]*)/gm,
     ),
   ].map(m => m[1]);
   const register = uniqueName(source, 'register'),
