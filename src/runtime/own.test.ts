@@ -652,6 +652,24 @@ describe('sizes are checked', () => {
     expect(() => runtime.$allocBlock(0)).toThrow(RangeError);
     expect(() => own.sharedFloat64Array(-1)).toThrow(RangeError);
   });
+  it('the allocator refuses sizes past an i32, and takes the last one short of it', () => {
+    // rounded, a size past 0x7ffffff8 would wrap; the largest accepted size is
+    // refused as a size by nothing, only by the heap, which has no room for it
+    const thrown = (f: () => void) => {
+      try {
+        f();
+        return '';
+      } catch (e) {
+        return String(e);
+      }
+    };
+    expect(thrown(() => runtime.$alloc(0x7ffffff9))).toMatch(/cannot allocate/);
+    expect(thrown(() => runtime.$alloc(2 ** 31))).toMatch(/cannot allocate/);
+    expect(thrown(() => runtime.$alloc(Infinity))).toMatch(/cannot allocate/);
+    const last = thrown(() => runtime.$alloc(0x7ffffff8));
+    expect(last).toMatch(/RangeError/);
+    expect(last).not.toMatch(/cannot allocate/);
+  });
 });
 
 describe('the rest', () => {
