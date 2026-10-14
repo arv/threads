@@ -197,6 +197,32 @@ describe('threads-check, where it differs from the fork', () => {
     );
   });
 
+  it('refuses a Thread or a Scope sent to another thread or shared', () => {
+    // neither is a cell: the runtime refuses to send or share one, and the
+    // fork, for which both were cells, says nothing. no field holds one, which
+    // the fork reports too
+    const dir = join(checker, 'test/diverging/threads-stay');
+    const thread =
+      "error TS96035: A value of type 'Thread<number>' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.";
+    expect(
+      check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
+        .map(d => formatDiagnostic(d, dir))
+        .sort(),
+    ).toEqual(
+      [
+        `threads.ts(13,17): ${thread}`,
+        "threads.ts(14,18): error TS96035: A value of type 'Scope' cannot be sent to another thread or shared: it stays on the thread that made it, which spawns on it in its body.",
+        `threads.ts(15,14): ${thread}`,
+        `threads.ts(16,11): ${thread}`,
+        `threads.ts(17,14): ${thread}`,
+        `threads.ts(18,9): ${thread}`,
+        `threads.ts(19,9): ${thread}`,
+        `threads.ts(20,9): ${thread}`,
+        'threads.ts(24,33): error TS96015: A shared struct field must be a number, a boolean, a string, a shared struct, a SharedArray or a Channel.',
+      ].sort(),
+    );
+  });
+
   it("reports no blocking call on a Channel that is not the runtime's", () => {
     const dir = join(checker, 'test/diverging/ambient-channel');
     expect(

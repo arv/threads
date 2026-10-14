@@ -17,13 +17,14 @@
 
 import {CellKind} from './context.ts';
 import type {FieldKind, Own, StructInfo} from './context.ts';
-import {ObjectFlags, SymbolFlags, TypeFlags} from './host.ts';
+import {IndexKind, ObjectFlags, SymbolFlags, TypeFlags} from './host.ts';
 import type {TsSymbol, Type} from './host.ts';
 import {getCellType, getFieldKind, isFieldType} from './layout.ts';
 import {Messages} from './messages.ts';
 import {
   forEachChild,
   isPropertyNameLiteral,
+  isThisParameter,
   K,
   skipParentheses,
   walkUpParenthesizedExpressions,
@@ -186,9 +187,10 @@ function getRuntimeType(c: Own, name: string): Type | undefined {
 }
 
 // Reports whether a type is a cell of the plain API: assignable to the
-// runtime's `Cell` (Lock, Condition, Channel, Thread, Scope, SharedArray, a
-// struct's values), or a struct type or a field marker (immutable,
-// `IntegerField` included). Its values are shared, with no region.
+// runtime's `Cell` (Lock, Condition, Channel, SharedArray, SharedMap,
+// SharedSet, a struct's values), or a struct type or a field marker (immutable,
+// `IntegerField` included). Its values are shared, with no region. A Thread and
+// a Scope are not cells: they stay on the thread that made them.
 export function isCellBranded(c: Own, t: Type | undefined): boolean {
   if (
     !t ||
@@ -220,6 +222,126 @@ export function isCellBranded(c: Own, t: Type | undefined): boolean {
   }
   c.cellBranded.set(t, result);
   return result;
+}
+
+// What the thread that made a Thread or a Scope does with it (StaysHere).
+const staysWith: Record<string, string> = {
+  Thread: 'joins it',
+  Scope: 'spawns on it in its body',
+};
+
+// "Thread" or "Scope" if t is the runtime's, else "".
+function threadOrScope(c: Own, t: Type): string {
+  if (!(t.flags & TypeFlags.Object)) return '';
+  const symbol = c.host.typeSymbol(t);
+  return symbol &&
+    Object.hasOwn(staysWith, symbol.name) &&
+    getRuntimeExportName(c, symbol) === symbol.name
+    ? symbol.name
+    : '';
+}
+
+// A Thread or a Scope of the runtime's in a value of type t, where a message or
+// a share reaches at run time: t itself, a member of a union, an element of an
+// array or a tuple, or a property of an object type (a plain object, at run
+// time). Not in a cell, which goes by reference, nor in a function or an object
+// of the default library's (a Map, a Promise), which are not sent as plain
+// objects are; its mapped types (Record, Readonly) are plain objects.
+function findStaysHere(c: Own, t: Type, seen: Set<Type>): Type | undefined {
+  if (
+    seen.has(t) ||
+    t.flags & (TypeFlags.AnyOrUnknown | TypeFlags.Never | TypeFlags.Primitive)
+  )
+    return undefined;
+  seen.add(t);
+  const host = c.host;
+  const inAny = (ts: readonly Type[]) => {
+    for (const m of ts) {
+      const found = findStaysHere(c, m, seen);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  if (t.flags & TypeFlags.Union) return inAny(host.memberTypes(t));
+  if (!(t.flags & (TypeFlags.Object | TypeFlags.Intersection)))
+    return undefined;
+  if (threadOrScope(c, t)) return t;
+  if (isCellBranded(c, t)) return undefined;
+  if (host.checker.isArrayType(t as any) || host.checker.isTupleType(t as any))
+    return inAny(host.typeArguments(t));
+  const handle = host.typeSymbol(t)?.declarations[0];
+  if (
+    handle &&
+    host.isDefaultLibraryPath(handle.path) &&
+    !((t as any).objectFlags & ObjectFlags.Mapped)
+  )
+    return undefined;
+  if (host.callSignatures(t).length > 0) return undefined;
+  const apparent = host.checker.getApparentType(t as any) as any;
+  return inAny([
+    ...host.checker
+      .getPropertiesOfType(apparent)
+      .map(p => host.typeOfSymbol(p)),
+    ...[IndexKind.String, IndexKind.Number]
+      .map(k => host.checker.getIndexTypeOfType(apparent, k) as Type)
+      .filter(Boolean),
+  ]);
+}
+
+// Reports a Thread or a Scope that a call or `new` of the runtime's would send
+// to another thread or share, which the runtime refuses: an argument to a
+// `Sending` parameter, which a thread, a goroutine, a channel or a map takes,
+// or share() freezes (partition's but for, which splits an array on its
+// thread), and a thread's result, which moves to the thread that joins it.
+export function checkStaysHere(c: Own, call: Node): void {
+  const host = c.host;
+  const handle = host.signatureOf(call).declaration;
+  if (!handle || !c.isRuntimePath(handle.path)) return;
+  const decl = host.declarationOf(handle);
+  if (
+    !decl ||
+    (decl.kind === K.FunctionDeclaration && decl.name?.text === 'partition')
+  )
+    return;
+  const report = (node: Node, t: Type) => {
+    const found = findStaysHere(c, t, new Set());
+    if (found)
+      c.error(
+        node,
+        Messages.StaysHere,
+        host.typeToString(found),
+        staysWith[threadOrScope(c, found)]!,
+      );
+  };
+  const params = ((decl.parameters ?? []) as Node[]).filter(
+    p => !isThisParameter(p),
+  );
+  const args = (call.arguments ?? []) as Node[];
+  args.forEach((arg, i) => {
+    const param =
+      i < params.length
+        ? params[i]
+        : params[params.length - 1]?.dotDotDotToken
+          ? params[params.length - 1]
+          : undefined;
+    if (!param || !isSendingParameterType(c, param.type)) return;
+    const expr = arg.kind === K.SpreadElement ? (arg.expression as Node) : arg;
+    report(expr, host.typeOf(expr));
+  });
+  // spawn's: the thread's result, as the Thread<R> it returns has it
+  const thread = host.typeOf(call);
+  if (args.length > 0 && threadOrScope(c, thread) === 'Thread') {
+    const result = host.typeArguments(thread)[0];
+    if (result) report(args[0]!, result);
+  }
+}
+
+// `Sending<T>` , or a union of it with null or undefined (a SharedMap's
+// entries), as the runtime's declarations write a parameter that moves.
+function isSendingParameterType(c: Own, t: Node | undefined): boolean {
+  if (t?.kind === K.UnionType)
+    return (t.types as Node[]).some(m => getTypeMarker(c, m) === 'Sending');
+  return getTypeMarker(c, t) === 'Sending';
 }
 
 // The `struct(...)` calls of the program's source files, by the type of their

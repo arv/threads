@@ -265,8 +265,11 @@ export declare const atomic: Atomic;
 
 // ---- threads ----
 
-/** A thread; joining it moves the thread's result back. */
-export interface Thread<R> extends Cell {
+/**
+ * A thread; joining it moves the thread's result back. It stays on the thread
+ * that spawned it, which joins it: it is not a cell, and is not sent or shared.
+ */
+export interface Thread<R> {
   /**
    * Waits for the thread, from a thread that may block (not a page's main
    * thread).
@@ -293,8 +296,11 @@ export declare function spawn<A extends unknown[], R>(
   ...args: Sending<A>
 ): Thread<R>;
 
-/** Spawns threads that cannot outlive the scope. */
-export interface Scope extends Cell {
+/**
+ * Spawns threads that cannot outlive the scope, in its body: once the body
+ * returns, a spawn throws. Like a Thread, it stays on its thread.
+ */
+export interface Scope {
   spawn<A extends unknown[], R>(
     f: (...args: A) => Promise<Sending<R>>,
     ...args: Sending<A>
@@ -304,7 +310,12 @@ export interface Scope extends Cell {
     ...args: Sending<A>
   ): Thread<R>;
 }
-/** Runs `body` and joins every thread it spawned before returning. */
+/**
+ * Runs `body` and joins every thread it spawned before returning. The body must
+ * not be async, and scope() throws if it returns a promise: a thread it spawned
+ * after an await would outlive the scope. An async function spawns its threads
+ * and awaits `joinAsync()` on each.
+ */
 export declare function scope<R>(body: (s: Scope) => R): R;
 
 /**

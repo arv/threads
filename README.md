@@ -200,8 +200,8 @@ All from `"@arv/threads"`, unless noted.
 |                                             |                                                                                                                                                          |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `spawn(f, ...args)`                         | Starts `f` on a thread. Owned arguments move; shared values and cells are shared.                                                                        |
-| `thread.join()`, `thread.joinAsync()`       | Waits for the thread; its result moves back.                                                                                                             |
-| `scope(s => ...)`                           | Structured threads: joins every thread `s.spawn` started before it returns.                                                                              |
+| `thread.join()`, `thread.joinAsync()`       | Waits for the thread; its result moves back. A thread is joined where it was spawned: it is not sent or shared.                                          |
+| `scope(s => ...)`                           | Structured threads: joins every thread `s.spawn` started before it returns. The body is not async.                                                       |
 | `partition(items, parts)`, `take(items, i)` | Splits an owned array into owned parts; takes one element out.                                                                                           |
 | `register(import.meta.url, {f, ...})`       | Registers a module's top-level functions, so a thread finds the one it runs. The compiler adds it; a program run uncompiled calls it.                    |
 | `new Lock()`                                | `using _ = lock.hold()` holds it to the end of the block; `await lock.holdAsync()` waits without blocking.                                               |

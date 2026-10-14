@@ -306,7 +306,10 @@ function put(
       return boxWord(at, freeze ? T_CELL : T_CELL_COUNTED, v.$cell);
     }
     if (!Array.isArray(v))
-      throw new TypeError('own: only plain objects and arrays can be sent');
+      throw new TypeError(
+        staysHere(v, 'cannot be sent or shared') ??
+          'own: only plain objects and arrays can be sent',
+      );
   }
   if (depth >= MAX_DEPTH)
     throw new TypeError(
@@ -1202,7 +1205,8 @@ export function cellAddress(v: MaybeCell) {
   const a = typeof v === 'object' ? v.$cell : undefined;
   if (a === undefined)
     throw new TypeError(
-      'own: not a cell (a shared struct, a SharedArray, a Channel)',
+      staysHere(v, 'is not a cell, which a field holds') ??
+        'own: not a cell (a shared struct, a SharedArray, a Channel)',
     );
   return a;
 }
@@ -1623,19 +1627,42 @@ function dropArguments(t: number) {
   }
 }
 
+// a Thread or a Scope stays on the thread that made it: neither is a cell, nor
+// sent or shared (a thread is joined where it was spawned, and a scope's
+// threads are spawned in its body). what a message or a field refuses one with
+function staysHere(v: unknown, refused: string): string | undefined {
+  if (v instanceof Thread)
+    return `own: a Thread ${refused}: join it where it was spawned`;
+  if (v instanceof Scope)
+    return `own: a Scope ${refused}: spawn on it in its body`;
+  return undefined;
+}
+
 // structured threads: scope(s => ...) joins every thread s spawned before it
-// returns
+// returns. then it is closed: a scope kept past its body spawns nothing, which
+// nothing would join
 class Scope {
   declare threads: Thread[];
+  declare closed: boolean;
   constructor() {
     this.threads = [];
+    this.closed = false;
   }
   spawn<A extends unknown[], R>(fn: (...args: A) => R, ...args: SpawnArgs<A>) {
+    if (this.closed)
+      throw new TypeError(
+        'own: a scope spawns in its body: this one has returned, and joined its threads',
+      );
     const th = spawn(fn, ...args);
     this.threads.push(th);
     return th;
   }
 }
+// what an async function returns, and anything else with a then()
+const isThenable = (v: unknown) =>
+  v !== null &&
+  (typeof v === 'object' || typeof v === 'function') &&
+  typeof (v as {then?: unknown}).then === 'function';
 export function scope<R>(body: (s: Scope) => R): R {
   // first, before a thread is spawned: joining would block a worker that runs
   // async functions, and a thread spawned here could then not be joined
@@ -1653,11 +1680,18 @@ export function scope<R>(body: (s: Scope) => R): R {
         } catch (e) {
           errors.push(e);
         }
+    s.closed = true;
     $quiescent();
   };
   let result: R;
   try {
     result = body(s);
+    // an async body returns at its first await, and a thread it spawned after
+    // that would outlive the scope
+    if (isThenable(result))
+      throw new TypeError(
+        'own: the body of scope() must not be async, nor return a promise: what it spawns after an await would outlive the scope. in an async function, spawn the threads and await joinAsync() on each',
+      );
   } catch (e) {
     joinAll();
     throw e;

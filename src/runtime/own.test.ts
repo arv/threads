@@ -1058,3 +1058,49 @@ describe('the rest', () => {
     expect(logged).toEqual(['hello 1\n']);
   });
 });
+
+// last: a thread spawned here is queued for good, as no worker runs here (the
+// pool's restart above counts the threads)
+describe('threads and scopes', () => {
+  it('a scope refuses an async body', () => {
+    expect(() => T.scope(async () => {})).toThrow(/must not be async/);
+  });
+
+  it('a scope spawns nothing once its body has returned', async () => {
+    own.fns({noop});
+    // kept past its body, where nothing would join what it spawns
+    const kept = T.scope(s => s);
+    expect(() => kept.spawn(noop)).toThrow(/this one has returned/);
+    // an async body returns at its first await: what it spawns after that
+    let late: Promise<void> | undefined;
+    expect(() =>
+      T.scope(
+        s =>
+          (late = (async () => {
+            await Promise.resolve();
+            s.spawn(noop);
+          })()),
+      ),
+    ).toThrow(/must not be async/);
+    await expect(late).rejects.toThrow(/this one has returned/);
+  });
+
+  it('a Thread or a Scope is not sent, shared or held in a field', () => {
+    own.fns({noop});
+    const s = T.scope(s => s),
+      t = own.spawn(noop); // queued: no worker runs here
+    expect(() => own.__message([t])).toThrow(
+      /a Thread cannot be sent or shared: join it where it was spawned/,
+    );
+    expect(() => T.share({t})).toThrow(/a Thread cannot be sent or shared/);
+    expect(() => own.__message(s)).toThrow(
+      /a Scope cannot be sent or shared: spawn on it in its body/,
+    );
+    const H = T.struct({t: T.ref()}, 'H'),
+      h = new H();
+    expect(() => {
+      h.t = t;
+    }).toThrow(/a Thread is not a cell/);
+    expect(h.t).toBe(null);
+  });
+});
