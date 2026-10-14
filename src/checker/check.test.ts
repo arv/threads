@@ -83,6 +83,24 @@ describe('threads-check, where it differs from the fork', () => {
     );
   });
 
+  it('sees a send in a try block that leaves early, in its catch and finally', () => {
+    // the fork starts a catch or a finally from the try block's entry when the
+    // block ends in a return, a throw or a break, forgetting a send in it
+    const dir = join(checker, 'test/diverging/try-exits');
+    expect(
+      check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
+        .map(d => formatDiagnostic(d, dir))
+        .sort(),
+    ).toEqual(
+      [
+        "try-exits.ts(9,46): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 9.",
+        "try-exits.ts(13,58): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 13.",
+        "try-exits.ts(17,56): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 17.",
+        "try-exits.ts(22,7): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 21.",
+      ].sort(),
+    );
+  });
+
   it("reports no blocking call on a Channel that is not the runtime's", () => {
     const dir = join(checker, 'test/diverging/ambient-channel');
     expect(

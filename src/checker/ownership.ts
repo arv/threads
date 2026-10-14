@@ -340,6 +340,16 @@ interface Target {
   isSwitch: boolean;
   breaks: State[];
   continues: State[];
+  tries: number; // the try statements open when the target was entered
+}
+
+// A try statement being analyzed: the states with which control leaves its
+// block, or its catch, early (a return, a throw, a break or continue out of
+// it), which its catch and its finally start from too. `catches`: a throw
+// leaving the block goes to the catch, not further out.
+interface TryContext {
+  catches: boolean;
+  exits: State[];
 }
 
 const arrayMutators = new Set([
@@ -1058,6 +1068,7 @@ class FunctionAnalysis {
   thisRegion: Region = 0;
   thisFlags = 0;
   readonly targets: Target[] = [];
+  readonly tries: TryContext[] = [];
   readonly building = new Set<Node>(); // closures whose value is being computed
 
   constructor(a: Analyzer, node: Node, result: FunctionResult) {
@@ -1126,10 +1137,18 @@ class FunctionAnalysis {
           const v = this.eval(node.expression, s);
           this.checkReturn(node.expression, v, s);
         }
+        // out through every open try's finally
+        for (const t of this.tries) t.exits.push(s.copy());
         s.unreachable = true;
         break;
       case K.ThrowStatement:
         this.eval(node.expression, s);
+        // through the finally of each open try up to the first whose catch
+        // takes it
+        for (let i = this.tries.length - 1; i >= 0; i--) {
+          this.tries[i]!.exits.push(s.copy());
+          if (this.tries[i]!.catches) break;
+        }
         s.unreachable = true;
         break;
       case K.WhileStatement:
@@ -1214,6 +1233,7 @@ class FunctionAnalysis {
       isSwitch: false,
       breaks: [],
       continues: [],
+      tries: this.tries.length,
     };
     this.targets.push(t);
     this.statement(node, s);
@@ -1235,6 +1255,9 @@ class FunctionAnalysis {
       }
       if (isBreak) t.breaks.push(s.copy());
       else t.continues.push(s.copy());
+      // out through the finally of each try opened inside the target
+      for (let j = t.tries; j < this.tries.length; j++)
+        this.tries[j]!.exits.push(s.copy());
       break;
     }
     s.unreachable = true;
@@ -1287,6 +1310,7 @@ class FunctionAnalysis {
         isSwitch: false,
         breaks: [],
         continues: [],
+        tries: this.tries.length,
       };
       this.targets.push(t);
       switch (node.kind) {
@@ -1351,6 +1375,7 @@ class FunctionAnalysis {
       isSwitch: true,
       breaks: [],
       continues: [],
+      tries: this.tries.length,
     };
     this.targets.push(t);
     const afterExpression = s.copy();
@@ -1374,11 +1399,18 @@ class FunctionAnalysis {
   // start from the join of the try block's entry and exit states.
   tryStatement(node: Node, s: State): void {
     const entry = s.copy();
+    const t: TryContext = {catches: !!node.catchClause, exits: []};
+    this.tries.push(t);
     this.statement(node.tryBlock, s);
+    // the block's early exits: a throw among them may come after a send that
+    // the block's end, unreachable, does not show
+    const blockExits = t.exits;
+    t.exits = [];
+    t.catches = false; // a throw in the catch goes to the finally
     let after = s;
     if (node.catchClause) {
       const catchClause = node.catchClause as Node;
-      const cs = joinStates(entry, s);
+      const cs = joinAllStates(joinStates(entry, s), blockExits);
       const decl = catchClause.variableDeclaration as Node | undefined;
       if (decl) {
         // Whatever was thrown may be referenced from anywhere.
@@ -1389,11 +1421,26 @@ class FunctionAnalysis {
       this.statement(catchClause.block, cs);
       after = joinStates(s, cs);
     }
+    this.tries.pop();
     if (node.finallyBlock) {
+      // the finally once as the try completes normally, which goes on after
+      // it, and once more for its early exits, which do not: that run reports
+      // what they reach, and its end leaves early too, through the finally of
+      // every try around this one
+      const early = [...blockExits, ...t.exits];
       const fs = joinStates(entry, after);
+      const fe = early.length !== 0 ? joinAllStates(fs, early) : null;
       this.statement(node.finallyBlock, fs);
       if (after.unreachable) fs.unreachable = true;
       after = fs;
+      if (fe !== null) {
+        this.statement(node.finallyBlock, fe);
+        if (!fe.unreachable)
+          for (const o of this.tries) o.exits.push(fe.copy());
+      }
+    } else {
+      // no finally: the early exits go on out as they were
+      for (const o of this.tries) o.exits.push(...t.exits.map(e => e.copy()));
     }
     if (after !== s) s.assign(after);
   }
