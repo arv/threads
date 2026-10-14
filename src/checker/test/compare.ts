@@ -71,8 +71,23 @@ function reword(line: string): string {
     );
 }
 
-// What threads-check cannot report like the fork, and why.
-const knownDifferences: Record<string, {missing: string[]; reason: string}> = {
+// What threads-check cannot report like the fork (missing), and what it reports
+// and the fork does not yet (extra), and why.
+const knownDifferences: Record<
+  string,
+  {missing?: string[]; extra?: string[]; reason: string}
+> = {
+  'cases/counting': {
+    reason:
+      'the fork has no rule for a counted value yielded, or returned by a generator, which lands in an IteratorResult; threads-check reports it (96032)',
+    extra: [
+      "generators.ts(9,9): error TS96032: A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
+      "generators.ts(10,10): error TS96032: A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
+      "generators.ts(13,9): error TS96032: A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
+      "generators.ts(23,9): error TS96032: A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
+      "generators.ts(24,10): error TS96032: A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
+    ],
+  },
   'fork/ownLayoutStructUnionsErrors': {
     reason:
       'stock TypeScript reduces a union of struct types to the supertype (the fork does not), and does not parse `shared struct`',
@@ -281,8 +296,14 @@ try {
     let expected: string[] | undefined = fork?.lines;
     let source = 'fork';
     if (fork && update && c.name.startsWith('cases/')) {
+      // what the fork says, and what threads-check is known to say besides
       mkdirSync(dirname(expectedFile(c)), {recursive: true});
-      writeFileSync(expectedFile(c), fork.lines.map(l => l + '\n').join(''));
+      writeFileSync(
+        expectedFile(c),
+        [...fork.lines, ...(knownDifferences[c.name]?.extra ?? [])]
+          .map(l => l + '\n')
+          .join(''),
+      );
     }
     if (
       !expected &&
@@ -304,19 +325,26 @@ try {
     const known = knownDifferences[c.name];
     const missing = expected.filter(l => !actual.includes(l));
     const extra = actual.filter(l => !expected.includes(l));
-    const unexplained = missing.filter(l => !known?.missing.includes(l));
-    const ok = unexplained.length === 0 && extra.length === 0;
+    const unexplained = missing.filter(l => !known?.missing?.includes(l));
+    // the fork's lines are the expectation; what test/expected lists besides
+    // (the known extra lines) is not extra
+    const unexplainedExtra = extra.filter(l => !known?.extra?.includes(l));
+    const ok = unexplained.length === 0 && unexplainedExtra.length === 0;
     if (!ok) failures++;
     const timing = fork
       ? `${ms.toFixed(0)} ms (fork ${fork.ms.toFixed(0)} ms)`
       : `${ms.toFixed(0)} ms`;
-    const explained = missing.length - unexplained.length;
+    const explained =
+      missing.length -
+      unexplained.length +
+      extra.length -
+      unexplainedExtra.length;
     rows.push(
       `${ok ? 'ok' : 'FAIL'} ${c.name}: ${actual.length} diagnostics, as ${source} says${explained ? ` but for ${explained} known differences` : ''}; ${timing}`,
     );
     if (explained) rows.push(`    (${known!.reason})`);
     for (const l of unexplained) rows.push(`    missing: ${l}`);
-    for (const l of extra) rows.push(`    extra:   ${l}`);
+    for (const l of unexplainedExtra) rows.push(`    extra:   ${l}`);
   }
 } finally {
   api.close();
