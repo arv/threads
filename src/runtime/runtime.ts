@@ -1135,8 +1135,9 @@ function leave() {
   }
   freeTid();
 }
-function runThread(t: number) {
-  if (!hosting) threadBegin(workerTid());
+// `begun`: the thread's entry is begun already (poolLoop, under its claim)
+function runThread(t: number, begun = false) {
+  if (!hosting && !begun) threadBegin(workerTid());
   count(N_THREADS);
   let r: Result;
   try {
@@ -1484,8 +1485,11 @@ export async function poolLoop() {
     // woken; what the thread does with the pool (spawn, its end) is fenced on
     // its own
     if (!busy()) return leave();
+    // the claim lasts until the thread's entry is alive: a reset sees the one
+    // or the other, never a worker between a thread taken and a thread begun
+    threadBegin(workerTid());
     done();
-    runThread(t);
+    runThread(t, true);
   }
 }
 // a program's main, on the coordinator's main worker (src/worker.ts,
