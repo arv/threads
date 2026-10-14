@@ -1,12 +1,12 @@
 // A send in a try block that leaves early (return, throw, break): its catch and
 // its finally see the value sent; the fork forgets it.
-import { Channel } from "threads";
+import { Channel, consume } from "threads";
 
 declare function use(...values: unknown[]): void;
 
 export function returnThenFinally(ch: Channel<number[]>) {
   const xs = [1];
-  try { ch.send(xs); return; } finally { use(xs); }          // error: may have been sent
+  try { ch.send(xs); return; } finally { use(xs); }          // error: was sent
 }
 export function throwThenCatch(ch: Channel<number[]>) {
   const xs = [1];
@@ -75,4 +75,22 @@ export function finallyThrowsOfATryThatNeverEnds(ch: Channel<number[]>) {
   try {
     try { for (;;) {} } finally { ch.send(xs); use(1); }
   } catch { use(xs); }                                        // fine: nothing gets here
+}
+// what may throw after a value is consumed (no call that sends it, which
+// would throw itself): an await's rejection, a constructor; consume() and
+// import() do not throw
+declare const done: Promise<void>;
+declare class Thing {}
+declare const kept: { value: unknown };
+export async function rejected() {
+  const xs = [1];
+  try { kept.value = consume(xs); await done; return; } catch { use(xs); }  // error: a rejection comes here
+}
+export function constructed() {
+  const xs = [1];
+  try { kept.value = consume(xs); new Thing(); return; } catch { use(xs); }  // error: the constructor may throw
+}
+export function neitherThrows() {
+  const xs = [1];
+  try { kept.value = consume(xs); void import("./try-exits.ts"); return; } catch { use(xs); }  // fine
 }

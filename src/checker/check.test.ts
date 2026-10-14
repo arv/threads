@@ -95,6 +95,8 @@ describe('threads-check, where it differs from the fork', () => {
     ).toEqual(
       [
         "try-exits.ts(9,46): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 9.",
+        "try-exits.ts(87,69): error TS96006: 'xs' may have been consumed by 'consume' on line 87.",
+        "try-exits.ts(91,70): error TS96006: 'xs' may have been consumed by 'consume' on line 91.",
         "try-exits.ts(13,58): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 13.",
         "try-exits.ts(17,56): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 17.",
         "try-exits.ts(22,7): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 21.",

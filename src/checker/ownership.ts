@@ -1627,10 +1627,12 @@ class FunctionAnalysis {
       case K.ClassExpression:
         return this.closureValue(node, s);
       case K.CallExpression: {
-        const v = isConsumeCall(a.c, node)
-          ? this.evalConsume(node, node.arguments[0], s) // `consume(x)`
-          : this.evalCall(node, s);
-        this.mayThrow(s); // after its effects (a send), as a callee may throw
+        // after its effects (a send), as a callee may throw; but not consume(),
+        // which gives back its argument, nor import(), which rejects
+        if (isConsumeCall(a.c, node))
+          return this.evalConsume(node, node.arguments[0], s); // `consume(x)`
+        const v = this.evalCall(node, s);
+        if (node.expression.kind !== K.ImportKeyword) this.mayThrow(s);
         return v;
       }
       case K.NewExpression: {
