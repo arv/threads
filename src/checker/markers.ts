@@ -58,15 +58,18 @@ export function getTypeMarker(c: Own, t: Node | undefined): string {
   return name === 'Sending' || name === 'Shared' ? name : '';
 }
 
-// The marker function a call calls: "consume", "struct", "ref", or "".
+// The marker function a call calls: "consume", "struct", "ref", or "". By the
+// declaration the call resolves to, not the callee's name: `consume as take`,
+// or a const that holds it, is consume too. (The signature is fetched once per
+// call and cached; a declaration is looked up for the runtime's own only.)
 export function getCallMarker(c: Own, call: Node | undefined): string {
   if (!call || call.kind !== K.CallExpression) return '';
   const callee = skipParentheses(call.expression);
-  let name: string;
-  if (callee.kind === K.PropertyAccessExpression) name = callee.name.text;
-  else if (callee.kind === K.Identifier) name = callee.text;
-  else return '';
-  if (name !== 'consume' && name !== 'struct' && name !== 'ref') return '';
+  if (
+    callee.kind !== K.PropertyAccessExpression &&
+    callee.kind !== K.Identifier
+  )
+    return '';
   const handle = c.host.signatureOf(call).declaration;
   if (
     !handle ||

@@ -17,3 +17,6 @@ ownership.ts(97,49): error TS96008: 'first' cannot be sent: it is captured from 
 ownership.ts(98,47): error TS96008: 'job' cannot be sent: it is captured from an outer scope.
 ownership.ts(106,13): error TS96007: 'this.items' cannot be sent: it may be referenced by the caller. Declare the parameter 'Sending<T>' to take ownership.
 ownership.ts(116,10): error TS96003: 'items' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 114.
+alias.ts(10,7): error TS96005: 'xs' was consumed by 'send' on line 9.
+alias.ts(15,7): error TS96005: 'xs' was consumed by 'send' on line 14.
+alias.ts(21,11): error TS96021: A value of type 'Hidden' cannot be stored in an ordinary array or object: reference counting cannot see it there. Use a SharedArray or a shared struct field, or a place typed 'unknown', which holds a handle.
