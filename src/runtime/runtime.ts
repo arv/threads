@@ -80,7 +80,8 @@ const flushCounts = () => {
 // ---- block kinds and layouts (byte offsets) ----
 // thread: [0 kind][4 1 for a goroutine][8 state][12 threw][16 its arguments'
 //         message: address][20 bytes][24 its result: a message's address, or
-//         what it threw, an interned string] (see own.ts __start)
+//         what it threw, an interned string (see Failure)] (see own.ts
+//         __start)
 // string: see $intern
 export const K_THREAD = 6,
   K_STR = 9,
@@ -123,12 +124,14 @@ export const CAN_BLOCK = (() => {
 })();
 
 // what a pool worker posts to the page (browser.ts). a nudge: the page, thread
-// 1, holds up freeing, and passes a quiescent point when it gets the message
+// 1, holds up freeing, and passes a quiescent point when it gets the message.
+// a crash: what the worker threw, as text (String()), and its stack if it had
+// one
 export type Message =
   | {type: 'out'; text: string}
   | {type: 'grow'}
   | {type: 'ready'}
-  | {type: 'crash'; message: string}
+  | {type: 'crash'; message: string; stack?: string}
   | {type: 'nudge'};
 
 let CHECK = false,
@@ -159,6 +162,22 @@ const busy = () => {
 const done = () => {
   Atomics.sub(I32, C_BUSY, 1);
 };
+// a spawn's pool operation begun, on a pool that runs: not one shut down
+// either, as a page's stop() leaves it until the next start() resets it. a
+// thread queued there would be lost: the page drops the worker it asks for,
+// the reset clears the queue, and its join would wait for good
+function spawning() {
+  if (!busy()) throw new Error(STOPPED);
+  if (Atomics.load(I32, C_SHUTDOWN) !== 0) {
+    done();
+    throw new Error(STOPPED);
+  }
+}
+// whether a spawn may begin: this thread's pool runs, neither reset since it
+// attached nor shut down (own.ts __start checks before it allocates the
+// thread's block, or passes a quiescent point: a page stopped stays idle)
+export const $poolRunning = () =>
+  !stale() && Atomics.load(I32, C_SHUTDOWN) === 0;
 
 // ---- allocation: bump, per-thread chunks. only blocks own.ts counts are freed
 // ($freeBlock) ----
@@ -1011,7 +1030,7 @@ function retire(p: number) {
 // ---- the pool's threads ----
 // queue a thread block for the pool (own.ts __start makes them)
 export function spawnThread(t: number) {
-  if (!busy()) throw new Error(STOPPED);
+  spawning();
   try {
     Atomics.add(I32, C_LIVE, 1);
     try {
@@ -1064,8 +1083,9 @@ function enqueue(t: number) {
     }
   }
 }
-// wait for thread block a to finish: its result, or what it threw thrown. the
-// caller checks that it may block before it commits to the join (own.ts)
+// wait for thread block a to finish: its result, or, if it threw, an Error
+// that tells what it threw ($failed) thrown. the caller checks that it may
+// block before it commits to the join (own.ts)
 export function threadJoin(a: number) {
   const di = (a + 8) >> 2;
   if (Atomics.load(I32, di) === RUNNING) {
@@ -1097,9 +1117,51 @@ export async function threadJoinAsync(a: number) {
 function threadResult(a: number) {
   const r = I32[(a + 24) >> 2];
   if (I32[(a + 12) >> 2] === 0) return r;
-  const what = r === 0 ? '' : $str(r);
+  const text = $str(r);
   $releaseString(r);
-  throw what;
+  const f = JSON.parse(text) as Failure,
+    e = $failed(...f);
+  crossed.set(e, f);
+  throw e;
+}
+
+// ---- what a thread threw ----
+// it crosses to the thread that joins it as text, an interned string, as an
+// Error cannot be shared: the JSON of [what it says, its stack], or [what it
+// says] for a value with no stack (a string thrown, say)
+type Failure = [what: string, stack?: string];
+// the errors joins threw, each to the failure it tells of: one thrown on, out
+// of the thread that joined, crosses again as that failure, with the stack of
+// the thread where it began
+const crossed = new WeakMap<object, Failure>();
+// what a thread threw, e, as it crosses: to its joiner, or to a coordinator
+// from a main that threw (src/worker.ts, src/web-worker.ts). it never throws:
+// whoever joins the thread must hear that it ended
+export function $failureOf(e: unknown): Failure {
+  if (typeof e === 'object' && e !== null) {
+    const f = crossed.get(e);
+    if (f !== undefined) return f;
+  }
+  let what: string;
+  try {
+    what = String(e);
+  } catch {
+    what = `a thrown ${typeof e}, which String() fails on`;
+  }
+  try {
+    const stack = (e as {stack?: unknown}).stack;
+    if (typeof stack === 'string') return [what, stack];
+  } catch {}
+  return [what];
+}
+// the Error that tells of what another thread threw (prefix, then what it
+// says): its cause, an Error that says the same, has the stack where it was
+// thrown, if it had one
+export function $failed(what: string, stack?: string, prefix = '') {
+  if (stack === undefined) return new Error(prefix + what);
+  const cause = new Error(what);
+  cause.stack = stack;
+  return new Error(prefix + what, {cause});
 }
 
 // what log writes: its arguments as text, a space between
@@ -1108,8 +1170,22 @@ export function $log(...args: unknown[]) {
 }
 
 // ---- setup and the worker side ----
+// the heap's size in bytes. its addresses are i32s, and so is its end
+// (C_HEAP_END), and its f64 view needs a multiple of 8: so it is at most the
+// last multiple of 8 below 2 GiB, 2047 MB in whole MB. it holds at least the
+// control area and the first string table
+const MB = 2 ** 20,
+  HEAP_MIN = CTRL_BYTES + 16 + MIN_TABLE * 4,
+  HEAP_MAX = 0x7ffffff8;
 export function initShared(sab: SharedArrayBuffer) {
-  // once, before any worker starts
+  // once, before any worker starts. a size it cannot take is refused before
+  // anything is written: 2 GiB would wrap C_HEAP_END negative, and every
+  // allocation would fail, and a heap too small would drop the writes past it
+  const bytes = sab.byteLength;
+  if (!(bytes % 8 === 0 && bytes >= HEAP_MIN && bytes <= HEAP_MAX))
+    throw new RangeError(
+      `threads: the shared heap is a multiple of 8 bytes from ${HEAP_MIN} to ${HEAP_MAX} (${Math.floor(HEAP_MAX / MB)} MB), not ${bytes}`,
+    );
   const i32 = new Int32Array(sab),
     cap = MIN_TABLE,
     table = CTRL_BYTES;
@@ -1121,6 +1197,20 @@ export function initShared(sab: SharedArrayBuffer) {
   i32[C_NEXT_TID] = 2; // the program's main thread is 1
   i32[C_EPOCH] = 2; // even: IDLE, 1, is never an epoch
 }
+// a coordinator's heap of mb MB (src/run.ts's --heap, src/page.ts's ?heap=),
+// set up. mb is a whole number that initShared takes, checked first: as a
+// shift, mb << 20, 2048 would be negative and 4096 no bytes at all
+export function sharedHeap(mb: number) {
+  const least = Math.ceil(HEAP_MIN / MB),
+    most = Math.floor(HEAP_MAX / MB);
+  if (!(Number.isInteger(mb) && mb >= least && mb <= most))
+    throw new RangeError(
+      `threads: a heap is a whole number of MB from ${least} to ${most}, not ${mb}`,
+    );
+  const sab = new SharedArrayBuffer(mb * MB);
+  initShared(sab);
+  return sab;
+}
 // opts: check, the runtime's check option; nudge, in a page's pool worker:
 // post the page a nudge when it holds up freeing (see nudgePage)
 export function attach(
@@ -1129,6 +1219,13 @@ export function attach(
   postMessage: (message: Message) => void,
   writeOut: (text: string) => void,
 ) {
+  // the runtime loaded before the heap was made: its views of shared memory,
+  // module constants, are of none. on a page, a module that imports the
+  // threads API was evaluated before "@arv/threads/heap"
+  if (SAB === null)
+    throw new Error(
+      'threads: import "@arv/threads/heap" first in the page\'s entry module, before any module that imports "@arv/threads": the runtime loaded before the shared memory was made',
+    );
   if (sab !== SAB)
     throw new Error('threads: attach to the heap the worker was started with');
   post = postMessage;
@@ -1139,7 +1236,8 @@ export function attach(
   // so that a thread can report a full heap without allocating
   $intern(HEAP_FULL());
 }
-const HEAP_FULL = () => `RangeError: ${heapFullMessage()}`;
+const HEAP_FULL = () =>
+  JSON.stringify([`RangeError: ${heapFullMessage()}`] satisfies Failure);
 
 export function threadBegin(tid: number) {
   if (tid >= MAX_THREADS) throw new RangeError('threads: out of thread ids');
@@ -1307,12 +1405,16 @@ function endThread(
   threw = false,
   e?: unknown,
 ) {
-  // what it threw is an interned string. a full heap is reported with a message
-  // interned when the worker attached, which needs no memory: whoever joins the
-  // thread must hear that it ended
-  if (threw) {
+  // nothing joins a goroutine (chan.ts go): what it threw is printed. for a
+  // joiner it is an interned string (see Failure), which a thread whose Thread
+  // was collected unjoined drops (own.ts dropThread). a full heap is reported
+  // with a message interned when the worker attached, which needs no memory:
+  // whoever joins the thread must hear that it ended
+  const goroutine = I32[(t + 4) >> 2] === 1,
+    f = threw ? $failureOf(e) : null;
+  if (f !== null && !goroutine) {
     try {
-      r = $internRef(String(e));
+      r = $internRef(JSON.stringify(f));
     } catch {
       r = $intern(HEAP_FULL());
       $retainString(r);
@@ -1322,9 +1424,7 @@ function endThread(
   I32[(t + 12) >> 2] = threw ? 1 : 0;
   const ended = !async && !hosting;
   try {
-    // nothing joins a goroutine (chan.ts go): what it threw is printed
-    if (threw && I32[(t + 4) >> 2] === 1)
-      $log(`a detached thread threw: ${r === 0 ? '' : $str(r)}`);
+    if (f !== null && goroutine) $log(`a detached thread threw: ${f[0]}`);
     if (async) {
       if (--live === 0 && kick !== null) kick();
     } else if (ended) threadEnd();
@@ -1408,7 +1508,7 @@ export const $resumed = () => {
 };
 // queue an async thread for a host
 export function spawnAsync(t: number) {
-  if (!busy()) throw new Error(STOPPED);
+  spawning();
   try {
     spawnAsyncBusy(t);
   } finally {

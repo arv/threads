@@ -100,15 +100,16 @@ describe('a thread not joined', () => {
     const before = settled();
     const ended = own.spawn(throwing);
     run(ended.t);
-    expect(runtime.$internFind(THROWN)).not.toBe(0); // held for the join
+    // what it threw, held for the join: an interned string (its failure)
+    const thrown = runtime.I32[(ended.t + 24) >> 2];
+    expect(runtime.$str(thrown)).toContain(THROWN);
     own.__abandon(ended);
     expect(settled()).toBe(before);
-    expect(runtime.$internFind(THROWN)).toBe(0);
+    expect(runtime.I32[thrown >> 2]).toBe(runtime.K_FREE);
     const detached = own.spawn(throwing);
     own.__abandon(detached);
     run(detached.t);
     expect(settled()).toBe(before);
-    expect(runtime.$internFind(THROWN)).toBe(0);
     expect(logged).toEqual([]);
   });
 
@@ -120,7 +121,6 @@ describe('a thread not joined', () => {
     run(t);
     expect(logged).toEqual([`a detached thread threw: ${THROWN}\n`]);
     expect(settled()).toBe(before);
-    expect(runtime.$internFind(THROWN)).toBe(0);
   });
 });
 

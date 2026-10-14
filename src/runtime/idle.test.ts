@@ -25,9 +25,9 @@ own.fns({noop, throwing});
 
 // the pool's loop, run here until at(n), called at its nth wait for work,
 // says to shut down: the waits' timeouts. a thread the loop runs makes this
-// thread a worker of its own, which is thread 1 again after
+// thread a worker of its own, which is thread 1 again after, and the pool runs
+// again
 async function loop(at: (n: number) => boolean) {
-  Atomics.store(runtime.I32, C_SHUTDOWN, 0);
   const timeouts: number[] = [];
   const atomics = Atomics as unknown as {wait: typeof Atomics.wait};
   const wait = atomics.wait;
@@ -42,6 +42,7 @@ async function loop(at: (n: number) => boolean) {
   } finally {
     atomics.wait = wait;
     runtime.threadBegin(1);
+    Atomics.store(runtime.I32, C_SHUTDOWN, 0);
   }
   return timeouts;
 }

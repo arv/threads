@@ -49,6 +49,8 @@ import {
   $stringDying,
   K_STR,
   $releaseString,
+  $poolRunning,
+  STOPPED,
 } from './runtime.ts';
 
 const SAB = globalThis.__escapeSab ?? null;
@@ -185,9 +187,8 @@ type CellClass = {prototype: object} & Partial<StructType>;
 // a cell is a JS object of one of these classes; it crosses as its block's
 // address
 const cellKinds = new Map<number, CellClass>(); // kind -> class
-// every struct type declared on this thread (sharedStruct): two with one
-// layout share a kind, and the later one is the kind's class, but both are
-// types (newSharedArray checks)
+// every struct type declared on this thread (sharedStruct; newSharedArray
+// checks): one per kind, as a layout declared again is the type declared first
 const structTypes = new WeakSet<object>();
 const sharedAddr = new WeakMap<object, number>(); // a shared value -> its blob
 const REVOKED = new Proxy(Object.create(null), {
@@ -870,7 +871,10 @@ export interface StructType<T = unknown> {
 // directly. a struct's kind is the address of its name and layout in the shared
 // string table, so every thread agrees on it whatever order it loads modules in
 // (a page's workers load them on demand), and two structs with one layout may
-// share it. it is at least CTRL_BYTES, so never a small cell kind
+// share it. it is at least CTRL_BYTES, so never a small cell kind. a kind has
+// one type: a name and layout declared again (by another module, or after
+// structType declared it from the layout) is the type declared first, so the
+// handles made before are instances of it, and box gives them back
 export function sharedStruct<T = unknown>(
   name: string,
   fields: string[],
@@ -879,10 +883,12 @@ export function sharedStruct<T = unknown>(
 ) {
   // the layout, as JSON: a field's name may hold anything (see structType)
   const layout = `struct ${JSON.stringify([name, fields, refs, kinds])}`;
+  const kind = $intern(layout),
+    known = cellKinds.get(kind);
+  if (known !== undefined) return known as StructType<T>;
   if (!kinds)
     kinds = fields.map((_, k) => (refs.includes(k) ? 'r' : 'f')).join('');
-  const kind = $intern(layout),
-    n = fields.length,
+  const n = fields.length,
     size = 8 + n * 8;
   const Struct = {
     [name]: class {
@@ -1241,11 +1247,19 @@ type Element<E> =
         ? string
         : number;
 // for code the compiler did not lay out: `new SharedArray(Struct, n)` gives the
-// boxed array-like
+// boxed array-like. every SharedArray's handle, a new one's or a boxed one's,
+// is a Proxy over an object of this class's prototype (made with no
+// constructor: see sharedArrayHandle), so it is an instance of SharedArray
 export class SharedArray<E extends ElementType = ElementType> {
   declare $cell: number;
-  declare readonly length: number;
   [index: number]: Element<E>;
+  get length() {
+    return I32[(this.$cell >> 2) + 1];
+  }
+  *[Symbol.iterator]() {
+    for (let i = 0; i < this.length; i++)
+      yield sharedArrayGet(this.$cell, i) as Element<E>;
+  }
   constructor(type: E, length: number) {
     const code =
       type === Number
@@ -1275,15 +1289,6 @@ export function unbox(v: MaybeCell) {
     throw new TypeError('own: not a shared struct or SharedArray');
   return a;
 }
-class SharedArrayHandle {
-  declare $cell: number;
-  get length() {
-    return I32[(this.$cell >> 2) + 1];
-  }
-  *[Symbol.iterator]() {
-    for (let i = 0; i < this.length; i++) yield sharedArrayGet(this.$cell, i);
-  }
-}
 const isIndex: (key: string | symbol) => boolean = key =>
   typeof key === 'string' &&
   key !== '' &&
@@ -1308,10 +1313,11 @@ function sharedArrayGet(a: number, i: number) {
   }
   return elementSize(a) === 8 ? F64[e >> 3] : cell(e);
 }
-function sharedArrayHandle(a: number): SharedArrayHandle {
-  const target = Object.assign(Object.create(SharedArrayHandle.prototype), {
-    $cell: a,
-  });
+function sharedArrayHandle(a: number): SharedArray {
+  const target = Object.assign(
+    Object.create(SharedArray.prototype) as SharedArray,
+    {$cell: a},
+  );
   return new Proxy(target, {
     get: (t, key, receiver) =>
       isIndex(key)
@@ -1452,11 +1458,25 @@ export type ThreadFn = (...args: never[]) => unknown;
 // top-level function of a module that uses the ownership syntax
 // (`register(import.meta.url, { ... })`, which it imports as __register); a
 // program whose types are only erased calls it itself, and fns() is the same
-// without a module
+// without a module. a module's url is its own, and should it load again, its
+// functions are the ones to run; fns()'s keys are the name alone (url ''), so
+// a name another function has already is refused: spawning either would run
+// the one registered last
 const byKey = new Map<string, ThreadFn>(),
   keyOf = new Map<ThreadFn, string>();
 export function register(url: string, table: Record<string, ThreadFn>) {
-  for (const [name, f] of Object.entries(table)) {
+  // read once: a getter could give the check one function and the registration
+  // another
+  const entries = Object.entries(table);
+  if (url === '')
+    for (const [name, f] of entries) {
+      const known = byKey.get(`#${name}`);
+      if (known !== undefined && known !== f)
+        throw new TypeError(
+          `own: fns() has a function named ${name} already: a thread finds its function by name, so each name is one function's`,
+        );
+    }
+  for (const [name, f] of entries) {
     const key = `${url}#${name}`;
     byKey.set(key, f);
     keyOf.set(f, key);
@@ -1561,8 +1581,8 @@ function abandon(t: number) {
     dropThread(t);
 }
 // a detached thread's block, once the thread has ended, and its result: what
-// it threw, or a message, read back and dropped with the counts it carries, as
-// a join whose result is dropped gives them back
+// it threw, or a message, dropped with the counts it carries, as a join whose
+// result is dropped gives them back
 function dropThread(t: number) {
   try {
     const r = I32[(t + 24) >> 2];
@@ -1643,15 +1663,23 @@ export const spawn = <A extends unknown[], R>(
 // result and has its error printed if it throws, or one whose Thread was
 // collected unjoined (abandon), whose result is dropped. the runtime frees the
 // block at its end (runtime.ts endThread). an async function's thread is an
-// async thread:
-// a host runs it with others, and it ends when its promise settles (runtime.ts
-// spawnAsync)
+// async thread: a host runs it with others, and it ends when its promise
+// settles (runtime.ts spawnAsync)
 export function __start(fn: ThreadFn, args: unknown[], detached: boolean) {
   const key = keyOf.get(fn);
   if (key === undefined)
     throw new TypeError(
       'own: spawn a top-level function of a module that registers it: the compiler adds `register(import.meta.url, {...})`, and a module run uncompiled calls it',
     );
+  // a pool that was stopped takes no thread: refused before the block is
+  // allocated, the arguments moved or a quiescent point passed (a page whose
+  // pool was stopped stays idle until start()). a counted argument came
+  // retained for the thread (countedRef): its count is given back, as the
+  // message would have carried it
+  if (!$poolRunning()) {
+    for (const v of args) if (v instanceof CountedArg) release(v.a);
+    throw new Error(STOPPED);
+  }
   const t = $allocBlock(32);
   I32[t >> 2] = K_THREAD;
   I32[(t + 4) >> 2] = detached ? 1 : 0;
@@ -1673,15 +1701,15 @@ export function __start(fn: ThreadFn, args: unknown[], detached: boolean) {
   }
   return t;
 }
-// a thread block no worker will run: its arguments' message is read back and
-// freed, with the counts it carried (as a thread's entry frees them), and the
-// block is freed
+// a thread block no worker will run: its arguments' message is dropped, with
+// the counts it carried (as a thread's entry frees them), and the block is
+// freed
 function discardThread(t: number) {
   dropArguments(t);
   $freeBlock(t, 32);
 }
-// a thread's arguments read back and dropped, with the counts they carried (as
-// the thread's entry frees them once it has read them)
+// a thread's arguments dropped, with the counts they carried (as the thread's
+// entry frees them once it has read them)
 function dropArguments(t: number) {
   dropMessage(I32[(t + 16) >> 2], I32[(t + 20) >> 2]);
 }
@@ -1775,14 +1803,21 @@ export function scope<R>(body: (s: Scope) => R): R {
   return result;
 }
 
-// `parts` owned, disjoint chunks of nearly equal size (the checker trusts this)
-export const partition = <T>(items: T[], parts: number) =>
-  Array.from({length: parts}, (_, t) =>
+// `parts` owned, disjoint chunks of nearly equal size (the checker trusts
+// this). parts is a whole number, at least 1: a fraction would leave out the
+// tail, and 0, a negative or NaN every item
+export function partition<T>(items: T[], parts: number) {
+  if (!(Number.isInteger(parts) && parts >= 1))
+    throw new RangeError(
+      `own: partition makes a whole number of parts, at least 1, not ${parts}`,
+    );
+  return Array.from({length: parts}, (_, t) =>
     items.slice(
       Math.floor((items.length * t) / parts),
       Math.floor((items.length * (t + 1)) / parts),
     ),
   );
+}
 // a destructive read: the element leaves the array, so the caller owns it (the
 // checker trusts this)
 export function take<T>(items: (T | undefined)[], index: number) {
