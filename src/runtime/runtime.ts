@@ -340,9 +340,12 @@ export function $freeBlock(p: number, bytes: number) {
 // running thread's word is past g. a thread that ends, or waits, hands what it
 // still has to the shared list (C_PEND), which any thread works off. the epoch
 // is an i32 that wraps: epochs are even, two are compared by their difference
-// (before), and IDLE, odd, is never one. a thread that falls half the range
-// behind stalls the epoch (see reclaim), so that no running thread's word is
-// ever taken for a newer one
+// (before), and IDLE, odd, is never one. two epochs compare while they are
+// less than half the i32 range apart; a thread that falls a quarter of it
+// behind (2^29 reclaims without a quiescent point of its own) stalls the
+// epoch (see reclaim), so that no running thread's word is ever taken for a
+// newer one, with the other quarter left for the reclaims of other threads
+// that race the check
 const IDLE = 1;
 const before = (a: number, b: number) => ((a - b) | 0) < 0;
 const STALL = 1 << 30;
@@ -415,8 +418,9 @@ function reclaim() {
   // the oldest epoch another running thread may hold an address from (this
   // thread is at a point, so its own word is not the bound), then a new epoch,
   // so that what is queued now is older than every later quiescent point;
-  // unless a thread is half the range behind: it would be taken for a newer
-  // one once passed, so the epoch waits for it, and memory grows meanwhile
+  // unless a thread is a quarter of the range behind (STALL): it would be
+  // taken for a newer one once passed, so the epoch waits for it, and memory
+  // grows meanwhile
   const e = Atomics.load(I32, C_EPOCH),
     min = oldestEpoch(ME);
   if (((e - min) | 0) < STALL) Atomics.add(I32, C_EPOCH, 2);
