@@ -626,6 +626,34 @@ describe('strings are collected', () => {
 
 function noop() {}
 
+describe('sizes are checked', () => {
+  // a length or a capacity that is not a whole number would make a block of no
+  // bytes, or of a negative number of them, over the next block
+  it('refuses a SharedArray of a bad length or type', () => {
+    expect(() => new T.SharedArray(Number, -3)).toThrow(RangeError);
+    expect(() => new T.SharedArray(Number, NaN)).toThrow(RangeError);
+    expect(() => new T.SharedArray(Number, 1.5)).toThrow(RangeError);
+    expect(
+      () => new T.SharedArray(Int32Array as unknown as typeof Number, 4),
+    ).toThrow(TypeError);
+    expect(
+      () => new T.SharedArray('i32' as unknown as typeof Number, 4),
+    ).toThrow(TypeError);
+    expect(new T.SharedArray(Number, 0).length).toBe(0);
+  });
+  it('refuses a channel of a bad capacity', () => {
+    expect(() => new T.Channel(NaN)).toThrow(RangeError);
+    expect(() => new T.Channel(-1)).toThrow(RangeError);
+    expect(() => new T.Channel(Infinity)).toThrow(RangeError);
+  });
+  it('the allocator refuses sizes that are not positive', () => {
+    expect(() => runtime.$alloc(-8)).toThrow(RangeError);
+    expect(() => runtime.$alloc(NaN)).toThrow(RangeError);
+    expect(() => runtime.$allocBlock(0)).toThrow(RangeError);
+    expect(() => own.sharedFloat64Array(-1)).toThrow(RangeError);
+  });
+});
+
 describe('the rest', () => {
   beforeAll(() => {
     logged.length = 0;

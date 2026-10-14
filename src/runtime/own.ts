@@ -796,6 +796,8 @@ cellKinds.set(K_CONDITION, Condition);
 // shared heap. no copies; the program orders its reads and writes itself (with
 // a Lock, say)
 export function sharedFloat64Array(n: number) {
+  if (!Number.isInteger(n) || n < 0)
+    throw new RangeError(`own: a length is a whole number, not ${n}`);
   const a = $alloc(16 + n * 8);
   I32[a >> 2] = K_F64;
   I32[(a >> 2) + 1] = n;
@@ -1030,7 +1032,17 @@ const elementSize: (a: number) => number = a => I32[(a >> 2) + 2] & 0xffff,
   elementKind: (a: number) => number = a => I32[(a >> 2) + 2] >>> 16;
 export function newSharedArray(type: StructType | number, length: number) {
   const struct = typeof type !== 'number',
-    size = struct ? type.size : Math.abs(type);
+    size = struct ? type?.size : Math.abs(type);
+  // checked here, where every array is made: a size that is not would make a
+  // block of no bytes, or of a negative number of them, over the next one
+  if (!Number.isInteger(length) || length < 0)
+    throw new RangeError(
+      `own: a SharedArray's length is a whole number, not ${length}`,
+    );
+  if (!(size > 0) || (!struct && !elementCodes.has(type)))
+    throw new TypeError(
+      'own: a SharedArray holds numbers, booleans, strings, i32s, u8s or a shared struct',
+    );
   const a = $allocBlock(16 + length * size);
   I32[a >> 2] = K_SHARED_ARRAY;
   I32[(a >> 2) + 1] = length;
