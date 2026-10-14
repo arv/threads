@@ -83,6 +83,29 @@ describe('threads-check, where it differs from the fork', () => {
     );
   });
 
+  it('refuses a struct used as a struct of another layout', () => {
+    // TypeScript relates struct types by their members; a struct's fields are
+    // read at their places. the fork does not compare layouts
+    const dir = join(checker, 'test/diverging/struct-layouts');
+    expect(
+      check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
+        .map(d => formatDiagnostic(d, dir))
+        .sort(),
+    ).toEqual(
+      [
+        "layouts.ts(26,41): error TS96033: A value of type 'Child & Cell' cannot be used as 'Node': field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
+        "layouts.ts(28,39): error TS96033: A value of type 'Child & Cell' cannot be used as 'Node': field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
+        "layouts.ts(29,46): error TS96033: A value of type 'Child & Cell' cannot be used as 'Node': field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
+        "layouts.ts(30,64): error TS96033: A value of type 'Child & Cell' cannot be used as 'Node': field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
+        "layouts.ts(31,39): error TS96033: A value of type 'B & Cell' cannot be used as 'A': field 'x' is at place 1 of 'B' and 0 of 'A'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
+        "layouts.ts(32,41): error TS96033: A value of type 'Index & Cell' cannot be used as 'Count': field 'n' is of another kind in 'Index' than in 'Count'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
+        "layouts.ts(33,54): error TS96033: A value of type 'SharedArray<Child & Cell, \"other\">' cannot be used as 'SharedArray<Node, \"other\">': the elements are 'Child' structs, which 'Node' structs, of another layout or size, cannot stand for. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
+        "layouts.ts(34,53): error TS96033: A value of type 'Child' cannot be used as 'Node | null': field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
+        "layouts.ts(41,48): error TS96033: A value of type 'Node' cannot be used as 'Child': 'Node' has no field 'extra'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
+      ].sort(),
+    );
+  });
+
   it("reports no blocking call on a Channel that is not the runtime's", () => {
     const dir = join(checker, 'test/diverging/ambient-channel');
     expect(

@@ -406,10 +406,128 @@ function setTarget(c: Own, expr: Node | undefined, targetRaw: boolean): void {
 // handle).
 type Target = Type | undefined | null;
 
-function setTargetType(c: Own, expr: Node | undefined, target: Target): void {
+// cast: a type assertion's, which may name a struct laid out as the value's and
+// more (a downcast) as well as one laid out as a part of it
+function setTargetType(
+  c: Own,
+  expr: Node | undefined,
+  target: Target,
+  cast = false,
+): void {
   if (!expr || target === undefined) return;
-  if (target !== null) checkIntegerTarget(c, expr, target);
+  if (target !== null) {
+    checkIntegerTarget(c, expr, target);
+    checkLayoutTarget(c, expr, target, cast);
+  }
   setTarget(c, expr, target !== null && isCellType(c, target));
+}
+
+// A shared struct value used as another struct type (TypeScript relates struct
+// types by their members, not by their layouts): the other's fields must be
+// this one's first, in order and of the same kinds, as the reads and writes
+// typed by the other go by its places. A SharedArray's elements must be laid
+// out as the other's, as its element size is theirs. The expression's
+// branches are checked as setTarget walks them.
+function checkLayoutTarget(
+  c: Own,
+  expr: Node,
+  target: Type,
+  cast: boolean,
+): void {
+  switch (expr.kind) {
+    case K.ParenthesizedExpression:
+      checkLayoutTarget(c, expr.expression, target, cast);
+      return;
+    case K.ConditionalExpression:
+      checkLayoutTarget(c, expr.whenTrue, target, cast);
+      checkLayoutTarget(c, expr.whenFalse, target, cast);
+      return;
+    case K.BinaryExpression:
+      switch (expr.operatorToken.kind) {
+        case K.AmpersandAmpersandToken:
+        case K.BarBarToken:
+        case K.QuestionQuestionToken:
+          checkLayoutTarget(c, expr.left, target, cast);
+          checkLayoutTarget(c, expr.right, target, cast);
+          return;
+        case K.CommaToken:
+          checkLayoutTarget(c, expr.right, target, cast);
+          return;
+      }
+  }
+  if (!isExpression(expr)) return;
+  const source = c.host.typeOf(expr);
+  const why = layoutMismatch(c, source, target, cast);
+  if (why)
+    c.error(
+      expr,
+      Messages.LayoutMismatch,
+      c.host.typeToString(source),
+      c.host.typeToString(target),
+      why,
+    );
+}
+
+// The shared structs of t's members other than null and undefined, or none
+// when one of them is not a struct (a handle's type, a type parameter).
+function structsOf(c: Own, t: Type): StructInfo[] {
+  const result: StructInfo[] = [];
+  for (const member of nonNullishMembers(c, t)) {
+    const s = getStructOfType(c, member);
+    if (!s) return [];
+    result.push(s);
+  }
+  return result;
+}
+
+// whether a value of struct `from` may be used as struct `to`: the same, or
+// `to`'s fields first in `from`, in order and of the same kinds
+const fits = (from: StructInfo, to: StructInfo): boolean =>
+  from === to ||
+  (to.fields.length <= from.fields.length &&
+    to.fields.every(
+      (f, k) => from.fields[k] === f && from.kinds[k] === to.kinds[k],
+    ));
+
+// what is laid out differently, for the message
+function difference(from: StructInfo, to: StructInfo): string {
+  for (let k = 0; k < to.fields.length; k++) {
+    const f = to.fields[k]!;
+    if (from.fields[k] === f && from.kinds[k] === to.kinds[k]) continue;
+    const at = from.fields.indexOf(f);
+    if (at < 0) return `'${from.name}' has no field '${f}'`;
+    if (at !== k)
+      return `field '${f}' is at place ${at} of '${from.name}' and ${k} of '${to.name}'`;
+    return `field '${f}' is of another kind in '${from.name}' than in '${to.name}'`;
+  }
+  return `'${from.name}' and '${to.name}' are laid out differently`;
+}
+
+function layoutMismatch(
+  c: Own,
+  source: Type,
+  target: Type,
+  cast: boolean,
+): string | undefined {
+  const sourceElement = getSharedArrayElementType(c, source),
+    targetElement = getSharedArrayElementType(c, target);
+  if (sourceElement && targetElement) {
+    const from = getStructOfType(c, sourceElement),
+      to = getStructOfType(c, targetElement);
+    if (
+      from &&
+      to &&
+      !(fits(from, to) && from.fields.length === to.fields.length)
+    )
+      return `the elements are '${from.name}' structs, which '${to.name}' structs, of another layout or size, cannot stand for`;
+    return undefined;
+  }
+  const tos = structsOf(c, target);
+  if (tos.length === 0) return undefined;
+  for (const from of structsOf(c, source))
+    if (!tos.some(to => fits(from, to) || (cast && fits(to, from))))
+      return difference(from, tos[0]!);
+  return undefined;
 }
 
 export function getConversion(c: Own, expr: Node): Conversion {
@@ -566,6 +684,7 @@ function computeConversion(c: Own, node: Node): void {
         c,
         node.expression,
         host.checker.getTypeFromTypeNode(node.type),
+        true,
       );
       return;
     case K.ForOfStatement:
