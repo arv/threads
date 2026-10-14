@@ -94,3 +94,8 @@ export function neitherThrows() {
   const xs = [1];
   try { kept.value = consume(xs); void import("./try-exits.ts"); return; } catch { use(xs); }  // fine
 }
+declare function tag(strings: TemplateStringsArray, ...values: unknown[]): string;
+export function tagged() {
+  const xs = [1];
+  try { kept.value = consume(xs); tag`x`; return; } catch { use(xs); }  // error: the tag may throw
+}

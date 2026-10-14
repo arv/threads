@@ -1646,6 +1646,7 @@ class FunctionAnalysis {
           for (const span of node.template.templateSpans as Node[])
             v = s.mergeValues(v, this.eval(span.expression, s));
         }
+        this.mayThrow(s); // the tag is called, as a callee it may throw
         if (a.isPrimitiveOrSharedStructType(a.typeOf(node))) return sharedValue;
         return v;
       }
