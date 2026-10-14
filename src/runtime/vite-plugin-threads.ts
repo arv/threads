@@ -207,7 +207,7 @@ export default function threads(options: Options = {}): Plugin {
     const key = `p${crypto
       .createHash('sha1')
       .update(
-        `3\0${checker ? 'threads-check' : 'fork'}\0${fingerprint}\0${source}`,
+        `4\0${checker ? 'threads-check' : 'fork'}\0${fingerprint}\0${source}`,
       )
       .digest('hex')
       .slice(0, 12)}`;
@@ -343,18 +343,31 @@ export default function threads(options: Options = {}): Plugin {
       base = path
         .join(outDir, path.relative(rootDir, file))
         .slice(0, -ext.length);
-    return OUTPUTS[ext]?.map(out => base + out).find(out => fs.existsSync(out));
+    return OUTPUTS[ext]
+      ?.map(out => base + out)
+      .find(out => fs.existsSync(out) && sourceOf(out) === file);
   };
-  // the source the fork emitted a file for (a .js may be a .ts's or a .tsx's)
+  // the source the fork emitted a file for: of those it may be (a .js may be
+  // a .ts's or a .tsx's), the one there is, or the one its source map names
   const sourceOf = (out: string) => {
     const ext = path.extname(out),
       base = path
         .join(rootDir, path.relative(outDir, out))
         .slice(0, -ext.length);
-    return Object.keys(OUTPUTS)
+    const sources = Object.keys(OUTPUTS)
       .filter(source => OUTPUTS[source].includes(ext))
       .map(source => base + source)
-      .find(source => fs.existsSync(source));
+      .filter(source => fs.existsSync(source));
+    if (sources.length < 2) return sources[0];
+    try {
+      const map = JSON.parse(fs.readFileSync(`${out}.map`, 'utf8'));
+      const named = (map.sources as string[]).map(source =>
+        path.resolve(path.dirname(out), map.sourceRoot ?? '', source),
+      );
+      return sources.find(source => named.includes(source)) ?? sources[0];
+    } catch {
+      return sources[0];
+    }
   };
   const moduleKey: (file: string) => string = file =>
     path.relative(rootDir, file).split(path.sep).join('/');
@@ -415,9 +428,25 @@ export default function threads(options: Options = {}): Plugin {
     buildStart() {
       emit();
     },
-    resolveId(id) {
+    resolveId(id, importer) {
       if (id === MODULES) return MODULES_ID;
       if (id.startsWith(PLAYGROUND)) return id;
+      // a relative import the fork rewrote (./app.tsx to ./app.js): to the
+      // source it emitted that file for, where Vite would guess (a .ts
+      // first, though there may be a .tsx of its name)
+      const from = importer?.split('?')[0];
+      if (
+        from &&
+        isSource(from) &&
+        /^\.\.?\/.*\.(?:m?js|jsx)$/.test(id) &&
+        !fs.existsSync(path.resolve(path.dirname(from), id))
+      ) {
+        const out = path.join(
+          outDir,
+          path.relative(rootDir, path.resolve(path.dirname(from), id)),
+        );
+        if (fs.existsSync(out)) return sourceOf(out);
+      }
     },
     load(id) {
       if (id.startsWith(PLAYGROUND)) {

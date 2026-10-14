@@ -241,6 +241,34 @@ describe('the Vite plugin', () => {
       expect(await bundle(root)).toMatch(registered('src/app.tsx'));
     });
 
+  it('tells a .tsx thread module from a .ts of its name', async () => {
+    // both compiled, to app.js and app.jsx (jsx: preserve)
+    const OTHER = `import {log} from '@arv/threads';\n\nexport function other() {\n  log('other');\n}\n`;
+    const both = project({
+      'index.html': INDEX,
+      'tsconfig.json': tsconfig({jsx: 'preserve'}),
+      'src/main.ts': page('./app.tsx'),
+      'src/app.tsx': APP,
+      'src/app.ts': OTHER,
+    });
+    expect(await bundle(both)).toMatch(registered('src/app.tsx'));
+    // the .ts left out, the .tsx compiled to app.js (jsx: react-jsx)
+    const one = project({
+      'index.html': INDEX,
+      'tsconfig.json': JSON.stringify({
+        ...JSON.parse(tsconfig({jsx: 'react-jsx'})),
+        include: undefined,
+        files: ['src/main.ts', 'src/app.tsx'],
+      }),
+      'src/main.ts': page('./app.tsx'),
+      'src/app.tsx': APP,
+      'src/app.ts': OTHER,
+    });
+    const js = await bundle(one);
+    expect(js).toMatch(registered('src/app.tsx'));
+    expect(js).not.toContain('"src/app.ts"');
+  });
+
   it('leaves ?raw, ?url and ?worker to Vite', async () => {
     const root = project({
       'index.html': INDEX,

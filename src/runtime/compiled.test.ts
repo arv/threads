@@ -30,6 +30,30 @@ async function i() {}
     ).toEqual(['g', 'h', 'i']);
   });
 
+  it('leaves out what is not at the top level, however it is indented', () => {
+    // the fork's emit of this registers { main, indented, after }
+    expect(
+      registered(`import {log} from '@arv/threads';
+/*
+export default function example() {}
+*/
+const text = \`
+function *notOne() {}
+\${'}'}
+export function nor() {}
+\`;
+const re = /['{]/, half = text.length / 2;
+export function main(n: number): number {
+function *gen() { yield n; }
+  log(String(re), half, [...gen()].length);
+  return n;
+}
+  function indented() {}
+const o = {k: 1}; function after() {}
+`),
+    ).toEqual(['main', 'indented', 'after']);
+  });
+
   it('leaves out a function with no name, and one not at the top level', () => {
     // the fork's emit of this registers { k }
     expect(
