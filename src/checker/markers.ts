@@ -59,17 +59,14 @@ export function getTypeMarker(c: Own, t: Node | undefined): string {
 }
 
 // The marker function a call calls: "consume", "struct", "ref", or "". By the
-// declaration the call resolves to, not the callee's name: `consume as take`,
-// or a const that holds it, is consume too. (The signature is fetched once per
-// call and cached; a declaration is looked up for the runtime's own only.)
+// declaration the call resolves to, whatever the callee looks like: `consume as
+// take`, a const that holds it, `threads["consume"]`, an asserted alias, are
+// consume too. (The signature is fetched once per call and cached; a
+// declaration is looked up for the runtime's own only.) An `import()` is no
+// call of a declaration.
 export function getCallMarker(c: Own, call: Node | undefined): string {
   if (!call || call.kind !== K.CallExpression) return '';
-  const callee = skipParentheses(call.expression);
-  if (
-    callee.kind !== K.PropertyAccessExpression &&
-    callee.kind !== K.Identifier
-  )
-    return '';
+  if (call.expression.kind === K.ImportKeyword) return '';
   const handle = c.host.signatureOf(call).declaration;
   if (
     !handle ||

@@ -51,9 +51,11 @@ describe('threads-check, where it differs from the fork', () => {
         .sort(),
     ).toEqual(
       [
-        "alias.ts(10,7): error TS96005: 'xs' was consumed by 'send' on line 9.",
-        "alias.ts(15,7): error TS96005: 'xs' was consumed by 'send' on line 14.",
-        "alias.ts(21,11): error TS96021: A value of type 'Hidden' cannot be stored in an ordinary array or object: reference counting cannot see it there. Use a SharedArray or a shared struct field, or a place typed 'unknown', which holds a handle.",
+        "alias.ts(11,7): error TS96005: 'xs' was consumed by 'send' on line 10.",
+        "alias.ts(16,7): error TS96005: 'xs' was consumed by 'send' on line 15.",
+        "alias.ts(22,11): error TS96021: A value of type 'Hidden' cannot be stored in an ordinary array or object: reference counting cannot see it there. Use a SharedArray or a shared struct field, or a place typed 'unknown', which holds a handle.",
+        "alias.ts(28,7): error TS96005: 'xs' was consumed by 'send' on line 27.",
+        "alias.ts(33,7): error TS96005: 'xs' was consumed by 'send' on line 32.",
       ].sort(),
     );
   });
