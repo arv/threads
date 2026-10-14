@@ -1107,9 +1107,10 @@ type Failure = [what: string, stack?: string];
 // of the thread that joined, crosses again as that failure, with the stack of
 // the thread where it began
 const crossed = new WeakMap<object, Failure>();
-// what a thread threw, e, as it crosses. it never throws: whoever joins the
-// thread must hear that it ended
-function failureOf(e: unknown): Failure {
+// what a thread threw, e, as it crosses: to its joiner, or to a coordinator
+// from a main that threw (src/worker.ts, src/web-worker.ts). it never throws:
+// whoever joins the thread must hear that it ended
+export function $failureOf(e: unknown): Failure {
   if (typeof e === 'object' && e !== null) {
     const f = crossed.get(e);
     if (f !== undefined) return f;
@@ -1318,7 +1319,7 @@ function endThread(
   // reported with a message interned when the worker attached, which needs no
   // memory: whoever joins the thread must hear that it ended
   const detached = I32[(t + 4) >> 2] === 1,
-    f = threw ? failureOf(e) : null;
+    f = threw ? $failureOf(e) : null;
   if (f !== null && !detached) {
     try {
       r = $internRef(JSON.stringify(f));
