@@ -24,6 +24,29 @@ describe('threads-check', () => {
     ).toThrow(/no file of the project imports the runtime as 'thread'/);
   });
 
+  it('reports a tsconfig that names no files, as tsc does', () => {
+    const tsconfig = join(
+      checker,
+      'test/config-errors/no-inputs/tsconfig.json',
+    );
+    expect(
+      check(tsconfig, {runtime: 'threads', api}).map(d => formatDiagnostic(d)),
+    ).toEqual([
+      `error TS18003: No inputs were found in config file '${tsconfig}'. Specified 'include' paths were '["src/**/*.ts"]' and 'exclude' paths were '[]'.`,
+    ]);
+  });
+
+  it('reports a tsconfig that does not parse where it does not, and checks nothing', () => {
+    // the lenient parse reads the program and its paths past the missing
+    // comma: send.ts uses what it sent, which a valid tsconfig reports
+    const dir = join(checker, 'test/config-errors/malformed');
+    expect(
+      check(join(dir, 'tsconfig.json'), {runtime: 'threads', api}).map(d =>
+        formatDiagnostic(d, dir),
+      ),
+    ).toEqual(["tsconfig.json(9,5): error TS1005: ',' expected."]);
+  });
+
   for (const name of readdirSync(cases).sort()) {
     it(`reports what the fork does on ${name}`, () => {
       const dir = join(cases, name);
@@ -236,6 +259,19 @@ describe('threads-check, where it differs from the fork', () => {
         `threads.ts(56,20): ${thread}`,
       ].sort(),
     );
+  });
+
+  it('refuses recvOk in an async function, as it does recv', () => {
+    // the fork's table of blocking calls has no recvOk: an async function
+    // waits with recvOkAsync, and a plain one may block
+    const dir = join(checker, 'test/diverging/recv-ok');
+    expect(
+      check(join(dir, 'tsconfig.json'), {runtime: 'threads', api}).map(d =>
+        formatDiagnostic(d, dir),
+      ),
+    ).toEqual([
+      "recv-ok.ts(6,20): error TS96030: 'recvOk' blocks its thread, and with it every async function waiting on the same worker: in an async function, use 'recvOkAsync'.",
+    ]);
   });
 
   it("reports no blocking call on a Channel that is not the runtime's", () => {
