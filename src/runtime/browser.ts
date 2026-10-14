@@ -9,6 +9,7 @@ import {
   threadBegin,
   shutdown,
   resetPool,
+  STOPPED,
   $waitBegin,
 } from './runtime.ts';
 import type {Message} from './runtime.ts';
@@ -25,7 +26,6 @@ let started: Promise<void> | null = null,
   generation = 0;
 // the runs waiting for a thread, to fail should the pool stop meanwhile
 const waiting = new Set<(e: Error) => void>();
-const STOPPED = 'threads: the pool was stopped';
 
 // how start() makes the pool
 type Options = {
@@ -69,19 +69,30 @@ export function start({
       w.postMessage({sab, opts: {check}});
     });
   // the runtime set the heap up when it loaded; a pool that was stopped left
-  // it shut down, with the words of workers that are gone
-  if (stopped) resetPool(sab);
-  stopped = false;
-  attach(sab, {check}, onMessage, onLog);
-  threadBegin(1);
-  // between tasks the page holds no uncounted address (REFCOUNT.md): quiescent
-  $waitBegin();
+  // it shut down, with the words of workers that are gone: a reset first,
+  // which waits, without blocking the page, for workers of that pool that run
+  // on. until it is done this thread is of the pool that was stopped, and
+  // spawn() throws
+  const begin = () => {
+    attach(sab, {check}, onMessage, onLog);
+    threadBegin(1);
+    // between tasks the page holds no uncounted address (REFCOUNT.md): quiescent
+    $waitBegin();
+    return Promise.all(Array.from({length: count}, add)).then(() => {});
+  };
   started = Promise.race([
-    Promise.all(Array.from({length: count}, add)).then(() => {}),
+    stopped
+      ? resetPool(sab).then(reset => {
+          // stopped again as it waited
+          if (!reset || generation !== g) throw new Error(STOPPED);
+          return begin();
+        })
+      : begin(),
     new Promise<never>((_, reject) => {
       failStart = reject;
     }),
   ]);
+  stopped = false;
   started.catch(() => {}); // those awaiting it see the rejection
   return started;
 }
@@ -113,7 +124,11 @@ export async function run<A extends unknown[], R>(
 }
 
 // stops the pool: its workers are terminated, with the threads they ran, and
-// the runs waiting for one fail. start() starts a new pool on the same heap
+// the runs waiting for one fail. start() starts a new pool on the same heap:
+// at once when the workers were between threads, else once those at work
+// have ended their threads, or after a second (runtime.ts resetPool). a
+// worker that ran async functions dies at work, as its threads wait on its
+// event loop: stopped mid-way through them, the next start takes the second
 export function stop() {
   shutdown(sab!);
   for (const w of workers.splice(0)) w.terminate();

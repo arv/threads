@@ -383,7 +383,7 @@ describe('the rest', () => {
     using _ = lock.hold();
   });
 
-  it('a pool starts again on the same heap after a shutdown', () => {
+  it('a pool starts again on the same heap after a shutdown', async () => {
     const sab = globalThis.__escapeSab!;
     own.fns({noop});
     own.spawn(noop); // queued: no worker runs here
@@ -394,7 +394,7 @@ describe('the rest', () => {
     });
     runtime.shutdown(sab);
     expect(runtime.counters(sab).shutdown).toBe(1);
-    runtime.resetPool(sab);
+    expect(await runtime.resetPool(sab)).toBe(true);
     expect(runtime.counters(sab)).toMatchObject({
       live: 0,
       queued: 0,
