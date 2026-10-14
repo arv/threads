@@ -1039,7 +1039,13 @@ export function newSharedArray(type: StructType | number, length: number) {
     throw new RangeError(
       `own: a SharedArray's length is a whole number, not ${length}`,
     );
-  if (!(size > 0) || (!struct && !elementCodes.has(type)))
+  // a struct type is the one declared for its kind (sharedStruct, structType):
+  // an object of a size and no kind, or of another's, would write a kind into
+  // every element that nothing reads back
+  if (
+    !(size > 0) ||
+    (struct ? cellKinds.get(type.kind) !== type : !elementCodes.has(type))
+  )
     throw new TypeError(
       'own: a SharedArray holds numbers, booleans, strings, i32s, u8s or a shared struct',
     );
