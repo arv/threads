@@ -19,3 +19,7 @@ export function* numbers(): Generator<number, number> {
 export function plain(): Node {
   return new Node();                         // fine: a function's result is counted
 }
+export async function* awaited() {
+  yield Promise.resolve(new Node());         // error: yielded, once awaited
+  return Promise.resolve(new Node());        // error: a generator's result, once awaited
+}
