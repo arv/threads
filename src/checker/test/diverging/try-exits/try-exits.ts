@@ -38,3 +38,30 @@ export function nestedFinally(ch: Channel<number[]>) {
     try { ch.send(xs); return; } finally { use(1); }
   } finally { use(xs); }                                      // error: the inner return goes on out, sent
 }
+export function finallySendsOnBreak(ch: Channel<number[]>) {
+  const xs = [1];
+  for (;;) { try { break; } finally { ch.send(xs); } }
+  use(xs);                                                    // error: the break goes on after the finally
+}
+export function finallyReassignsOnBreak(ch: Channel<number[]>) {
+  let xs = [1];
+  for (;;) { try { ch.send(xs); break; } finally { xs = [2]; } }
+  use(xs);                                                    // fine: the finally gives xs a new value
+}
+export function finallyReturnsInsteadOfBreak(ch: Channel<number[]>) {
+  const xs = [1];
+  for (;;) { try { ch.send(xs); break; } finally { return; } }
+  use(xs);                                                    // fine: not reached
+}
+export function breakThroughTwoFinallies(ch: Channel<number[]>) {
+  const xs = [1];
+  outer: for (;;) {
+    try { for (;;) { try { break outer; } finally { use(1); } } } finally { ch.send(xs); }
+  }
+  use(xs);                                                    // error: sent by the outer finally
+}
+export function continueThroughFinally(ch: Channel<number[]>, flag: boolean) {
+  const xs = [1];
+  while (flag) { try { continue; } finally { ch.send(xs); } }  // error: sent again next time round
+  use(xs);                                                    // error: may have been sent
+}

@@ -347,16 +347,25 @@ interface Target {
 // block, or its catch, early. A throw (an explicit one, or one a call, a
 // construction or an await may make) goes to `caught` while the block of a try
 // with a catch is analyzed, else to `thrown`; a return, or a break or continue
-// out of the try, to `exits`. An early exit is recorded in the innermost try
-// only; once that try's finally has run for it, what is still reachable goes
-// on to the next try out as what it was, so that a finally that changes or
-// overrides it is taken into account, and a throw still reaches a catch
-// further out while a return does not.
+// out of the try, to `exits`, with where it goes. An early exit is recorded in
+// the innermost try only; once that try's finally has run for it, what is
+// still reachable goes on as what it was: to the next try out if it leaves
+// that one too, else to its target. So a finally that changes or overrides it
+// is taken into account, a throw still reaches a catch further out while a
+// return does not, and a break or continue reaches its target only after
+// every finally it crosses.
 interface TryContext {
   catches: boolean;
   caught: State[];
   thrown: State[];
-  exits: State[];
+  exits: Exit[];
+}
+
+// A return (to no target), or a break or continue to its target
+interface Exit {
+  st: State;
+  to: Target | undefined;
+  isBreak: boolean;
 }
 
 const arrayMutators = new Set([
@@ -1145,7 +1154,9 @@ class FunctionAnalysis {
           this.checkReturn(node.expression, v, s);
         }
         // out through the innermost try's finally first (see TryContext)
-        this.tries.at(-1)?.exits.push(s.copy());
+        this.tries
+          .at(-1)
+          ?.exits.push({st: s.copy(), to: undefined, isBreak: false});
         s.unreachable = true;
         break;
       case K.ThrowStatement:
@@ -1255,11 +1266,7 @@ class FunctionAnalysis {
       } else if (!t.isLoop) {
         continue;
       }
-      if (isBreak) t.breaks.push(s.copy());
-      else t.continues.push(s.copy());
-      // out through the finally of the innermost try, if it is inside the
-      // target (see TryContext)
-      if (this.tries.length > t.tries) this.tries.at(-1)!.exits.push(s.copy());
+      this.exit({st: s.copy(), to: t, isBreak});
       break;
     }
     s.unreachable = true;
@@ -1406,6 +1413,15 @@ class FunctionAnalysis {
     if (t) (t.catches ? t.caught : t.thrown).push(s.copy());
   }
 
+  // an early exit goes out through the finally of the innermost try it
+  // leaves, if any, else on to its target (see TryContext)
+  exit(e: Exit): void {
+    const to = e.to;
+    if (to === undefined || this.tries.length > to.tries)
+      this.tries.at(-1)?.exits.push(e);
+    else (e.isBreak ? to.breaks : to.continues).push(e.st);
+  }
+
   tryStatement(node: Node, s: State): void {
     const entry = s.copy();
     const t: TryContext = {
@@ -1445,33 +1461,45 @@ class FunctionAnalysis {
     // what leaves the try early (the throws its catch took went through it)
     const thrown = [...blockThrown, ...t.thrown],
       exits = [...blockExits, ...t.exits];
-    const onward = (st: State, isThrow: boolean) => {
-      if (!outer) return;
-      if (!isThrow) outer.exits.push(st);
-      else (outer.catches ? outer.caught : outer.thrown).push(st);
+    const throwOn = (st: State) => {
+      if (outer) (outer.catches ? outer.caught : outer.thrown).push(st);
     };
     if (node.finallyBlock) {
       // the finally once as the try completes normally, which goes on after
-      // it, and once more for each kind of early exit, which do not: those runs
-      // report what they reach, and what of them is still reachable (a finally
-      // may return or throw instead) leaves early through the next try out
+      // it, and once more for the throws and for each place the early exits go
+      // to, which do not: those runs report what they reach, and what of them
+      // is still reachable (a finally may return or throw instead) goes on to
+      // the next try out, or to its target
       const fs = joinStates(entry, after);
       this.statement(node.finallyBlock, fs);
       if (after.unreachable) fs.unreachable = true;
       after = fs;
-      for (const [early, isThrow] of [
-        [thrown, true],
-        [exits, false],
-      ] as const) {
-        if (early.length === 0) continue;
+      const run = (early: State[]) => {
         const fe = joinAllStates(early[0]!, early.slice(1));
         this.statement(node.finallyBlock, fe);
-        if (!fe.unreachable) onward(fe, isThrow);
+        return fe;
+      };
+      if (thrown.length > 0) {
+        const fe = run(thrown);
+        if (!fe.unreachable) throwOn(fe);
+      }
+      const groups: Exit[][] = [];
+      for (const e of exits) {
+        const g = groups.find(
+          g => g[0]!.to === e.to && g[0]!.isBreak === e.isBreak,
+        );
+        if (g) g.push(e);
+        else groups.push([e]);
+      }
+      for (const g of groups) {
+        const fe = run(g.map(e => e.st));
+        if (!fe.unreachable)
+          this.exit({st: fe, to: g[0]!.to, isBreak: g[0]!.isBreak});
       }
     } else {
       // no finally: the early exits go on out as they are
-      for (const st of thrown) onward(st, true);
-      for (const st of exits) onward(st, false);
+      for (const st of thrown) throwOn(st);
+      for (const e of exits) this.exit(e);
     }
     if (after !== s) s.assign(after);
   }
