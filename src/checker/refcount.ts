@@ -360,24 +360,80 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
     const t = countedIn(host.iteratedTypes(host.typeOf(e), async));
     if (t) c.error(e, Messages.Yielded, host.typeToString(t));
   };
-  // what the rest of an array pattern holds: what the iteration of the
-  // pattern's source gives (`[...xs] = x`, `const [...xs] = x`), whatever xs's
-  // own type says, or for a pattern nested in another, xs's elements
-  const rest = (pattern: Node, target: Type): Type | undefined => {
+  // The types of what flows into a destructuring pattern, or into a pattern
+  // nested in one: its source's (`p = x`, `const p = x`), or what the
+  // enclosing pattern's source has at the place it takes (`[a, p] = x`,
+  // `{k: p} = x`), with a default's (`[p = d] = x`).
+  const flowsInto = (pattern: Node): Type[] => {
     const parent = pattern.parent as Node | undefined;
-    const source =
-      parent?.kind === K.BinaryExpression &&
-      parent.operatorToken.kind === K.EqualsToken &&
-      parent.left === pattern
-        ? (parent.right as Node)
-        : parent?.kind === K.VariableDeclaration && parent.name === pattern
-          ? (parent.initializer as Node | undefined)
-          : undefined;
-    return (
-      getCountedElementType(c, target) ??
-      (source && countedIn(host.iteratedTypes(host.typeOf(source))))
-    );
+    switch (parent?.kind) {
+      case K.VariableDeclaration:
+        return parent.name === pattern && parent.initializer
+          ? [host.typeOf(parent.initializer)]
+          : [];
+      case K.BinaryExpression:
+        if (
+          parent.operatorToken.kind !== K.EqualsToken ||
+          parent.left !== pattern
+        )
+          return [];
+        // a default in an enclosing pattern, or the assignment itself
+        return isAssignmentTarget(parent)
+          ? [...placeOf(parent), host.typeOf(parent.right)]
+          : [host.typeOf(parent.right)];
+      case K.ArrayLiteralExpression:
+      case K.PropertyAssignment:
+        return isAssignmentTarget(parent) ||
+          parent.kind === K.PropertyAssignment
+          ? placeOf(pattern)
+          : [];
+      case K.BindingElement:
+        return parent.name === pattern
+          ? [
+              ...placeOf(parent),
+              ...(parent.initializer ? [host.typeOf(parent.initializer)] : []),
+            ]
+          : [];
+    }
+    return [];
   };
+  // what an element of a pattern takes from the pattern's source: a tuple's
+  // element at its place, or what the source's iteration gives; a property's
+  const placeOf = (element: Node): Type[] => {
+    let holder = element.parent as Node;
+    let key: string | number | undefined;
+    if (holder.kind === K.PropertyAssignment) {
+      // `{k: p}`: p is the property's initializer
+      key = holder.name?.text;
+      holder = holder.parent as Node;
+    } else if (holder.kind === K.ObjectBindingPattern) {
+      key = (element.propertyName ?? element.name)?.text;
+    } else if (
+      holder.kind === K.ArrayLiteralExpression ||
+      holder.kind === K.ArrayBindingPattern
+    ) {
+      key = (holder.elements as Node[]).indexOf(element);
+    } else {
+      return [];
+    }
+    if (key === undefined) return [];
+    const result: Type[] = [];
+    for (const t of flowsInto(holder)) {
+      const property = host.checker.getPropertyOfType(
+        host.checker.getApparentType(t as any) as any,
+        String(key),
+      );
+      if (property) result.push(host.typeOfSymbol(property));
+      else if (typeof key === 'number') result.push(...host.iteratedTypes(t));
+    }
+    return result;
+  };
+  // what the rest of an array pattern holds: what the iteration of what flows
+  // into the pattern gives, whatever the rest's own type says (an array of a
+  // wider type), or its own elements
+  const rest = (pattern: Node, target: Type): Type | undefined =>
+    getCountedElementType(c, target) ??
+    countedIn(flowsInto(pattern).flatMap(t => host.iteratedTypes(t)));
   const spread = (node: Node): void => {
     const t = countedIn(host.iteratedTypes(host.typeOf(node.expression)));
     if (t)

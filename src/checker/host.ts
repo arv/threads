@@ -272,6 +272,10 @@ export class Host {
   // iterator need not name what it yields first. Empty for a type that is not
   // iterable.
   iteratedTypes(t: Type, async = false): readonly Type[] {
+    // a union's members each as it is: they need have no iterator method in
+    // common (an AsyncIterable or an Iterable)
+    if (t.flags & TypeFlags.Union)
+      return this.memberTypes(t).flatMap(m => this.iteratedTypes(m, async));
     const properties = this.checker.getPropertiesOfType(
       this.checker.getApparentType(t as any) as any,
     );

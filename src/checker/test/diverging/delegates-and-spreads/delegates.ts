@@ -79,3 +79,15 @@ export function widened(ch: Channel<Node>) {
   const [...also]: { value: number }[] = ch;                               // error
   return [plain, also];
 }
+// a union of iterables: each is iterated as it is
+declare const either: AsyncIterable<Node> | Iterable<Node>;
+export async function* viaEither() { yield* either; }                     // error
+// a rest nested in a pattern: what the source has there
+export function nestedRests(nodes: Iterable<Node>, pairs: [number, Iterable<Node>]) {
+  let plain: { value: number }[] = [];
+  ({ p: [...plain] } = { p: nodes });                                      // error
+  const { q: [...also] }: { q: { value: number }[] } = { q: [...nodes] };  // error, and the spread
+  const [, [...more]]: [number, { value: number }[]] = [pairs[0], [...pairs[1]]];  // error, and the spread
+  const [n, [...rest]] = pairs;                                            // error
+  return [plain, also, more, n, rest];
+}
