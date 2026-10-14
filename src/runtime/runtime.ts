@@ -1370,14 +1370,11 @@ async function hostTurn(): Promise<boolean> {
   const t = takeAsync();
   if (t !== 0) {
     if (beforeTask !== null) await beforeTask(t);
-    // the pool may have been stopped during the wait: its thread is lost. a
-    // pool operation from the check to the start: no reset falls between
+    // the pool may have been stopped during the wait: its thread is lost (the
+    // thread is not a pool operation: see poolLoop)
     if (!busy()) return false;
-    try {
-      runThread(t);
-    } finally {
-      done();
-    }
+    done();
+    runThread(t);
     $quiescent();
     // resumed threads run between new ones
     if ((++started & 31) === 0) await eventLoopTurn();
@@ -1479,14 +1476,16 @@ export async function poolLoop() {
       continue;
     }
     if (beforeTask !== null) await beforeTask(t);
-    // the pool may have been stopped during the wait: its thread is lost. a
-    // pool operation from the check to the thread's end: no reset falls in
+    // the pool may have been stopped during the wait: its thread is lost. the
+    // thread itself is not a pool operation: a reset waits for a thread that
+    // runs (resetPool, running), and not for one that blocks, which a busy
+    // claim held through the thread would have it do, for a second each time,
+    // and for good once a blocked worker of a pool that was stopped is never
+    // woken; what the thread does with the pool (spawn, its end) is fenced on
+    // its own
     if (!busy()) return leave();
-    try {
-      runThread(t);
-    } finally {
-      done();
-    }
+    done();
+    runThread(t);
   }
 }
 // a program's main, on the coordinator's main worker (src/worker.ts,
