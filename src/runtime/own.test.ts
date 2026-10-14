@@ -746,6 +746,21 @@ describe('strings are collected', () => {
     own.release(b);
   });
 
+  it('no string has serial 0, which a retired block has', () => {
+    // the serial counter is an i32 and wraps: the string made as it reaches 0
+    // takes the next one
+    const SERIAL = 15; // C_STR_SERIAL
+    const before = Atomics.load(runtime.I32, SERIAL);
+    Atomics.store(runtime.I32, SERIAL, -1);
+    try {
+      const a = runtime.$internRef('a string made as the serials wrap');
+      expect(runtime.I32[(a >> 2) + 5]).not.toBe(0);
+      own.release(a);
+    } finally {
+      Atomics.store(runtime.I32, SERIAL, before);
+    }
+  });
+
   it('an address a string left is never that string again', () => {
     for (let i = 0; i < 200; i++) {
       const a = runtime.$internRef(`gone ${i}`);

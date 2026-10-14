@@ -752,10 +752,12 @@ function known(s: string) {
   // point since the string died): the serial is read again after the count.
   // serials are unique and a retired block's is cleared (retire), so the
   // serial the same both times means the count read between is that string's
-  // count, not the next one's
+  // count, not the next one's. the length is read in the same window, a guard
+  // more should a serial come round again (2^32 strings later)
   return Atomics.load(I32, a >> 2) === K_STR &&
     Atomics.load(I32, (a >> 2) + 5) === k[1] &&
     Atomics.load(I32, (a >> 2) + 1) > 0 &&
+    Atomics.load(I32, (a >> 2) + 2) === s.length &&
     Atomics.load(I32, (a >> 2) + 5) === k[1]
     ? a
     : 0;
@@ -845,7 +847,10 @@ function strAdd(t: number, at: number, s: string, h: number, count: number) {
   I32[(a >> 2) + 2] = s.length;
   I32[(a >> 2) + 3] = h;
   I32[(a >> 2) + 4] = ascii ? 1 : 0;
-  Atomics.store(I32, (a >> 2) + 5, Atomics.add(I32, C_STR_SERIAL, 1) + 1);
+  // a serial is never 0, a retired block's (retire): the i32 counter wraps
+  let serial = Atomics.add(I32, C_STR_SERIAL, 1) + 1;
+  if ((serial | 0) === 0) serial = Atomics.add(I32, C_STR_SERIAL, 1) + 1;
+  Atomics.store(I32, (a >> 2) + 5, serial);
   if (ascii)
     for (let k = 0; k < s.length; k++) U8[a + STR_HEAD + k] = s.charCodeAt(k);
   else
