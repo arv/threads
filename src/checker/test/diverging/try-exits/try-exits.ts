@@ -65,3 +65,14 @@ export function continueThroughFinally(ch: Channel<number[]>, flag: boolean) {
   while (flag) { try { continue; } finally { ch.send(xs); } }  // error: sent again next time round
   use(xs);                                                    // error: may have been sent
 }
+export function finallyOfATryThatNeverEnds(ch: Channel<number[]>) {
+  const xs = [1];
+  outer: { try { for (;;) {} } finally { ch.send(xs); break outer; } }
+  use(xs);                                                    // fine: not reached
+}
+export function finallyThrowsOfATryThatNeverEnds(ch: Channel<number[]>) {
+  const xs = [1];
+  try {
+    try { for (;;) {} } finally { ch.send(xs); use(1); }
+  } catch { use(xs); }                                        // fine: nothing gets here
+}

@@ -98,7 +98,7 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(13,58): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 13.",
         "try-exits.ts(17,56): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 17.",
         "try-exits.ts(22,7): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 21.",
-        "try-exits.ts(39,19): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 38.",
+        "try-exits.ts(39,19): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 38.",
         "try-exits.ts(44,7): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 43.",
         "try-exits.ts(61,7): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 59.",
         "try-exits.ts(65,54): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 65.",
