@@ -10,6 +10,7 @@ import {
   shutdown,
   resetPool,
   STOPPED,
+  $nudged,
   $waitBegin,
 } from './runtime.ts';
 import type {Message} from './runtime.ts';
@@ -52,7 +53,12 @@ export function start({
     // every pool thread is busy: one more worker
     else if (m.type === 'grow') {
       if (generation === g) add();
-    } else if (m.type === 'crash')
+    }
+    // the page holds up freeing: between tasks, as now, it holds no uncounted
+    // address (REFCOUNT.md), so it passes a quiescent point, and frees what
+    // that makes safe
+    else if (m.type === 'nudge') $nudged();
+    else if (m.type === 'crash')
       console.error(`threads: a worker crashed: ${m.message}`);
   };
   const add = () =>
@@ -66,7 +72,7 @@ export function start({
         m.type === 'ready' ? resolve() : onMessage(m);
       w.onerror = e =>
         reject(new Error(`threads: a worker failed to start: ${e.message}`));
-      w.postMessage({sab, opts: {check}});
+      w.postMessage({sab, opts: {check, nudge: true}});
     });
   // the runtime set the heap up when it loaded; a pool that was stopped left
   // it shut down, with the words of workers that are gone: a reset first,
@@ -76,8 +82,15 @@ export function start({
   const begin = () => {
     attach(sab, {check}, onMessage, onLog);
     threadBegin(1);
-    // between tasks the page holds no uncounted address (REFCOUNT.md): quiescent
-    $waitBegin();
+    // the page is a running thread: it reads cells between quiescent points as
+    // any thread does (a handle's reference field, a map's value, a result's
+    // struct), so what it may have read uncounted is not freed until it passes
+    // the next one (REFCOUNT.md). it passes one when it spawns or joins, and
+    // whenever a worker nudges it (above): between tasks, with nothing
+    // uncounted. as it starts, as if nudged: a worker of the pool stopped
+    // before may have handed its queue to the shared list while the page was
+    // waiting
+    $nudged();
     return Promise.all(Array.from({length: count}, add)).then(() => {});
   };
   started = Promise.race([
@@ -107,7 +120,6 @@ export async function run<A extends unknown[], R>(
   await start();
   if (generation !== g) throw new Error(STOPPED);
   const result = spawn(f, ...args).joinAsync();
-  $waitBegin();
   // stop() fails what waits: a thread its worker took with it never finishes.
   // (the join may still settle, late, from a worker that ran on: nothing then
   // reports it)
@@ -138,5 +150,7 @@ export function stop() {
   failStart = null;
   generation++;
   stopped = true;
+  // the page's thread, if start() began it: quiescent until start() again
+  if (started !== null) $waitBegin();
   started = null;
 }
