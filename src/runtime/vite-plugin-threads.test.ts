@@ -7,7 +7,13 @@ import fs from 'node:fs';
 import {homedir, tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {build, createServer, type InlineConfig, type Plugin} from 'vite-plus';
+import {
+  build,
+  createServer,
+  type InlineConfig,
+  type Plugin,
+  type ViteDevServer,
+} from 'vite-plus';
 import {afterAll, beforeEach, describe, expect, it} from 'vite-plus/test';
 import {registeredIn} from './compiled.ts';
 import threads, {type Options} from './vite-plugin-threads.ts';
@@ -105,11 +111,28 @@ async function bundle(...args: Parameters<typeof config>) {
 }
 // a dev server for a project, which the fork compiles as it starts, with no
 // port, websocket or watcher of its own
-const serve = (root: string) =>
+const serve = (root: string, options: Omit<Options, 'tsgo'> = {}) =>
   createServer({
-    ...config(root),
+    ...config(root, options),
     server: {middlewareMode: true, ws: false, watch: null},
   });
+// a change to a file, as the dev server's watcher tells the plugin of it
+const change = async (
+  server: ViteDevServer,
+  type: 'create' | 'update' | 'delete',
+  file: string,
+) => {
+  const plugin = server.config.plugins.find(p => p.name === 'threads')!;
+  const hotUpdate = plugin.hotUpdate as Extract<Plugin['hotUpdate'], Function>;
+  await hotUpdate.call({environment: server.environments.client} as any, {
+    type,
+    file,
+    timestamp: Date.now(),
+    modules: [],
+    read: () => '',
+    server,
+  });
+};
 // main registered, by its module's key
 const registered = (key: string) =>
   new RegExp(
@@ -132,29 +155,40 @@ describe('the Vite plugin', () => {
     expect(await bundle(root)).toMatch(registered('src/app.ts'));
   });
 
-  it('adds options that raise no error of their own', async () => {
-    // which would stop the emit with noEmitOnError
+  it('compiles a project whose tsconfig says noEmitOnError, as the errors are tsc’s to report', async () => {
+    // the type error's, and the fork's of an emit with
+    // allowImportingTsExtensions (TS5096)
     const root = project({
       'index.html': INDEX,
       'tsconfig.json': tsconfig({noEmitOnError: true}),
       'src/main.ts': page('./app.ts'),
       'src/app.ts': APP,
+      'src/wrong.ts': `export const n: number = 'one';\n`,
     });
     expect(await bundle(root)).toMatch(registered('src/app.ts'));
   });
 
-  it('reports the errors that stopped an incremental emit', async () => {
-    // noEmitOnError: the fork writes its build info, and no JavaScript
+  it('reports the errors that stopped an incremental emit, but the options’', async () => {
+    // a file the tsconfig names is missing: the fork writes its build info,
+    // and no JavaScript
     const root = project({
       'index.html': INDEX,
-      'tsconfig.json': tsconfig({incremental: true, noEmitOnError: true}),
+      'tsconfig.json': JSON.stringify({
+        ...JSON.parse(tsconfig({incremental: true})),
+        include: undefined,
+        files: ['src/missing.ts'],
+      }),
       'src/main.ts': page('./app.ts'),
       'src/app.ts': APP,
-      'src/wrong.ts': `export const n: number = 'one';\n`,
     });
-    await expect(bundle(root)).rejects.toThrow(
-      /tsgo emitted nothing for .*tsconfig\.json:\n.*wrong\.ts\(1,14\): error TS2322/,
+    const error = await bundle(root).then(
+      () => null,
+      (e: Error) => e.message,
     );
+    expect(error).toMatch(
+      /tsgo emitted nothing for .*tsconfig\.json:\nerror TS6053: File '.*missing\.ts' not found/,
+    );
+    expect(error).not.toContain('TS5096');
   });
 
   it('says to name the app’s tsconfig where tsconfig.json only references others', async () => {
@@ -270,18 +304,31 @@ describe('the Vite plugin', () => {
     expect(js).not.toContain('"src/app.ts"');
   });
 
-  it('compiles the .ts an import names, though a .js of its name is beside it', async () => {
-    // the fork rewrites ./app.ts to ./app.js
+  it('gives a module what each of its imports names, a .ts or a .js of its name', async () => {
     const root = project({
       'index.html': INDEX,
       'tsconfig.json': tsconfig(),
-      'src/main.ts': page('./app.ts'),
+      'src/main.ts': `import {js} from './app.js';\n${page('./app.ts')}console.log(js, (await import(\`./app.js\`)).js);\n`,
       'src/app.ts': APP,
-      'src/app.js': `export function main() {\n  return 'the JavaScript beside it';\n}\n`,
+      'src/app.js': `export const js = 'the JavaScript beside it';\n`,
     });
     const js = await bundle(root);
     expect(js).toMatch(registered('src/app.ts'));
-    expect(js).not.toContain('the JavaScript beside it');
+    expect(js).toContain('the JavaScript beside it');
+  });
+
+  it('bundles what a dynamic import of a template may import', async () => {
+    // Vite's to make out of the import, as written
+    const root = project({
+      'index.html': INDEX,
+      'tsconfig.json': tsconfig(),
+      'src/main.ts': `const name: string = location.hash.slice(1) || 'a';\nconsole.log((await import(\`./jobs/\${name}.ts\`)).job);\n`,
+      'src/jobs/a.ts': `export const job: string = 'job a';\n`,
+      'src/jobs/b.ts': `export const job: string = 'job b';\n`,
+    });
+    const js = await bundle(root);
+    expect(js).toContain('job a');
+    expect(js).toContain('job b');
   });
 
   it('leaves ?raw, ?url and ?worker to Vite', async () => {
@@ -363,11 +410,6 @@ export default function last() {}
       expect((await client.transformRequest('/src/app.ts'))?.code).toMatch(
         registered('src/app.ts'),
       );
-      const plugin = server.config.plugins.find(p => p.name === 'threads')!;
-      const hotUpdate = plugin.hotUpdate as Extract<
-        Plugin['hotUpdate'],
-        Function
-      >;
       // whether the fork compiled again, which clears what it emitted
       const marker = path.join(root, '.vite/threads/page/marker');
       const compiles = async (
@@ -375,14 +417,11 @@ export default function last() {}
         file: string,
       ) => {
         fs.writeFileSync(marker, '');
-        await hotUpdate.call({environment: client} as any, {
-          type,
-          file: path.isAbsolute(file) ? file : path.join(root, file),
-          timestamp: Date.now(),
-          modules: [],
-          read: () => '',
+        await change(
           server,
-        });
+          type,
+          path.isAbsolute(file) ? file : path.join(root, file),
+        );
         return !fs.existsSync(marker);
       };
       expect(await compiles('update', 'scripts/tool.ts')).toBe(false);
@@ -393,6 +432,34 @@ export default function last() {}
       // a thread module the workers' table names, which nothing loaded
       fs.rmSync(path.join(root, 'src/extra.ts'));
       expect(await compiles('delete', 'src/extra.ts')).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('compiles again for any change after a compile that failed', async () => {
+    // noEmitOnError asked for (and allowImportingTsExtensions, whose error
+    // with an emit would stop every one, not): a type error in a source
+    // nothing imports stops the emit
+    const root = project({
+      'index.html': INDEX,
+      'tsconfig.json': tsconfig({allowImportingTsExtensions: false}),
+      'src/main.ts': page('./app'),
+      'src/app.ts': APP,
+      'src/unused.ts': `export const n: number = 1;\n`,
+    });
+    const server = await serve(root, {args: ['--noEmitOnError', 'true']});
+    try {
+      const unused = path.join(root, 'src/unused.ts');
+      fs.writeFileSync(unused, `export const n: number = 'one';\n`);
+      await expect(change(server, 'update', unused)).rejects.toThrow(
+        /unused\.ts\(1,14\): error TS2322/,
+      );
+      fs.writeFileSync(unused, `export const n: number = 1;\n`);
+      await change(server, 'update', unused);
+      expect(
+        fs.existsSync(path.join(root, '.vite/threads/page/src/app.js')),
+      ).toBe(true);
     } finally {
       await server.close();
     }

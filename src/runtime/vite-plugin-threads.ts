@@ -116,39 +116,22 @@ export default function threads(options: Options = {}): Plugin {
     outDir: string,
     playgroundDir: string,
     registering: string[] = [];
-  // the modules a source names, as it names them, by its statements as
-  // Vite's parser reads them, not by what its comments or strings say: in
-  // its imports and exports from (statically), and its import()s of a string
-  const named = (file: string, source: string) => {
-    const {module} = parseSync(file, source);
-    return {
-      statically: new Set([
-        ...module.staticImports.map(i => i.moduleRequest.value),
-        ...module.staticExports.flatMap(e =>
-          e.entries.flatMap(entry =>
-            entry.moduleRequest ? [entry.moduleRequest.value] : [],
-          ),
-        ),
-      ]),
-      dynamically: new Set(
-        module.dynamicImports.flatMap(i => {
-          const m = /^(['"])(.*)\1$/s.exec(
-            source.slice(i.moduleRequest.start, i.moduleRequest.end),
-          );
-          return m ? [m[2]] : [];
-        }),
-      ),
-    };
-  };
   // whether a module imports the runtime, or exports from it, as a module
   // whose functions threads run does (the fork registers them in such a
-  // module only)
-  const importsRuntime = (file: string, source: string) =>
-    named(file, source).statically.has(runtime);
-  // the relative imports each source names, as it names them, which the
-  // fork's emit may not (it rewrites ./app.ts to ./app.js); emptied as the
-  // fork compiles again
-  const authored = new Map<string, Set<string>>();
+  // module only): by its statements as Vite's parser reads them, not by
+  // what its comments or strings say
+  const importsRuntime = (file: string, source: string) => {
+    const {module} = parseSync(file, source);
+    return (
+      module.staticImports.some(i => i.moduleRequest.value === runtime) ||
+      module.staticExports.some(e =>
+        e.entries.some(entry => entry.moduleRequest?.value === runtime),
+      )
+    );
+  };
+  // whether the fork's last compile emitted the project, so that what it did
+  // not emit is not the project's
+  let emittedProject = false;
 
   // threads-check, loaded once, with one TypeScript API session for every
   // check: node imports its TypeScript sources directly (type stripping)
@@ -300,6 +283,7 @@ export default function threads(options: Options = {}): Plugin {
   // stop the emit
   function emit() {
     fs.rmSync(outDir, {recursive: true, force: true});
+    emittedProject = false;
     let failed: string | null = null;
     try {
       execFileSync(
@@ -314,12 +298,18 @@ export default function threads(options: Options = {}): Plugin {
           '--rootDir',
           rootDir,
           '--sourceMap',
-          // a Vite project's tsconfig emits nothing (noEmit), and imports .ts
-          // files (allowImportingTsExtensions), which a compile that emits
-          // must rewrite: to .js, which Vite resolves to the .ts again
+          '--pretty',
+          'false',
+          // a Vite project's tsconfig emits nothing (noEmit). it imports .ts
+          // files too (allowImportingTsExtensions), which the fork calls an
+          // error once it emits (TS5096: that needs noEmit) and emits all the
+          // same, the imports as they are, for Vite to resolve. type errors,
+          // that one among them, are tsc's to report, not a reason to emit
+          // nothing (noEmitOnError)
           '--noEmit',
           'false',
-          '--rewriteRelativeImportExtensions',
+          '--noEmitOnError',
+          'false',
           // an incremental build's state goes with what it emitted (kept
           // elsewhere, the next build would emit only what changed since)
           '--tsBuildInfoFile',
@@ -329,13 +319,20 @@ export default function threads(options: Options = {}): Plugin {
         {stdio: 'pipe'},
       );
     } catch (e: any) {
-      // what it said, or why it did not run
-      failed = `${e.stdout ?? ''}${e.stderr ?? ''}` || String(e.message ?? e);
+      // what it said, but the TS5096 the options above make it say, or why
+      // it did not run
+      failed =
+        `${e.stdout ?? ''}${e.stderr ?? ''}`
+          .split('\n')
+          .filter(line => !/\berror TS5096:/.test(line))
+          .join('\n')
+          .trim() ||
+        (typeof e.status === 'number' ? null : String(e.message ?? e));
     }
-    // what it emitted is its JavaScript: an incremental build that stopped
-    // (noEmitOnError) wrote its build info all the same
+    // what it emitted is its JavaScript: a build that stopped (a file the
+    // tsconfig names is missing, say) wrote its incremental build info all
+    // the same
     registering = [];
-    authored.clear();
     let js = 0;
     const walk: (dir: string) => void = dir => {
       for (const entry of fs.readdirSync(dir, {withFileTypes: true})) {
@@ -357,6 +354,7 @@ export default function threads(options: Options = {}): Plugin {
           ? `threads: tsgo emitted nothing for ${project}:\n${failed}`
           : `threads: tsgo emitted nothing for ${project}, and reported no error: a solution-style tsconfig (references, and "files": []) compiles nothing itself. Name the app's (tsconfig.app.json, say) with the plugin's tsconfig option`,
       );
+    emittedProject = true;
   }
   // what the fork emitted for a source, if it did
   const emitted = (file: string) => {
@@ -449,35 +447,9 @@ export default function threads(options: Options = {}): Plugin {
     buildStart() {
       emit();
     },
-    resolveId(id, importer) {
+    resolveId(id) {
       if (id === MODULES) return MODULES_ID;
       if (id.startsWith(PLAYGROUND)) return id;
-      // a relative import the fork rewrote (./app.tsx to ./app.js), which
-      // its source does not name: to the source the fork emitted that file
-      // for, where Vite would guess (a .ts first, though there may be a .tsx
-      // of its name), or take a .js of that name there is
-      const from = importer?.split('?')[0];
-      if (
-        from &&
-        isSource(from) &&
-        /^\.\.?\/.*\.(?:m?js|jsx)$/.test(id) &&
-        fs.existsSync(from)
-      ) {
-        let names = authored.get(from);
-        if (!names) {
-          const {statically, dynamically} = named(
-            from,
-            fs.readFileSync(from, 'utf8'),
-          );
-          names = new Set([...statically, ...dynamically]);
-          authored.set(from, names);
-        }
-        const out = path.join(
-          outDir,
-          path.relative(rootDir, path.resolve(path.dirname(from), id)),
-        );
-        if (!names.has(id) && fs.existsSync(out)) return sourceOf(out);
-      }
     },
     load(id) {
       if (id.startsWith(PLAYGROUND)) {
@@ -538,9 +510,10 @@ export default function threads(options: Options = {}): Plugin {
     // with ?t=, and a page or worker that loaded it before would run a second
     // copy of the runtime (whose threads' output, for one, goes nowhere). a
     // source the fork did not compile and no environment loaded (a script the
-    // tsconfig leaves out, say) changes nothing as it changes; one that
-    // appeared may be what a module failed to import, and one that went a
-    // module the workers' table names
+    // tsconfig leaves out, say) changes nothing as it changes, where the fork
+    // compiled the project last (after a compile that failed, nothing was
+    // compiled); one that appeared may be what a module failed to import, and
+    // one that went a module the workers' table names
     hotUpdate({type, file, server}) {
       if (this.environment.name !== 'client') return [];
       if (file.startsWith(RUNTIME_DIR + path.sep)) {
@@ -550,6 +523,7 @@ export default function threads(options: Options = {}): Plugin {
       if (!isSource(file)) return;
       if (
         type === 'update' &&
+        emittedProject &&
         !emitted(file) &&
         Object.values(server.environments).every(
           env => !env.moduleGraph.getModulesByFile(file)?.size,
