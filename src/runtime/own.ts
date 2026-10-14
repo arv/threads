@@ -1438,9 +1438,18 @@ export function setModuleLoader(load: ModuleLoader) {
   setBeforeTask(async t => {
     // the blob's [key, ...args]
     const base = I32[(t + 16) >> 2],
-      key = get(base, I32[base >> 2] + 1, false) as string;
-    if (!byKey.has(key))
-      await moduleLoader!(key.slice(0, key.lastIndexOf('#')));
+      key = get(base, I32[base >> 2] + 1, false) as string,
+      id = key.slice(0, key.lastIndexOf('#'));
+    if (byKey.has(key)) return;
+    try {
+      await moduleLoader!(id);
+    } catch (e) {
+      // the thread's error (runtime.ts prepare): a module that throws as it
+      // loads, is not found, or is blocked
+      throw new Error(
+        `own: the module of thread function '${key.slice(key.lastIndexOf('#') + 1)}' could not be loaded here (${id}): ${String((e as {message?: unknown})?.message ?? e)}`,
+      );
+    }
   });
 }
 // R: what fn returns, or what its promise resolves to
