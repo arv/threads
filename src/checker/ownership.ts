@@ -344,11 +344,13 @@ interface Target {
 }
 
 // A try statement being analyzed: the states with which control leaves its
-// block, or its catch, early. A throw (an explicit one, or one a call, a
-// construction or an await may make) goes to `caught` while the block of a try
-// with a catch is analyzed, else to `thrown`; a return, or a break or continue
-// out of the try, to `exits`, with where it goes. An early exit is recorded in
-// the innermost try only; once that try's finally has run for it, what is
+// block, or its catch, early. A throw (an explicit one, or one an expression
+// may make as it is evaluated: a call, a construction, an await, a property
+// read or write, an operator that converts its operands, an iteration, a
+// destructuring) goes to `caught` while the block of a try with a catch is
+// analyzed, else to `thrown`; a return, or a break or continue out of the
+// try, to `exits`, with where it goes. An early exit is recorded in the
+// innermost try only; once that try's finally has run for it, what is
 // still reachable goes on as what it was: to the next try out if it leaves
 // that one too, else to its target. So a finally that changes or overrides it
 // is taken into account, a throw still reaches a catch further out while a
@@ -389,7 +391,6 @@ class Analyzer {
   readonly captures = new Map<Node, Captures>();
   readonly loopFresh = new Map<Node, Set<TsSymbol>>();
   readonly primitiveOrShared = new Map<Type, boolean>();
-  readonly evaluating = new Map<Node, boolean>();
   readonly idOf: (symbol: TsSymbol) => number;
 
   constructor(c: Own) {
@@ -415,19 +416,6 @@ class Analyzer {
 
   typeOf(node: Node): Type {
     return this.c.host.typeOf(node);
-  }
-
-  // Reports whether a block evaluates anything: a throw no call makes (a
-  // getter's, an operator's) may then come from it, as early as its start.
-  evaluatesAnything(block: Node): boolean {
-    let result = this.evaluating.get(block);
-    if (result === undefined) {
-      const visit = (node: Node): boolean =>
-        isExpression(node) || !!forEachChild(node, visit);
-      result = !!forEachChild(block, visit);
-      this.evaluating.set(block, result);
-    }
-    return result;
   }
 
   analyzeFunction(node: Node): FunctionResult {
@@ -1229,6 +1217,7 @@ class FunctionAnalysis {
       return;
     }
     if (isBindingPattern(name)) {
+      this.mayThrow(s); // the value is iterated, or its properties read
       for (const element of name.elements as Node[]) {
         if (element.kind !== K.BindingElement) continue;
         let ev = v;
@@ -1364,6 +1353,7 @@ class FunctionAnalysis {
         case K.ForInStatement:
         case K.ForOfStatement: {
           exit = st.copy();
+          this.mayThrow(st); // the next value is taken
           const value = receives
             ? regionValue(a.newRegionOf(true, st))
             : iterated;
@@ -1454,11 +1444,6 @@ class FunctionAnalysis {
     t.thrown = [];
     t.exits = [];
     t.catches = false; // a throw in the catch goes to the finally
-    // a throw no call makes may come from anywhere in a block: as soon as it
-    // starts, conservatively, as one more of its throws (the catch starts
-    // from the try block's entry already)
-    if (!node.catchClause && this.a.evaluatesAnything(node.tryBlock))
-      blockThrown.push(entry);
     let after = s;
     if (node.catchClause) {
       const catchClause = node.catchClause as Node;
@@ -1470,7 +1455,6 @@ class FunctionAnalysis {
         cs.addFlags(r, RegionFlags.Outer);
         this.bindName(decl.name, decl, regionValue(r), cs);
       }
-      if (this.a.evaluatesAnything(catchClause.block)) t.thrown.push(cs.copy());
       this.statement(catchClause.block, cs);
       after = joinStates(s, cs);
     }
@@ -1587,6 +1571,7 @@ class FunctionAnalysis {
       case K.TemplateExpression:
         for (const span of node.templateSpans as Node[])
           this.eval(span.expression, s);
+        this.mayThrow(s); // a substitution is converted to a string
         return sharedValue;
       case K.TypeOfExpression:
       case K.VoidExpression:
@@ -1594,6 +1579,7 @@ class FunctionAnalysis {
         return sharedValue;
       case K.DeleteExpression:
         this.evalWriteTarget(node.expression, s);
+        this.mayThrow(s);
         return sharedValue;
       case K.PrefixUnaryExpression:
         if (
@@ -1602,12 +1588,16 @@ class FunctionAnalysis {
         )
           this.evalWriteTarget(node.operand, s);
         else this.eval(node.operand, s);
+        // all but `!` convert their operand to a number
+        if (node.operator !== K.ExclamationToken) this.mayThrow(s);
         return sharedValue;
       case K.PostfixUnaryExpression:
         this.evalWriteTarget(node.operand, s);
+        this.mayThrow(s);
         return sharedValue;
       case K.YieldExpression: {
         this.eval(node.expression, s);
+        this.mayThrow(s); // the caller may throw into the generator
         // The value sent into the generator comes from its caller.
         const r = a.newRegion();
         s.addFlags(r, RegionFlags.Caller);
@@ -1633,8 +1623,11 @@ class FunctionAnalysis {
         }
         return regionValue(s.find(r));
       }
-      case K.SpreadElement:
-        return this.eval(node.expression, s);
+      case K.SpreadElement: {
+        const v = this.eval(node.expression, s);
+        this.mayThrow(s); // it is iterated
+        return v;
+      }
       case K.FunctionExpression:
       case K.ArrowFunction:
       case K.ClassExpression:
@@ -1665,11 +1658,13 @@ class FunctionAnalysis {
       }
       case K.PropertyAccessExpression: {
         const obj = this.eval(node.expression, s);
+        this.mayThrow(s); // a getter's, or of null
         return this.readMember(node, node.expression, obj, s);
       }
       case K.ElementAccessExpression: {
         const obj = this.eval(node.expression, s);
         this.eval(node.argumentExpression, s);
+        this.mayThrow(s);
         return this.readMember(node, node.expression, obj, s);
       }
     }
@@ -1811,6 +1806,7 @@ class FunctionAnalysis {
       // Compound assignment: reads and writes the target.
       this.evalWriteTarget(node.left, s);
       this.eval(node.right, s);
+      this.mayThrow(s);
       return sharedValue;
     }
     if (
@@ -1830,6 +1826,13 @@ class FunctionAnalysis {
     }
     this.eval(node.left, s);
     this.eval(node.right, s);
+    // an operator that converts its operands (arithmetic, a comparison), `in`
+    // and `instanceof` may throw; `===` and `!==` do not
+    if (
+      op !== K.EqualsEqualsEqualsToken &&
+      op !== K.ExclamationEqualsEqualsToken
+    )
+      this.mayThrow(s);
     if (
       op === K.PlusToken &&
       !this.a.isPrimitiveOrSharedStructType(this.a.typeOf(node))
@@ -1878,11 +1881,13 @@ class FunctionAnalysis {
         if (target.kind === K.ElementAccessExpression)
           this.eval(target.argumentExpression, s);
         this.checkWrite(target, target.expression, obj);
+        this.mayThrow(s); // a setter's, or of null
         if (obj.kind === ValueKind.InRegion && !s.isCounted(obj))
           s.mergeValues(obj, v);
         return;
       }
       case K.ArrayLiteralExpression:
+        this.mayThrow(s); // the value is iterated
         for (const element of target.elements as Node[]) {
           if (element.kind === K.OmittedExpression) continue;
           if (element.kind === K.SpreadElement) {
@@ -1902,6 +1907,7 @@ class FunctionAnalysis {
         }
         return;
       case K.ObjectLiteralExpression:
+        this.mayThrow(s); // its properties are read
         for (const property of target.properties as Node[]) {
           switch (property.kind) {
             case K.PropertyAssignment: {
@@ -1990,8 +1996,10 @@ class FunctionAnalysis {
       if (v.kind === ValueKind.InRegion) s.union(r, v.region);
     };
     for (const property of node.properties as Node[]) {
-      if (property.name?.kind === K.ComputedPropertyName)
+      if (property.name?.kind === K.ComputedPropertyName) {
         this.eval(property.name.expression, s);
+        this.mayThrow(s); // the key is converted
+      }
       switch (property.kind) {
         case K.PropertyAssignment:
           add(this.eval(property.initializer, s));
@@ -2001,6 +2009,7 @@ class FunctionAnalysis {
           break;
         case K.SpreadAssignment:
           add(this.eval(property.expression, s));
+          this.mayThrow(s); // its properties are read
           break;
         case K.MethodDeclaration:
         case K.GetAccessor:
@@ -2074,6 +2083,7 @@ class FunctionAnalysis {
       receiver = this.eval(receiverExpr, s);
       if (callee.kind === K.ElementAccessExpression)
         this.eval(callee.argumentExpression, s);
+      this.mayThrow(s); // the method is looked up
       add(receiver);
     } else {
       add(this.eval(callee, s));

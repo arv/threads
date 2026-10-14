@@ -218,8 +218,8 @@ describe('threads-check, where it differs from the fork', () => {
     // takes a break or continue to its target before the finally it crosses.
     // it goes on after a finally from the block's entry too, so a send in a
     // block that completes is one that may have been made. a throw no call
-    // makes (a getter's) may come as soon as a block starts: in the finally, a
-    // send in the block is one that may have been made
+    // makes (a getter's, an operator's, a setter's) is taken to come where it
+    // may: in the finally, a send in the block is one that may have been made
     const dir = join(checker, 'test/diverging/try-exits');
     expect(
       check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
@@ -246,6 +246,9 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(129,54): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 128.",
         "try-exits.ts(137,7): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 135.",
         "try-exits.ts(144,19): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 141.",
+        "try-exits.ts(149,67): error TS96005: 'xs' was consumed by 'consume' on line 149.",
+        "try-exits.ts(153,86): error TS96005: 'xs' was consumed by 'consume' on line 153.",
+        "try-exits.ts(157,57): error TS96006: 'xs' may have been consumed by 'consume' on line 157.",
       ].sort(),
     );
   });

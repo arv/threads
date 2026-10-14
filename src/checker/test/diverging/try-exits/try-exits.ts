@@ -91,8 +91,8 @@ export function constructed() {
   try { kept.value = consume(xs); new Thing(); return; } catch { use(xs); }  // error: the constructor may throw
 }
 export function neitherThrows() {
-  const xs = [1];
-  try { kept.value = consume(xs); void import("./try-exits.ts"); return; } catch { use(xs); }  // fine
+  const xs = [1]; let held: unknown;
+  try { held = consume(xs); void import("./try-exits.ts"); return; } catch { use(xs, held); }  // fine
 }
 declare function tag(strings: TemplateStringsArray, ...values: unknown[]): string;
 export function tagged() {
@@ -142,4 +142,24 @@ export function implicitThenReturn(ch: Channel<number[]>) {
   try {
     try { void getter.value; xs = [2]; } finally { return; }
   } finally { use(xs); }                                      // error: so may the return
+}
+// a throw no call makes comes where it may: after what the block did before
+export function consumedThenGetter() {
+  let xs = [1];
+  try { consume(xs); void getter.value; xs = [2]; } finally { use(xs); }  // error: the getter may throw before xs is new
+}
+export function consumedInCatchThenGetter() {
+  let xs = [1];
+  try { throw 0; } catch { consume(xs); void getter.value; xs = [2]; } finally { use(xs); }  // error
+}
+export function writtenAfterConsume() {
+  const xs = [1];
+  try { kept.value = consume(xs); return; } catch { use(xs); }  // error: a setter may throw
+}
+// what is not evaluated where it is written throws nothing there
+export function declarationsOnly(ch: Channel<number[]>) {
+  const xs = [1];
+  ch.send(xs);
+  outer: { try { let unused: number; interface X { value: number } const f = () => getter.value; for (;;) {} } finally { break outer; } }
+  use(xs);                                                    // fine: not reached
 }
