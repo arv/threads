@@ -325,6 +325,43 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
     }
     c.error(expr, Messages.Yielded, host.typeToString(t));
   };
+  // A counted value, or a tuple or array holding one (a SharedMap's entries),
+  // as an iteration gives it.
+  const countedIn = (t: Type | undefined): Type | undefined =>
+    t === undefined
+      ? undefined
+      : isCellType(c, t)
+        ? t
+        : getCountedElementType(c, t)
+          ? t
+          : undefined;
+  // `yield* e`: e's own yields are reported where they are when e is a call of
+  // a generator of this program (its body is checked); otherwise what e's
+  // iteration gives lands in this generator's IteratorResults (a channel's
+  // values, a map's, an ambient generator's)
+  const delegate = (e: Node, async: boolean): void => {
+    const target = skipParentheses(e);
+    if (target.kind === K.CallExpression) {
+      const handle = host.signatureOf(target).declaration;
+      const decl =
+        handle && !isAmbientHandle(c, handle)
+          ? host.declarationOf(handle)
+          : undefined;
+      if (
+        decl &&
+        getFunctionFlags(decl) & FunctionFlags.Generator &&
+        !(getFunctionFlags(decl) & FunctionFlags.Invalid)
+      )
+        return;
+    }
+    const t = countedIn(host.iteratedType(host.typeOf(e), async));
+    if (t) c.error(e, Messages.Yielded, host.typeToString(t));
+  };
+  const spread = (node: Node): void => {
+    const t = countedIn(host.iteratedType(host.typeOf(node.expression)));
+    if (t)
+      c.error(node.expression, Messages.StoredInOrdinary, host.typeToString(t));
+  };
   const destructured = (name: Node, t: Type): void => {
     if (isCellType(c, t))
       c.error(name, Messages.BoundByDestructuring, name.text);
@@ -390,21 +427,32 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
         return false;
       case K.YieldExpression:
       case K.ReturnStatement: {
-        // a delegated yield (`yield* inner()`, or `return yield* inner()`) is
-        // the inner generator's to report
         const flags = getFunctionFlags(getContainingFunction(node));
+        const async = !!(flags & FunctionFlags.Async);
         const delegated = (e: Node | undefined) =>
           e !== undefined &&
           skipParentheses(e).kind === K.YieldExpression &&
           !!skipParentheses(e).asteriskToken;
-        if (
-          flags & FunctionFlags.Generator &&
+        if (!(flags & FunctionFlags.Generator)) break;
+        if (node.kind === K.YieldExpression && node.asteriskToken)
+          delegate(node.expression, async);
+        else if (
           !delegated(node) &&
           !(node.kind === K.ReturnStatement && delegated(node.expression))
         )
-          yielded(node.expression, !!(flags & FunctionFlags.Async));
+          yielded(node.expression, async);
         break;
       }
+      case K.SpreadElement:
+        // [...x] and f(...x): what x's iteration gives goes into an ordinary
+        // array, or an arguments list
+        if (
+          node.parent?.kind === K.ArrayLiteralExpression &&
+          isAssignmentTarget(node.parent)
+        )
+          break;
+        spread(node);
+        break;
       case K.ArrayLiteralExpression:
         if (isAssignmentTarget(node)) {
           checkPattern(node);

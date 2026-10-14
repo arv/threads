@@ -263,6 +263,35 @@ export class Host {
     return awaited;
   }
 
+  // The type an iteration of t gives (for...of, a spread, yield*): the first
+  // type argument of what t's [Symbol.iterator]() returns, or, async, its
+  // [Symbol.asyncIterator]()'s first, else its iterator's awaited. Undefined
+  // for a type that is not iterable.
+  iteratedType(t: Type, async = false): Type | undefined {
+    const properties = this.checker.getPropertiesOfType(
+      this.checker.getApparentType(t as any) as any,
+    );
+    for (const prefix of async
+      ? ['__@asyncIterator@', '__@iterator@']
+      : ['__@iterator@']) {
+      const p = properties.find(p => p.name.startsWith(prefix));
+      if (!p) continue;
+      for (const signature of this.checker.getSignaturesOfType(
+        this.typeOfSymbol(p) as any,
+        SignatureKind.Call,
+      )) {
+        const args = this.typeArguments(
+          this.checker.getReturnTypeOfSignature(signature) as Type,
+        );
+        if (args.length === 0) continue;
+        return async && prefix === '__@iterator@'
+          ? this.awaitedType(args[0]!)
+          : args[0];
+      }
+    }
+    return undefined;
+  }
+
   typeArguments(t: Type): readonly Type[] {
     let args = this.typeArgs.get(t);
     if (!args) {
