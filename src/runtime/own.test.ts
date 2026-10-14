@@ -829,6 +829,32 @@ describe('a wait that throws', () => {
   });
 });
 
+describe('atomic.wait', () => {
+  // a thread in atomic.wait is quiescent throughout, as in the runtime's own
+  // waits: marked waiting (IDLE) for the wait's length, so that other threads'
+  // frees do not wait for it, and running again after
+  it('marks the thread waiting while it waits', () => {
+    const QS_1 = 2048 + 8 + 5, // thread 1's quiescent state (T_QS of its entry)
+      IDLE = 1;
+    const W = T.struct({n: T.i32}, 'Waited');
+    const w = new W();
+    const atomics = Atomics as unknown as {wait: typeof Atomics.wait};
+    const wait = atomics.wait;
+    let during = -1;
+    atomics.wait = (() => {
+      during = runtime.I32[QS_1];
+      return 'timed-out';
+    }) as typeof Atomics.wait;
+    try {
+      expect(T.atomic.wait(w, 'n', 0, 0)).toBe('timed-out');
+    } finally {
+      atomics.wait = wait;
+    }
+    expect(during).toBe(IDLE);
+    expect(runtime.I32[QS_1]).not.toBe(IDLE);
+  });
+});
+
 describe('the rest', () => {
   beforeAll(() => {
     logged.length = 0;
