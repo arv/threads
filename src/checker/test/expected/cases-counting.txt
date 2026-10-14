@@ -22,8 +22,3 @@ counting.ts(68,23): error TS96021: A value of type 'Node & Cell' cannot be store
 counting.ts(76,3): error TS96015: A shared struct field must be a number, a boolean, a string, a shared struct, a SharedArray or a Channel.
 counting.ts(77,3): error TS96015: A shared struct field must be a number, a boolean, a string, a shared struct, a SharedArray or a Channel.
 counting.ts(79,27): error TS96015: A shared struct field must be a number, a boolean, a string, a shared struct, a SharedArray or a Channel.
-generators.ts(9,9): error TS96032: A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.
-generators.ts(10,10): error TS96032: A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.
-generators.ts(13,9): error TS96032: A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.
-generators.ts(23,9): error TS96032: A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.
-generators.ts(24,10): error TS96032: A value of type 'Node & Cell' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.
