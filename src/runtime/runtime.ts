@@ -728,7 +728,7 @@ const STR_HEAD = 24,
   DEAD = 1 << 31,
   TOMB = 1; // a slot whose string left
 // this thread's caches, each with the string's serial
-const strAddr = new Map<string, [number, number]>(),
+const strAddr = new Map<string, [number, number, number]>(),
   addrStr = new Map<number, [string, number]>();
 const remember = (s: string, a: number) => {
   if (addrStr.size >= 1 << 14) {
@@ -737,7 +737,7 @@ const remember = (s: string, a: number) => {
   }
   const serial = I32[(a >> 2) + 5];
   addrStr.set(a, [s, serial]);
-  strAddr.set(s, [a, serial]);
+  strAddr.set(s, [a, serial, I32[(a >> 2) + 3]]); // and its hash (see known)
 };
 // the address of s, if this thread knows it, its block is still s, and the
 // string is alive: one that died (count 0, DEAD) is still s until its block is
@@ -752,12 +752,15 @@ function known(s: string) {
   // point since the string died): the serial is read again after the count.
   // serials are unique and a retired block's is cleared (retire), so the
   // serial the same both times means the count read between is that string's
-  // count, not the next one's. the length is read in the same window, a guard
-  // more should a serial come round again (2^32 strings later)
+  // count, not the next one's. a serial comes round again after 2^32 strings,
+  // and a thread's cache may keep an entry that long: the length and the hash
+  // are read in the same window too, so that a block reused for another
+  // string of that serial must also be of that length and that hash to pass
   return Atomics.load(I32, a >> 2) === K_STR &&
     Atomics.load(I32, (a >> 2) + 5) === k[1] &&
     Atomics.load(I32, (a >> 2) + 1) > 0 &&
     Atomics.load(I32, (a >> 2) + 2) === s.length &&
+    Atomics.load(I32, (a >> 2) + 3) === k[2] &&
     Atomics.load(I32, (a >> 2) + 5) === k[1]
     ? a
     : 0;

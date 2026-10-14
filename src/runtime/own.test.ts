@@ -746,6 +746,25 @@ describe('strings are collected', () => {
     own.release(b);
   });
 
+  it('a cached string is not taken for a block of its serial and another hash', () => {
+    // a serial comes round again after 2^32 strings: a block of the cached
+    // serial, kind and length, but another string's hash, is not the string
+    const s = 'a string whose serial comes round';
+    const a = runtime.$internRef(s);
+    expect(runtime.$str(a)).toBe(s); // cached here
+    const hash = runtime.I32[(a >> 2) + 3];
+    runtime.I32[(a >> 2) + 3] = hash ^ 1; // as another string's would be
+    let b = 0;
+    try {
+      b = runtime.$internRef(s);
+    } finally {
+      runtime.I32[(a >> 2) + 3] = hash;
+    }
+    expect(b).not.toBe(a); // looked up, not taken from the cache
+    own.release(a);
+    own.release(b);
+  });
+
   it('no string has serial 0, which a retired block has', () => {
     // the serial counter is an i32 and wraps: the string made as it reaches 0
     // takes the next one
