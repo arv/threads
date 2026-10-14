@@ -1486,9 +1486,13 @@ export async function poolLoop() {
     // its own
     if (!busy()) return leave();
     // the claim lasts until the thread's entry is alive: a reset sees the one
-    // or the other, never a worker between a thread taken and a thread begun
-    threadBegin(workerTid());
-    done();
+    // or the other, never a worker between a thread taken and a thread begun.
+    // (ended either way: a thread table that is full throws here)
+    try {
+      threadBegin(workerTid());
+    } finally {
+      done();
+    }
     runThread(t, true);
   }
 }
