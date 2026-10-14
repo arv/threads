@@ -1468,11 +1468,27 @@ class FunctionAnalysis {
       // throws and for each place the early exits go to, which do not: those
       // runs report what they reach, and what of them is still reachable (a
       // finally may return or throw instead) goes on to the next try out, or
-      // to its target. None starts from the try's entry, which is no way in
-      // of its own: a throw is recorded where it may come. A try that does
-      // not complete normally (it never ends, or always leaves early) has no
-      // first run, as nothing reaches its end
-      if (!after.unreachable) this.statement(node.finallyBlock, after);
+      // to its target. None of them starts from the try's entry: a throw is
+      // recorded where a call, a construction or an await may make one. A try
+      // that does not complete normally (it never ends, or always leaves
+      // early) has no first run, as nothing reaches its end
+      if (!after.unreachable) {
+        this.statement(node.finallyBlock, after);
+      } else if (thrown.length === 0 && exits.length === 0) {
+        // nothing the analysis follows reaches the finally, but a throw it
+        // does not record (a getter's, a division's) may: the finally is
+        // checked from the try's entry for what it reports, in a try of its
+        // own, which keeps what it would throw, return or jump to
+        const nowhere: TryContext = {
+          catches: false,
+          caught: [],
+          thrown: [],
+          exits: [],
+        };
+        this.tries.push(nowhere);
+        this.statement(node.finallyBlock, entry);
+        this.tries.pop();
+      }
       const run = (early: State[]) => {
         const fe = joinAllStates(early[0]!, early.slice(1));
         this.statement(node.finallyBlock, fe);

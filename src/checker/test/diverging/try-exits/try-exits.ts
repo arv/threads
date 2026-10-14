@@ -111,3 +111,14 @@ export function sentInTryThenFinallyThenAfter(ch: Channel<number[]>) {
   try { ch.send(xs); } finally { use(1); }
   use(xs);                                                    // error: was sent
 }
+// a throw that no call makes (a getter's, a division's) may reach a finally
+// that nothing else does: the finally is checked all the same
+declare const getter: { readonly value: number };
+export function getterThenForever(ch: Channel<number[]>) {
+  const xs = [1];
+  try { void getter.value; for (;;) {} } finally { ch.send(xs); use(xs); }  // error
+}
+export function divisionThenForever(ch: Channel<number[]>, n: bigint) {
+  const xs = [1];
+  try { void (1n / n); for (;;) {} } finally { ch.send(xs); use(xs); }  // error
+}
