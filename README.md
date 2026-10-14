@@ -87,13 +87,17 @@ export function main() {
 Threads can also talk the way Go does: `go(f, ...args)` starts a goroutine, and
 a `Channel<T>` moves values between threads in order (`send`, `recv`,
 `for (const v of channel)`, `select`); a struct or a SharedArray sent on one
-stays where it is, in shared memory, and the receiver reads the same one. A
-goroutine of an async function is light, as Go's are: a worker runs thousands of
-them, each waiting with `await` without blocking the others. In Node on an M5
-Pro, a goroutine on a worker of its own takes 3.2 ms to start and 8.6 MB; an
-async one takes 0.2 µs and about 350 bytes. A blocking call in an async function
-would stop every one on its worker, so the checker reports it and the runtime
-throws.
+stays where it is, in shared memory, and the receiver reads the same one.
+`recv()` gives undefined both for a sent undefined and once the channel is
+closed; `const [v, ok] = channel.recvOk()` tells them apart, as Go's
+`v, ok := <-ch` does, and `select` gives the same ok, third. So a
+`Channel<void>` signals by `close()`, which wakes every receiver, or is read
+with `recvOk()`. A goroutine of an async function is light, as Go's are: a
+worker runs thousands of them, each waiting with `await` without blocking the
+others. In Node on an M5 Pro, a goroutine on a worker of its own takes 3.2 ms to
+start and 8.6 MB; an async one takes 0.2 µs and about 350 bytes. A blocking call
+in an async function would stop every one on its worker, so the checker reports
+it and the runtime throws.
 
 ```ts
 interface Replica {
@@ -209,12 +213,13 @@ All from `"@arv/threads"`, unless noted.
 
 **Goroutines and channels**
 
-|                                                                  |                                                                                                                                                  |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `go(f, ...args)`                                                 | Starts `f` as a goroutine. Nothing waits for it. A plain function gets a thread of its own; an async function is light, one of many on a worker. |
-| `new Channel<T>(capacity = 0)`                                   | `send(value)` moves a value in, `recv()` takes the next one out, `close()`; iterable.                                                            |
-| `ch.sendAsync(v)`, `ch.recvAsync()`, `for await (const v of ch)` | The same in an async function: waits without blocking its worker.                                                                                |
-| `select(...channels)`, `selectAsync(...channels)`                | Waits for the first channel with a value: `[index, value]`.                                                                                      |
+|                                                                                      |                                                                                                                                                  |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `go(f, ...args)`                                                                     | Starts `f` as a goroutine. Nothing waits for it. A plain function gets a thread of its own; an async function is light, one of many on a worker. |
+| `new Channel<T>(capacity = 0)`                                                       | `send(value)` moves a value in, `recv()` takes the next one out (undefined once closed, as for a sent undefined), `close()`; iterable.           |
+| `ch.recvOk()`                                                                        | `recv()` with whether a value came: `[value, true]`, or `[undefined, false]` once closed and empty.                                              |
+| `ch.sendAsync(v)`, `ch.recvAsync()`, `ch.recvOkAsync()`, `for await (const v of ch)` | The same in an async function: waits without blocking its worker.                                                                                |
+| `select(...channels)`, `selectAsync(...channels)`                                    | Waits for the first channel with a value or closed: `[index, value, ok]`, ok false for a closed one.                                             |
 
 **Shared memory**: data many threads read and write in place, with no copying.
 Reads and writes are not ordered between threads: a `Lock`, a `Channel`, joining
@@ -291,8 +296,14 @@ function count(counts: SharedMap<string, Count>, words: Shared<string[]>) {
 ```
 
 **The page** (`"@arv/threads/browser"`): `start({ workers, check, onLog })`
-starts the pool (one worker per core by default; `run` starts it if needed),
-`run(f, ...args)` runs `f` on a thread and resolves with its result, `stop()`.
+starts the pool (one worker per core by default), `run(f, ...args)` runs `f` on
+a thread and resolves with its result, and `stop()` stops the pool. The options
+are the first `start()`'s: `run` starts the pool with the defaults if it has not
+started, so a page that wants others calls `start` before its first `run`, and a
+later `start` with other options throws. `stop()` terminates the workers, with
+the threads they ran, and fails the runs waiting; a spawn then throws until
+`start()` starts a new pool on the same heap. That is also how a stuck pool (a
+thread that never ends, say) is recovered: `stop()`, then `start()` again.
 
 **Odds and ends**: `log(...args)` prints a line from any thread; `heapStats()`
 reports shared memory in use and blocks allocated and freed.
