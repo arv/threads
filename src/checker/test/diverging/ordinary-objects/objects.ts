@@ -3,7 +3,7 @@
 // interface, by its members, and lets a cast make one of a struct type of any
 // kind. The place holds an address in the shared heap, and the runtime cannot
 // make one of the object. The fork lets them through.
-import { f64, ref, struct, Channel, SharedArray, type Cell, type Struct } from "threads";
+import { f64, i32, str, ref, struct, Channel, SharedArray, type Cell, type Struct } from "threads";
 
 interface Node { value: number; next: Node | null }
 const Node = struct<Node>({ value: f64, next: ref<Node>() });
@@ -47,3 +47,11 @@ declare function plainLater(): Promise<{ value: number; next: null }>;
 export const later: () => Promise<Node> = plainLater;                 // error
 // the runtime's Cell holds a handle
 export function roundTrip() { const h: Cell = new Point(); return h as Point; }  // fine
+// a field marker is an ordinary object, though TypeScript may take it for a
+// struct by its members
+interface Tag { kind: string }
+const Tag = struct<Tag>({ kind: str });
+export const tagged: Tag = i32;                                       // error
+// an ordinary object beside SharedArrays, as what a function returns
+declare function source(): SharedArray<Node> | { value: number; next: null };
+export const fromSource: () => Node | SharedArray<Node> = source;     // error

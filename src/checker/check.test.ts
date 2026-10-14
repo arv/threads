@@ -270,6 +270,8 @@ describe('threads-check, where it differs from the fork', () => {
         notAStruct('42,64', literal, 'Node', 'Node'),
         `objects.ts(45,33): error TS96033: A value of type '() => ${literal}' cannot be used as '() => Node': what it returns: '${literal}' is an ordinary object, not a shared struct. ${LAID_OUT}`,
         `objects.ts(47,43): error TS96033: A value of type '() => Promise<${literal}>' cannot be used as '() => Promise<Node>': what it returns: what it resolves to: '${literal}' is an ordinary object, not a shared struct. ${LAID_OUT}`,
+        notAStruct('54,28', 'IntegerField<i32, "i32">', 'Tag', 'Tag'),
+        `objects.ts(57,59): error TS96033: A value of type '() => SharedArray<Node, "other"> | ${literal}' cannot be used as '() => Node | SharedArray<Node, "other">': what it returns: '${literal}' is an ordinary object, not a shared struct. ${LAID_OUT}`,
       ].sort(),
     );
   });

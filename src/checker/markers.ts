@@ -213,15 +213,21 @@ export function isCellBranded(c: Own, t: Type | undefined): boolean {
       result = true;
     }
   }
-  if (!result) {
-    const cell = getRuntimeType(c, 'Cell');
-    result =
-      !!cell &&
-      !!(t.flags & (TypeFlags.Object | TypeFlags.Intersection)) &&
-      c.host.checker.isTypeAssignableTo(t, cell);
-  }
+  if (!result) result = isAssignableToCell(c, t);
   c.cellBranded.set(t, result);
   return result;
+}
+
+// Reports whether a type is assignable to the runtime's `Cell` : its values
+// are cells the runtime made (not a struct type or a field marker, which are
+// ordinary objects at run time).
+export function isAssignableToCell(c: Own, t: Type): boolean {
+  const cell = getRuntimeType(c, 'Cell');
+  return (
+    !!cell &&
+    !!(t.flags & (TypeFlags.Object | TypeFlags.Intersection)) &&
+    c.host.checker.isTypeAssignableTo(t, cell)
+  );
 }
 
 // The `struct(...)` calls of the program's source files, by the type of their

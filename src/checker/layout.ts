@@ -33,7 +33,7 @@ import {
   getRuntimeExportName,
   getStructOfCall,
   getStructRegistry,
-  isCellBranded,
+  isAssignableToCell,
 } from './markers.ts';
 import {Messages} from './messages.ts';
 import {
@@ -525,15 +525,16 @@ function checkLayoutTarget(
 
 // Reports whether a value of type t is an ordinary object: of an object type
 // with members, or an intersection of them (an object literal's, a class's),
-// that is not a shared struct or a SharedArray, nor a cell (the runtime's
-// `Cell` , a handle's type). Not `{}` , which any value goes through, as it
-// goes through `unknown` , `any` or a type parameter: a handle may be one.
+// that is not a shared struct or a SharedArray, nor a cell (of a type
+// assignable to the runtime's `Cell` , as a handle's is; a field marker or a
+// struct type is not one). Not `{}` , which any value goes through, as it goes
+// through `unknown` , `any` or a type parameter: a handle may be one.
 function isOrdinaryObjectType(c: Own, t: Type): boolean {
   const parts = t.flags & TypeFlags.Intersection ? c.host.memberTypes(t) : [t];
   return (
     parts.every(p => !!(p.flags & TypeFlags.Object)) &&
     !isCellType(c, t) &&
-    !isCellBranded(c, t) &&
+    !isAssignableToCell(c, t) &&
     c.host.checker.getPropertiesOfType(t as any).length > 0
   );
 }
@@ -634,6 +635,13 @@ function layoutMismatch(
   cast: boolean,
   seen: Seen = newSeen(),
 ): string | undefined {
+  // an ordinary object where a struct goes, as what a function returns or is
+  // called with, or what a promise resolves to (as a value of its own, it is
+  // reported by checkLayoutTarget), whatever arrays beside it are
+  const ordinary =
+    structMembersOf(c, target).length > 0 && ordinaryMemberOf(c, source);
+  if (ordinary)
+    return `'${c.host.typeToString(ordinary)}' is an ordinary object, not a shared struct`;
   // SharedArrays, member by member (a place may be one or null): each array of
   // the value's must have the elements, laid out the same, of one of the
   // place's, as its element size is theirs
@@ -667,13 +675,6 @@ function layoutMismatch(
     }
     return undefined;
   }
-  // an ordinary object where a struct goes, as what a function returns or is
-  // called with, or what a promise resolves to (as a value of its own, it is
-  // reported by checkLayoutTarget)
-  const ordinary =
-    structMembersOf(c, target).length > 0 && ordinaryMemberOf(c, source);
-  if (ordinary)
-    return `'${c.host.typeToString(ordinary)}' is an ordinary object, not a shared struct`;
   const tos = structsOf(c, target);
   if (tos.length === 0) {
     // a promise: what it resolves to, into what the place's does
