@@ -341,6 +341,7 @@ interface Target {
   breaks: State[];
   continues: State[];
   tries: number; // the try statements open when the target was entered
+  closes?: boolean; // a for-of loop, whose iterator is closed when left early
 }
 
 // A try statement being analyzed: the states with which control leaves its
@@ -381,6 +382,64 @@ const arrayMutators = new Set([
   'fill',
   'copyWithin',
 ]);
+
+// Reports whether a statement is a `using` or `await using` declaration.
+function isUsingDeclaration(node: Node): boolean {
+  if (node.kind !== K.VariableStatement) return false;
+  const scoped = node.declarationList.flags & NodeFlags.BlockScoped;
+  return scoped === NodeFlags.Using || scoped === NodeFlags.AwaitUsing;
+}
+
+// Reports whether defining a class may throw: what it extends, its computed
+// keys, its decorators and its static members are evaluated as it is.
+function classDefinitionMayThrow(node: Node): boolean {
+  if (
+    (node.heritageClauses as Node[] | undefined)?.some(
+      h => h.token === K.ExtendsKeyword,
+    )
+  )
+    return true;
+  const decorated = (n: Node) =>
+    (n.modifiers as Node[] | undefined)?.some(m => m.kind === K.Decorator);
+  if (decorated(node)) return true;
+  return (node.members as Node[]).some(
+    m =>
+      m.kind === K.ClassStaticBlockDeclaration ||
+      m.name?.kind === K.ComputedPropertyName ||
+      decorated(m) ||
+      (m.kind === K.PropertyDeclaration &&
+        !!m.initializer &&
+        !!(m.modifiers as Node[] | undefined)?.some(
+          x => x.kind === K.StaticKeyword,
+        )),
+  );
+}
+
+// Reports whether an expression reads or writes a property or an element.
+function isMemberAccess(node: Node): boolean {
+  const n = skipOuterExpressions(node, OEK.Assertions | OEK.Parentheses);
+  return (
+    n.kind === K.PropertyAccessExpression ||
+    n.kind === K.ElementAccessExpression
+  );
+}
+
+// Reports whether evaluating an assignment's place may throw before its value
+// is made: a property or element of anything but a name, `this` or a literal,
+// or one by a key that is not one of those.
+function placeMayThrow(target: Node): boolean {
+  const n = skipOuterExpressions(target, OEK.Assertions | OEK.Parentheses);
+  if (!isMemberAccess(n)) return false;
+  const simple = (e: Node) =>
+    e.kind === K.Identifier ||
+    e.kind === K.ThisKeyword ||
+    e.kind === K.StringLiteral ||
+    e.kind === K.NumericLiteral;
+  return (
+    !simple(n.expression) ||
+    (n.kind === K.ElementAccessExpression && !simple(n.argumentExpression))
+  );
+}
 
 class Analyzer {
   readonly c: Own;
@@ -1087,6 +1146,9 @@ class FunctionAnalysis {
   thisFlags = 0;
   readonly targets: Target[] = [];
   readonly tries: TryContext[] = [];
+  // the blocks open with a `using` declaration, which dispose of its value as
+  // they are left
+  disposing = 0;
   readonly building = new Set<Node>(); // closures whose value is being computed
 
   constructor(a: Analyzer, node: Node, result: FunctionResult) {
@@ -1133,8 +1195,34 @@ class FunctionAnalysis {
 
   statement(node: Node, s: State): void {
     switch (node.kind) {
-      case K.Block:
+      case K.Block: {
+        // a `using` declaration's value is disposed of as the block ends,
+        // which may throw
+        const disposes = (node.statements as Node[]).some(isUsingDeclaration);
+        if (disposes) this.disposing++;
         this.statements(node.statements, s);
+        if (disposes) {
+          this.disposing--;
+          if (!s.unreachable) this.mayThrow(s);
+        }
+        break;
+      }
+      case K.ClassDeclaration:
+        // analyzed on its own, but defined here: its heritage, computed keys,
+        // decorators and static members are evaluated as it is
+        if (classDefinitionMayThrow(node)) this.mayThrow(s);
+        break;
+      case K.EnumDeclaration:
+        // its computed members are evaluated as it is defined
+        if (
+          (node.members as Node[]).some(
+            m =>
+              m.initializer &&
+              m.initializer.kind !== K.NumericLiteral &&
+              m.initializer.kind !== K.StringLiteral,
+          )
+        )
+          this.mayThrow(s);
         break;
       case K.VariableStatement:
         this.variableDeclarationList(node.declarationList, s);
@@ -1155,6 +1243,10 @@ class FunctionAnalysis {
           const v = this.eval(node.expression, s);
           this.checkReturn(node.expression, v, s);
         }
+        // leaving a for-of loop closes its iterator, and a block with a
+        // `using` declaration disposes of its value: either may throw
+        if (this.disposing > 0 || this.targets.some(t => t.closes))
+          this.mayThrow(s);
         // out through the innermost try's finally first (see TryContext)
         this.tries
           .at(-1)
@@ -1217,14 +1309,21 @@ class FunctionAnalysis {
       return;
     }
     if (isBindingPattern(name)) {
-      this.mayThrow(s); // the value is iterated, or its properties read
-      for (const element of name.elements as Node[]) {
+      // each property read, or step of the iterator, may throw, after the
+      // defaults before it ran; an array pattern then closes its iterator
+      const elements = name.elements as Node[];
+      if (elements.length === 0) this.mayThrow(s);
+      for (const element of elements) {
+        if (element.propertyName?.kind === K.ComputedPropertyName)
+          this.eval(element.propertyName.expression, s);
+        this.mayThrow(s);
         if (element.kind !== K.BindingElement) continue;
         let ev = v;
         if (element.initializer)
           ev = s.mergeValues(ev, this.eval(element.initializer, s));
         this.bindName(element.name, element, ev, s);
       }
+      if (name.kind === K.ArrayBindingPattern) this.mayThrow(s);
     }
   }
 
@@ -1269,6 +1368,10 @@ class FunctionAnalysis {
       } else if (!t.isLoop) {
         continue;
       }
+      // the for-of loops it leaves close their iterators, and a block with a
+      // `using` declaration may dispose of its value: either may throw
+      const left = this.targets.slice(isBreak ? i : i + 1);
+      if (this.disposing > 0 || left.some(l => l.closes)) this.mayThrow(s);
       this.exit({st: s.copy(), to: t, isBreak});
       break;
     }
@@ -1323,6 +1426,7 @@ class FunctionAnalysis {
         breaks: [],
         continues: [],
         tries: this.tries.length,
+        closes: node.kind === K.ForOfStatement,
       };
       this.targets.push(t);
       switch (node.kind) {
@@ -1569,9 +1673,10 @@ class FunctionAnalysis {
           : v;
       }
       case K.TemplateExpression:
-        for (const span of node.templateSpans as Node[])
+        for (const span of node.templateSpans as Node[]) {
           this.eval(span.expression, s);
-        this.mayThrow(s); // a substitution is converted to a string
+          this.mayThrow(s); // converted to a string before the next is made
+        }
         return sharedValue;
       case K.TypeOfExpression:
       case K.VoidExpression:
@@ -1630,8 +1735,12 @@ class FunctionAnalysis {
       }
       case K.FunctionExpression:
       case K.ArrowFunction:
-      case K.ClassExpression:
         return this.closureValue(node, s);
+      case K.ClassExpression: {
+        const v = this.closureValue(node, s);
+        if (classDefinitionMayThrow(node)) this.mayThrow(s);
+        return v;
+      }
       case K.CallExpression: {
         // after its effects (a send), as a callee may throw; but not consume(),
         // which gives back its argument, nor import(), which rejects
@@ -1695,6 +1804,7 @@ class FunctionAnalysis {
       }
       return false;
     });
+    this.mayThrow(s); // what it does is not known
     return regionValue(s.find(r));
   }
 
@@ -1786,6 +1896,9 @@ class FunctionAnalysis {
   evalBinary(node: Node, s: State): Value {
     const op = node.operatorToken.kind as K;
     if (op === K.EqualsToken) {
+      // a place whose object or key is more than a name is evaluated, and may
+      // throw, before the value is made
+      if (placeMayThrow(node.left)) this.mayThrow(s);
       const v = this.eval(node.right, s);
       this.assign(node.left, v, s);
       return v;
@@ -1803,8 +1916,11 @@ class FunctionAnalysis {
       return v;
     }
     if (isAssignmentOperator(op)) {
-      // Compound assignment: reads and writes the target.
+      // Compound assignment: reads and writes the target. a property's read
+      // (a getter's) may throw before the right side is made, its conversion
+      // and its write (a setter's) after
       this.evalWriteTarget(node.left, s);
+      if (isMemberAccess(node.left)) this.mayThrow(s);
       this.eval(node.right, s);
       this.mayThrow(s);
       return sharedValue;
@@ -1887,8 +2003,11 @@ class FunctionAnalysis {
         return;
       }
       case K.ArrayLiteralExpression:
-        this.mayThrow(s); // the value is iterated
+        // each step of the iterator may throw, after the defaults and the
+        // assignments before it; then the iterator is closed
+        if ((target.elements as Node[]).length === 0) this.mayThrow(s);
         for (const element of target.elements as Node[]) {
+          this.mayThrow(s);
           if (element.kind === K.OmittedExpression) continue;
           if (element.kind === K.SpreadElement) {
             this.assign(element.expression, v, s);
@@ -1905,14 +2024,18 @@ class FunctionAnalysis {
             this.assign(element, v, s);
           }
         }
+        this.mayThrow(s);
         return;
       case K.ObjectLiteralExpression:
-        this.mayThrow(s); // its properties are read
+        // each property read (a getter's) may throw, after the defaults and
+        // the assignments before it
+        if ((target.properties as Node[]).length === 0) this.mayThrow(s);
         for (const property of target.properties as Node[]) {
+          if (property.name?.kind === K.ComputedPropertyName)
+            this.eval(property.name.expression, s);
+          this.mayThrow(s);
           switch (property.kind) {
             case K.PropertyAssignment: {
-              if (property.name.kind === K.ComputedPropertyName)
-                this.eval(property.name.expression, s);
               const init = property.initializer as Node;
               if (
                 init.kind === K.BinaryExpression &&
@@ -2122,7 +2245,7 @@ class FunctionAnalysis {
     args.forEach((arg, i) => {
       const expr =
         arg.kind === K.SpreadElement ? (arg.expression as Node) : arg;
-      const v = this.eval(expr, s);
+      const v = this.eval(arg, s); // a spread is iterated, which may throw
       const param = parameterAt(params, i);
       if (param && a.isSendingTypeNode(param.type)) {
         this.sendArgument(v, expr, param, name, consuming, s);
@@ -2179,7 +2302,7 @@ class FunctionAnalysis {
     args.forEach((arg, i) => {
       const expr =
         arg.kind === K.SpreadElement ? (arg.expression as Node) : arg;
-      const value = this.eval(expr, s);
+      const value = this.eval(arg, s); // a spread is iterated, which may throw
       const param = parameterAt(params, i);
       if (param && a.isSendingTypeNode(param.type)) {
         this.sendArgument(value, expr, param, name, consuming, s);

@@ -218,8 +218,10 @@ describe('threads-check, where it differs from the fork', () => {
     // takes a break or continue to its target before the finally it crosses.
     // it goes on after a finally from the block's entry too, so a send in a
     // block that completes is one that may have been made. a throw no call
-    // makes (a getter's, an operator's, a setter's) is taken to come where it
-    // may: in the finally, a send in the block is one that may have been made
+    // makes (a getter's, an operator's, a setter's, an iterator's, a
+    // disposal's) is taken to come where it may, after what was evaluated
+    // before it: in the finally, a send in the block is one that may have
+    // been made
     const dir = join(checker, 'test/diverging/try-exits');
     expect(
       check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
@@ -249,6 +251,21 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(149,67): error TS96005: 'xs' was consumed by 'consume' on line 149.",
         "try-exits.ts(153,86): error TS96005: 'xs' was consumed by 'consume' on line 153.",
         "try-exits.ts(157,57): error TS96006: 'xs' may have been consumed by 'consume' on line 157.",
+        "try-exits.ts(181,72): error TS96006: 'xs' may have been consumed by 'consume' on line 181.",
+        "try-exits.ts(185,71): error TS96006: 'xs' may have been consumed by 'consume' on line 185.",
+        "try-exits.ts(189,68): error TS96006: 'xs' may have been consumed by 'consume' on line 189.",
+        "try-exits.ts(193,65): error TS96006: 'xs' may have been consumed by 'consume' on line 193.",
+        "try-exits.ts(197,69): error TS96006: 'xs' may have been consumed by 'consume' on line 197.",
+        "try-exits.ts(201,73): error TS96006: 'xs' may have been consumed by 'consume' on line 201.",
+        "try-exits.ts(205,66): error TS96006: 'xs' may have been consumed by 'consume' on line 205.",
+        "try-exits.ts(209,68): error TS96006: 'xs' may have been consumed by 'consume' on line 209.",
+        "try-exits.ts(213,65): error TS96006: 'xs' may have been consumed by 'consume' on line 213.",
+        "try-exits.ts(217,62): error TS96006: 'xs' may have been consumed by 'consume' on line 217.",
+        "try-exits.ts(221,71): error TS96006: 'xs' may have been consumed by 'consume' on line 221.",
+        "try-exits.ts(225,85): error TS96006: 'xs' may have been consumed by 'consume' on line 225.",
+        "try-exits.ts(229,92): error TS96005: 'xs' was consumed by 'consume' on line 229.",
+        "try-exits.ts(233,75): error TS96005: 'xs' was consumed by 'consume' on line 233.",
+        "try-exits.ts(237,79): error TS96005: 'xs' was consumed by 'consume' on line 237.",
       ].sort(),
     );
   });

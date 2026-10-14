@@ -163,3 +163,76 @@ export function declarationsOnly(ch: Channel<number[]>) {
   outer: { try { let unused: number; interface X { value: number } const f = () => getter.value; for (;;) {} } finally { break outer; } }
   use(xs);                                                    // fine: not reached
 }
+// each evaluation that may throw does so after what came before it: a
+// destructuring's property reads and iterator steps, after the defaults
+// before them, and the iterator's closing; a substitution's conversion; a
+// spread argument's iteration; a compound assignment's read, before its right
+// side; the place of an assignment, before its value; leaving a for-of loop;
+// defining a class or an enum; disposing of a `using` declaration's value
+declare const pair: { a?: unknown; b: unknown };
+declare const items: unknown[];
+declare function many(...values: unknown[]): void;
+declare class Many { constructor(...values: unknown[]); }
+declare const counter: { n: number };
+declare const boxes: { box: { value: unknown } };
+declare const resource: Disposable;
+export function declaredObjectPattern() {
+  let xs = [1];
+  try { const { a = consume(xs), b } = pair; xs = [2]; } finally { use(xs); }  // error: b's getter may throw
+}
+export function declaredArrayPattern() {
+  let xs = [1];
+  try { const [a = consume(xs), b] = items; xs = [2]; } finally { use(xs); }  // error: the next step may throw
+}
+export function declaredArrayClose() {
+  let xs = [1];
+  try { const [a = consume(xs)] = items; xs = [2]; } finally { use(xs); }  // error: closing the iterator may throw
+}
+export function substitutions() {
+  let xs = [1];
+  try { consume(xs); `${pair}${(xs = [2], 0)}`; } finally { use(xs); }  // error: pair's conversion may throw
+}
+export function spreadArgument() {
+  let xs = [1];
+  try { consume(xs); many(...items, (xs = [2], 0)); } finally { use(xs); }  // error: the spread may throw
+}
+export function spreadConstructorArgument() {
+  let xs = [1];
+  try { consume(xs); new Many(...items, (xs = [2], 0)); } finally { use(xs); }  // error
+}
+export function compoundRead() {
+  let xs = [1];
+  try { consume(xs); counter.n += (xs = [2], 1); } finally { use(xs); }  // error: n's getter may throw
+}
+export function assignedObjectPattern() {
+  let xs = [1]; let a: unknown; let b: unknown;
+  try { ({ a = consume(xs), b } = pair); xs = [2]; } finally { use(xs, a, b); }  // error
+}
+export function assignedArrayPattern() {
+  let xs = [1]; let a: unknown; let b: unknown;
+  try { [a = consume(xs), b] = items; xs = [2]; } finally { use(xs, a, b); }  // error
+}
+export function assignedArrayClose() {
+  let xs = [1]; let a: unknown;
+  try { [a = consume(xs)] = items; xs = [2]; } finally { use(xs, a); }  // error
+}
+export function placeBeforeValue() {
+  let xs = [1];
+  try { consume(xs); boxes.box.value = (xs = [2], 0); } finally { use(xs); }  // error: boxes.box may throw
+}
+export function leftForOf() {
+  let xs = [1];
+  try { for (const item of items) { consume(xs); break; } xs = [2]; } finally { use(xs); }  // error: closing the iterator may throw
+}
+export function definedClass() {
+  let xs = [1];
+  try { consume(xs); class Late { static value = getter.value; } xs = [2]; } finally { use(xs); }  // error
+}
+export function disposed() {
+  let xs = [1];
+  try { { using held = resource; consume(xs); } xs = [2]; } finally { use(xs); }  // error: disposing may throw
+}
+export function definedEnum() {
+  let xs = [1];
+  try { consume(xs); enum Late { A = getter.value } xs = [2]; } finally { use(xs); }  // error: its member may throw
+}
