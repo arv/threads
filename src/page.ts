@@ -4,12 +4,6 @@
 // thread). index.html?program=src/nbody-own.ts&threads=1,2,4,8 loads the
 // program by its path in the repository (chrome.ts's server points its imports
 // of the runtime at src/runtime/)
-import {
-  initShared,
-  shutdown,
-  counters,
-  workersComing,
-} from './runtime/runtime.ts';
 import type {WorkerData, WorkerMessage} from './worker.ts';
 
 // what a page leaves for chrome.ts once its program has finished
@@ -31,50 +25,69 @@ const threads = (params.get('threads') ?? '1,2,4,8').split(',').map(Number);
 const pool = Number(params.get('pool') ?? navigator.hardwareConcurrency ?? 8);
 const out = document.getElementById('out')!;
 
-const sab = new SharedArrayBuffer(Number(params.get('heap') ?? 512) << 20);
-initShared(sab);
-
-const workers: Worker[] = [];
-let text = '',
-  finished = false;
-const finish = (ok: boolean, error?: string) => {
-  if (finished) return;
-  finished = true;
-  shutdown(sab);
-  for (const w of workers) w.terminate();
-  // what chrome.ts waits for
-  window.__escapeResult = {ok, error, output: text, counters: counters(sab)};
+let text = '';
+// what chrome.ts waits for
+const report = (
+  ok: boolean,
+  error?: string,
+  counters: Record<string, number> = {},
+) => {
+  window.__escapeResult = {ok, error, output: text, counters};
   document.title = ok ? 'done' : 'failed';
 };
-const start: (role: WorkerData['role']) => void = role => {
-  const w = new Worker(new URL('./web-worker.ts', import.meta.url), {
-    type: 'module',
-    name: role,
-  });
-  workers.push(w);
-  w.onmessage = ({data: m}: MessageEvent<WorkerMessage>) => {
-    if (m.type === 'out') {
-      text += m.text;
-      out.textContent = text;
-    } else if (m.type === 'grow') {
-      if (!finished) start('pool');
-    } else if (m.type === 'done') finish(true);
-    else if (m.type === 'crash') finish(false, m.message);
-  };
-  w.onerror = e => finish(false, e.message);
-  w.postMessage({
-    sab,
-    program: new URL(`../${program}`, import.meta.url).href,
-    opts: {check: params.has('check')},
-    role,
-    threads,
-  });
-};
 
-if (!crossOriginIsolated)
-  finish(false, 'not cross-origin isolated: SharedArrayBuffer needs COOP/COEP');
-else {
+async function run() {
+  const {initShared, shutdown, counters, workersComing} =
+    await import('./runtime/runtime.ts');
+  const sab = new SharedArrayBuffer(Number(params.get('heap') ?? 512) << 20);
+  initShared(sab);
+
+  const workers: Worker[] = [];
+  let finished = false;
+  const finish = (ok: boolean, error?: string) => {
+    if (finished) return;
+    finished = true;
+    shutdown(sab);
+    for (const w of workers) w.terminate();
+    report(ok, error, counters(sab));
+  };
+  const start: (role: WorkerData['role']) => void = role => {
+    const w = new Worker(new URL('./web-worker.ts', import.meta.url), {
+      type: 'module',
+      name: role,
+    });
+    workers.push(w);
+    w.onmessage = ({data: m}: MessageEvent<WorkerMessage>) => {
+      if (m.type === 'out') {
+        text += m.text;
+        out.textContent = text;
+      } else if (m.type === 'grow') {
+        if (!finished) start('pool');
+      } else if (m.type === 'done') finish(true);
+      else if (m.type === 'crash') finish(false, m.message);
+    };
+    // the page reports a worker's error (so it is not the page's, which
+    // chrome.ts fails on); one whose module did not load has no message
+    w.onerror = e => {
+      e.preventDefault();
+      finish(false, e.message || `a ${role} worker did not load`);
+    };
+    w.postMessage({
+      sab,
+      program: new URL(`../${program}`, import.meta.url).href,
+      opts: {check: params.has('check')},
+      role,
+      threads,
+    });
+  };
+
   workersComing(sab, pool);
   for (let i = 0; i < pool; i++) start('pool');
   start('main');
 }
+
+// SharedArrayBuffer is defined only on a cross-origin isolated page, and the
+// runtime makes one as it loads: it is imported once the page is known to be
+if (!crossOriginIsolated)
+  report(false, 'not cross-origin isolated: SharedArrayBuffer needs COOP/COEP');
+else await run();

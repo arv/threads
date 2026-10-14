@@ -13,6 +13,8 @@ import fs from 'node:fs';
 //                       mode)
 //   --stats             print the runtime's counters (to stderr)
 //   --check             poison freed blocks
+//   --timeout=S         how long the program may take, in seconds (default:
+//                       600; 0 waits for good)
 // needs playwright-core (a dev dependency of this repository), found
 // normally or through $PLAYWRIGHT_CORE, the path of an install's
 // node_modules/playwright-core
@@ -101,26 +103,48 @@ export const pageProgram: (program: string) => string = program => {
   return path.relative(repo, file).split(path.sep).join('/');
 };
 
-// runs a program (see pageProgram) on index.html to completion. resolves to { ok, error, output, counters, version }
+// runs a program (see pageProgram) on index.html to completion. resolves to {
+// ok, error, output, counters, version }; rejects when the page fails before
+// it reports (an error it throws, a module of its that does not load), or does
+// not report within timeout ms (0: no limit)
 export const runInChrome = async ({
   query = {},
   trace = null,
   headed = false,
+  timeout = 600_000,
 }: {
   query?: Record<string, string>;
   trace?: string | null;
   headed?: boolean;
+  timeout?: number;
 }) => {
   const chromium = await loadChromium();
   const server = await serve();
   const browser = await chromium.launch({channel: 'chrome', headless: !headed});
   try {
     const page = await browser.newPage();
-    page.on('console', m => {
-      if (m.type() === 'error' && !m.text().includes('404'))
-        console.error(`console: ${m.text()}`);
+    // a page that fails before it reports never will: the run fails with the
+    // first failure (one after the result is no one's)
+    let fail!: (e: Error) => void;
+    const failed = new Promise<never>((_, reject) => {
+      fail = reject;
     });
-    page.on('pageerror', e => console.error(`page: ${e.message}`));
+    failed.catch(() => {});
+    page.on('pageerror', e =>
+      fail(new Error(`chrome: the page threw ${e.stack ?? e.message}`)),
+    );
+    page.on('console', m => {
+      if (m.type() !== 'error') return;
+      const {url} = m.location();
+      // a module that did not load: what imports it never runs
+      if (
+        m.text().startsWith('Failed to load module script') ||
+        (m.text().includes('404') && /\.[jt]s$/.test(url))
+      )
+        fail(new Error(`chrome: ${url} did not load: ${m.text()}`));
+      // what else is not found (the page's icon) is no matter
+      else if (!m.text().includes('404')) console.error(`console: ${m.text()}`);
+    });
     if (trace)
       await browser.startTracing(page, {
         path: path.resolve(trace),
@@ -137,12 +161,24 @@ export const runInChrome = async ({
     await page.goto(
       `http://127.0.0.1:${server.address().port}/src/index.html?${new URLSearchParams(query)}`,
     );
-    const result = await page
-      .waitForFunction(() => window.__escapeResult!, null, {
-        timeout: 0,
-        polling: 100,
-      })
-      .then(h => h.jsonValue());
+    const result = await Promise.race([
+      page
+        .waitForFunction(() => window.__escapeResult!, null, {
+          timeout,
+          polling: 100,
+        })
+        .then(
+          h => h.jsonValue(),
+          (e: Error) => {
+            throw e.name === 'TimeoutError'
+              ? new Error(
+                  `chrome: the page did not report in ${timeout / 1000} s: its program is stuck, or slower than that (chrome.ts --timeout=S waits longer, 0 for good)`,
+                )
+              : e;
+          },
+        ),
+      failed,
+    ]);
     if (trace) await browser.stopTracing();
     return {...result, version: browser.version()};
   } finally {
@@ -162,7 +198,7 @@ if (
   const name = args.find(a => !a.startsWith('--'));
   if (!name) {
     console.error(
-      'usage: node src/chrome.ts <program> [--threads=1,2,4,8] [--trace=file.json] [--headed]',
+      'usage: node src/chrome.ts <program> [--threads=1,2,4,8] [--trace=file.json] [--headed] [--timeout=600]',
     );
     process.exit(1);
   }
@@ -177,6 +213,10 @@ if (
     query,
     trace,
     headed: flag('headed'),
+    timeout: Number(opt('timeout', '600')) * 1000,
+  }).catch((e: Error) => {
+    console.error(e.message);
+    process.exit(1);
   });
   process.stdout.write(result.output);
   if (trace) console.error(`trace: ${path.resolve(trace)}`);
