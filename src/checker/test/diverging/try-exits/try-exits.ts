@@ -26,3 +26,15 @@ export function sentOnlyOnTheWayOut(ch: Channel<number[]>, flag: boolean) {
   try { if (flag) { ch.send(xs); return; } } finally {}
   use(xs);                                                    // fine: the path that sent left
 }
+export function finallyOverrides(ch: Channel<number[]>) {
+  let xs = [1];
+  try {
+    try { ch.send(xs); return; } finally { xs = [2]; return; }
+  } catch { use(xs); }                                        // fine: the finally's return carries the new xs
+}
+export function nestedFinally(ch: Channel<number[]>) {
+  const xs = [1];
+  try {
+    try { ch.send(xs); return; } finally { use(1); }
+  } finally { use(xs); }                                      // error: the inner return goes on out, sent
+}

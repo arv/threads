@@ -344,11 +344,18 @@ interface Target {
 }
 
 // A try statement being analyzed: the states with which control leaves its
-// block, or its catch, early (a return, a throw, a break or continue out of
-// it), which its catch and its finally start from too. `catches`: a throw
-// leaving the block goes to the catch, not further out.
+// block, or its catch, early. A throw (an explicit one, or one a call, a
+// construction or an await may make) goes to `caught` while the block of a try
+// with a catch is analyzed, else to `thrown`; a return, or a break or continue
+// out of the try, to `exits`. An early exit is recorded in the innermost try
+// only; once that try's finally has run for it, what is still reachable goes
+// on to the next try out as what it was, so that a finally that changes or
+// overrides it is taken into account, and a throw still reaches a catch
+// further out while a return does not.
 interface TryContext {
   catches: boolean;
+  caught: State[];
+  thrown: State[];
   exits: State[];
 }
 
@@ -1137,18 +1144,13 @@ class FunctionAnalysis {
           const v = this.eval(node.expression, s);
           this.checkReturn(node.expression, v, s);
         }
-        // out through every open try's finally
-        for (const t of this.tries) t.exits.push(s.copy());
+        // out through the innermost try's finally first (see TryContext)
+        this.tries.at(-1)?.exits.push(s.copy());
         s.unreachable = true;
         break;
       case K.ThrowStatement:
         this.eval(node.expression, s);
-        // through the finally of each open try up to the first whose catch
-        // takes it
-        for (let i = this.tries.length - 1; i >= 0; i--) {
-          this.tries[i]!.exits.push(s.copy());
-          if (this.tries[i]!.catches) break;
-        }
+        this.mayThrow(s);
         s.unreachable = true;
         break;
       case K.WhileStatement:
@@ -1255,9 +1257,9 @@ class FunctionAnalysis {
       }
       if (isBreak) t.breaks.push(s.copy());
       else t.continues.push(s.copy());
-      // out through the finally of each try opened inside the target
-      for (let j = t.tries; j < this.tries.length; j++)
-        this.tries[j]!.exits.push(s.copy());
+      // out through the finally of the innermost try, if it is inside the
+      // target (see TryContext)
+      if (this.tries.length > t.tries) this.tries.at(-1)!.exits.push(s.copy());
       break;
     }
     s.unreachable = true;
@@ -1397,20 +1399,37 @@ class FunctionAnalysis {
 
   // try/catch/finally is analyzed conservatively: the catch and finally blocks
   // start from the join of the try block's entry and exit states.
+  // a throw may leave from here: to the innermost try's catch, or out through
+  // its finally (see TryContext)
+  mayThrow(s: State): void {
+    const t = this.tries.at(-1);
+    if (t) (t.catches ? t.caught : t.thrown).push(s.copy());
+  }
+
   tryStatement(node: Node, s: State): void {
     const entry = s.copy();
-    const t: TryContext = {catches: !!node.catchClause, exits: []};
+    const t: TryContext = {
+      catches: !!node.catchClause,
+      caught: [],
+      thrown: [],
+      exits: [],
+    };
     this.tries.push(t);
     this.statement(node.tryBlock, s);
-    // the block's early exits: a throw among them may come after a send that
-    // the block's end, unreachable, does not show
-    const blockExits = t.exits;
+    // the block's early exits: its catch starts from the throws it takes,
+    // each where it may come (after a send that the block's end, unreachable
+    // perhaps, does not show)
+    const blockCaught = t.caught,
+      blockThrown = t.thrown,
+      blockExits = t.exits;
+    t.caught = [];
+    t.thrown = [];
     t.exits = [];
     t.catches = false; // a throw in the catch goes to the finally
     let after = s;
     if (node.catchClause) {
       const catchClause = node.catchClause as Node;
-      const cs = joinAllStates(joinStates(entry, s), blockExits);
+      const cs = joinAllStates(joinStates(entry, s), blockCaught);
       const decl = catchClause.variableDeclaration as Node | undefined;
       if (decl) {
         // Whatever was thrown may be referenced from anywhere.
@@ -1422,25 +1441,37 @@ class FunctionAnalysis {
       after = joinStates(s, cs);
     }
     this.tries.pop();
+    const outer = this.tries.at(-1);
+    // what leaves the try early (the throws its catch took went through it)
+    const thrown = [...blockThrown, ...t.thrown],
+      exits = [...blockExits, ...t.exits];
+    const onward = (st: State, isThrow: boolean) => {
+      if (!outer) return;
+      if (!isThrow) outer.exits.push(st);
+      else (outer.catches ? outer.caught : outer.thrown).push(st);
+    };
     if (node.finallyBlock) {
       // the finally once as the try completes normally, which goes on after
-      // it, and once more for its early exits, which do not: that run reports
-      // what they reach, and its end leaves early too, through the finally of
-      // every try around this one
-      const early = [...blockExits, ...t.exits];
+      // it, and once more for each kind of early exit, which do not: those runs
+      // report what they reach, and what of them is still reachable (a finally
+      // may return or throw instead) leaves early through the next try out
       const fs = joinStates(entry, after);
-      const fe = early.length !== 0 ? joinAllStates(fs, early) : null;
       this.statement(node.finallyBlock, fs);
       if (after.unreachable) fs.unreachable = true;
       after = fs;
-      if (fe !== null) {
+      for (const [early, isThrow] of [
+        [thrown, true],
+        [exits, false],
+      ] as const) {
+        if (early.length === 0) continue;
+        const fe = joinAllStates(early[0]!, early.slice(1));
         this.statement(node.finallyBlock, fe);
-        if (!fe.unreachable)
-          for (const o of this.tries) o.exits.push(fe.copy());
+        if (!fe.unreachable) onward(fe, isThrow);
       }
     } else {
-      // no finally: the early exits go on out as they were
-      for (const o of this.tries) o.exits.push(...t.exits.map(e => e.copy()));
+      // no finally: the early exits go on out as they are
+      for (const st of thrown) onward(st, true);
+      for (const st of exits) onward(st, false);
     }
     if (after !== s) s.assign(after);
   }
@@ -1497,6 +1528,7 @@ class FunctionAnalysis {
         // What a promise resolves to is in the promise's region, unless it is a
         // primitive.
         const v = this.eval(node.expression, s);
+        this.mayThrow(s); // a rejection
         return a.isPrimitiveOrSharedStructType(a.typeOf(node))
           ? sharedValue
           : v;
@@ -1556,12 +1588,18 @@ class FunctionAnalysis {
       case K.ArrowFunction:
       case K.ClassExpression:
         return this.closureValue(node, s);
-      case K.CallExpression:
-        if (isConsumeCall(a.c, node))
-          return this.evalConsume(node, node.arguments[0], s); // `consume(x)`
-        return this.evalCall(node, s);
-      case K.NewExpression:
-        return this.evalNew(node, s);
+      case K.CallExpression: {
+        const v = isConsumeCall(a.c, node)
+          ? this.evalConsume(node, node.arguments[0], s) // `consume(x)`
+          : this.evalCall(node, s);
+        this.mayThrow(s); // after its effects (a send), as a callee may throw
+        return v;
+      }
+      case K.NewExpression: {
+        const v = this.evalNew(node, s);
+        this.mayThrow(s);
+        return v;
+      }
       case K.TaggedTemplateExpression: {
         let v = this.eval(node.tag, s);
         if (node.template.kind === K.TemplateExpression) {
