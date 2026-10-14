@@ -641,6 +641,16 @@ describe('sizes are checked', () => {
     ).toThrow(TypeError);
     expect(new T.SharedArray(Number, 0).length).toBe(0);
   });
+  it('refuses a struct type that is not one declared', () => {
+    // an object with a size, but not the type registered for a kind
+    expect(
+      () =>
+        new T.SharedArray({size: 16, kind: 0} as unknown as typeof Number, 2),
+    ).toThrow(TypeError);
+    expect(
+      () => new T.SharedArray({size: 16} as unknown as typeof Number, 2),
+    ).toThrow(TypeError);
+  });
   it('refuses a channel of a bad capacity', () => {
     expect(() => new T.Channel(NaN)).toThrow(RangeError);
     expect(() => new T.Channel(-1)).toThrow(RangeError);
