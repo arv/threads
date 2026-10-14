@@ -927,7 +927,8 @@ function freeTid() {
 // stale). its thread is ended, if it is a host's (a worker between threads
 // ended its last as it ended), and its entry given back. a host with async
 // threads still on it keeps both, and hosts them on its own, uncounted, until
-// the last one ends (endThread): their callbacks write to its entry yet
+// the last one ends (endThread): their callbacks write to its entry yet, and
+// an entry given back is a worker to come's
 let left = false;
 function leave() {
   if (hosting) {
@@ -1165,8 +1166,8 @@ function unhost() {
 const keepAlive: (ms: number) => ReturnType<typeof setTimeout> = ms =>
   setTimeout(() => {}, ms);
 // one turn of a host: start the next queued async thread, or wait for one (or
-// for one of its own to end)
-// false when the worker is to leave: its pool was stopped (see poolLoop)
+// for one of its own to end). false when the worker is to leave: its pool was
+// stopped, or shut down (see poolLoop, leave)
 async function hostTurn(): Promise<boolean> {
   if (stale()) return false;
   const bell = ME + T_BELL,
@@ -1187,10 +1188,10 @@ async function hostTurn(): Promise<boolean> {
     if ((++started & 31) === 0) await eventLoopTurn();
     return true;
   }
-  if (Atomics.load(I32, C_SHUTDOWN)) {
-    unhost();
-    return true;
-  }
+  // shut down: leave, through leave(), which ends this host's thread once no
+  // async thread is on it. unhost() here would end it with threads on it, and
+  // the entry, given back and reused, would take their writes
+  if (Atomics.load(I32, C_SHUTDOWN)) return false;
   const idle = live === 0,
     w = Atomics.waitAsync(I32, bell, b, idle ? LINGER : WAKE);
   if (w.async) {
