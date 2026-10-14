@@ -87,13 +87,17 @@ export function main() {
 Threads can also talk the way Go does: `go(f, ...args)` starts a goroutine, and
 a `Channel<T>` moves values between threads in order (`send`, `recv`,
 `for (const v of channel)`, `select`); a struct or a SharedArray sent on one
-stays where it is, in shared memory, and the receiver reads the same one. A
-goroutine of an async function is light, as Go's are: a worker runs thousands of
-them, each waiting with `await` without blocking the others. In Node on an M5
-Pro, a goroutine on a worker of its own takes 3.2 ms to start and 8.6 MB; an
-async one takes 0.2 µs and about 350 bytes. A blocking call in an async function
-would stop every one on its worker, so the checker reports it and the runtime
-throws.
+stays where it is, in shared memory, and the receiver reads the same one.
+`recv()` gives undefined both for a sent undefined and once the channel is
+closed; `const [v, ok] = channel.recvOk()` tells them apart, as Go's
+`v, ok := <-ch` does, and `select` gives the same ok, third. So a
+`Channel<void>` signals by `close()`, which wakes every receiver, or is read
+with `recvOk()`. A goroutine of an async function is light, as Go's are: a
+worker runs thousands of them, each waiting with `await` without blocking the
+others. In Node on an M5 Pro, a goroutine on a worker of its own takes 3.2 ms to
+start and 8.6 MB; an async one takes 0.2 µs and about 350 bytes. A blocking call
+in an async function would stop every one on its worker, so the checker reports
+it and the runtime throws.
 
 ```ts
 interface Replica {
@@ -125,12 +129,27 @@ npm install @arv/threads
 npm install --save-dev vite @arv/threads-check   # Vite, and the ownership checker
 ```
 
-Neither is on npm yet; until they are, use this repository.
+Neither is on npm yet. Until they are, pack them from this repository
+(`pnpm pack` builds each package first) and install the tarballs; what you
+import is the same:
+
+```sh
+git clone https://github.com/arv/threads.git && cd threads
+pnpm install
+pnpm pack --pack-destination ~/threads-packages
+pnpm -C src/checker pack --pack-destination ~/threads-packages
+cd /path/to/your/app
+npm install ~/threads-packages/arv-threads-0.1.0.tgz
+npm install --save-dev vite ~/threads-packages/arv-threads-check-0.1.0.tgz
+```
 
 @arv/threads needs [Vite](https://vite.dev) 8, or [Vite+](https://viteplus.dev),
 which is built on it (with `vite` aliased to Vite+'s core, as this repository's
 pnpm-workspace.yaml does), Node 22.13 or later (Vite+ needs 22.18), and a
-browser with `SharedArrayBuffer`.
+browser with `SharedArrayBuffer`. The runtime that the page and its workers run
+(`@arv/threads`, `@arv/threads/heap` and `@arv/threads/browser`) is TypeScript,
+which Vite compiles as it bundles the page; what Node runs (the Vite plugin, and
+@arv/threads-check) is JavaScript.
 
 ## Set up
 
@@ -146,6 +165,32 @@ export default {
   plugins: [threads({tsgo: '/path/to/threads-checker/built/local/tsgo'})],
 };
 ```
+
+| Option       | Default           |                                                                                                                                   |
+| ------------ | ----------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `tsgo`       | (required)        | The tsgo fork's binary (see [Status](#status)).                                                                                   |
+| `tsconfig`   | `'tsconfig.json'` | The project the fork compiles, relative to Vite's root.                                                                           |
+| `args`       | `[]`              | More arguments for tsgo, after the plugin's own: `-p`, `--ownRuntime`, `--outDir`, `--rootDir` and `--sourceMap`.                 |
+| `runtime`    | `'@arv/threads'`  | The module programs import the runtime from (tsgo's `--ownRuntime`).                                                              |
+| `playground` | `false`           | The dev server compiles programs the page sends it (`POST /__threads/compile`), as the playground's does.                         |
+| `checker`    | `null`            | With `playground`, the path of threads-check's entry module, which then reports the ownership errors instead of `tsgo own check`. |
+
+The plugin serves what the fork emits for each module of that project, and
+leaves any other module to Vite, which erases its types and registers none of
+its functions: no thread can run them. The project:
+
+- includes the page's modules and those its threads run, all under the
+  tsconfig's directory (the plugin's `--rootDir`);
+- resolves imports as a bundler does (`"module": "esnext"`,
+  `"moduleResolution": "bundler"`), so that `@arv/threads` is the API's
+  declarations;
+- emits: a project with `"noEmit": true`, as Vite's templates have, takes
+  `args: ['--noEmit', 'false']`, and a tsconfig.json of references alone (also
+  theirs) compiles nothing, so name the project itself
+  (`tsconfig: 'tsconfig.app.json'`).
+
+Type errors do not stop the build: tsc reports them, and the checker the
+ownership errors.
 
 **2. The page** imports the shared memory first, then runs functions on the pool
 of workers. `main` runs on a worker too, so it may block (join a thread, wait on
@@ -200,7 +245,7 @@ All from `"@arv/threads"`, unless noted.
 |                                             |                                                                                                                                                          |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `spawn(f, ...args)`                         | Starts `f` on a thread. Owned arguments move; shared values and cells are shared.                                                                        |
-| `thread.join()`, `thread.joinAsync()`       | Waits for the thread; its result moves back.                                                                                                             |
+| `thread.join()`, `thread.joinAsync()`       | Waits for the thread; its result moves back. If the thread threw, throws an Error that says what it threw, whose `cause` has the thread's stack.         |
 | `scope(s => ...)`                           | Structured threads: joins every thread `s.spawn` started before it returns.                                                                              |
 | `partition(items, parts)`, `take(items, i)` | Splits an owned array into owned parts; takes one element out.                                                                                           |
 | `register(import.meta.url, {f, ...})`       | Registers a module's top-level functions, so a thread finds the one it runs. The compiler adds it; a program run uncompiled calls it.                    |
@@ -209,12 +254,13 @@ All from `"@arv/threads"`, unless noted.
 
 **Goroutines and channels**
 
-|                                                                  |                                                                                                                                                  |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `go(f, ...args)`                                                 | Starts `f` as a goroutine. Nothing waits for it. A plain function gets a thread of its own; an async function is light, one of many on a worker. |
-| `new Channel<T>(capacity = 0)`                                   | `send(value)` moves a value in, `recv()` takes the next one out, `close()`; iterable.                                                            |
-| `ch.sendAsync(v)`, `ch.recvAsync()`, `for await (const v of ch)` | The same in an async function: waits without blocking its worker.                                                                                |
-| `select(...channels)`, `selectAsync(...channels)`                | Waits for the first channel with a value: `[index, value]`.                                                                                      |
+|                                                                                      |                                                                                                                                                  |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `go(f, ...args)`                                                                     | Starts `f` as a goroutine. Nothing waits for it. A plain function gets a thread of its own; an async function is light, one of many on a worker. |
+| `new Channel<T>(capacity = 0)`                                                       | `send(value)` moves a value in, `recv()` takes the next one out (undefined once closed, as for a sent undefined), `close()`; iterable.           |
+| `ch.recvOk()`                                                                        | `recv()` with whether a value came: `[value, true]`, or `[undefined, false]` once closed and empty.                                              |
+| `ch.sendAsync(v)`, `ch.recvAsync()`, `ch.recvOkAsync()`, `for await (const v of ch)` | The same in an async function: waits without blocking its worker.                                                                                |
+| `select(...channels)`, `selectAsync(...channels)`                                    | Waits for the first channel with a value or closed: `[index, value, ok]`, ok false for a closed one.                                             |
 
 **Shared memory**: data many threads read and write in place, with no copying.
 Reads and writes are not ordered between threads: a `Lock`, a `Channel`, joining
@@ -291,8 +337,14 @@ function count(counts: SharedMap<string, Count>, words: Shared<string[]>) {
 ```
 
 **The page** (`"@arv/threads/browser"`): `start({ workers, check, onLog })`
-starts the pool (one worker per core by default; `run` starts it if needed),
-`run(f, ...args)` runs `f` on a thread and resolves with its result, `stop()`.
+starts the pool (one worker per core by default), `run(f, ...args)` runs `f` on
+a thread and resolves with its result, and `stop()` stops the pool. The options
+are the first `start()`'s: `run` starts the pool with the defaults if it has not
+started, so a page that wants others calls `start` before its first `run`, and a
+later `start` with other options throws. `stop()` terminates the workers, with
+the threads they ran, and fails the runs waiting; a spawn then throws until
+`start()` starts a new pool on the same heap. That is also how a stuck pool (a
+thread that never ends, say) is recovered: `stop()`, then `start()` again.
 
 **Odds and ends**: `log(...args)` prints a line from any thread; `heapStats()`
 reports shared memory in use and blocks allocated and freed.
@@ -395,6 +447,8 @@ vp fmt                      # Oxfmt, over the whole workspace
 vp lint                     # Oxlint, type-aware, over the whole workspace
 vp check                    # formatting, lint and types, as CI would
 vp test                     # the unit tests, as CI would
+vp run -r build-dist        # each package's dist/, as pnpm pack builds it
+vp run test-pack            # the packages packed and installed in a project; with TSGO, a page on them in Chrome
 vp run -r typecheck         # tsc in every package
 ```
 

@@ -15,6 +15,7 @@ import {
   resetPool,
   workersComing,
   STOPPED,
+  $failed,
   $nudged,
   $waitBegin,
 } from './runtime.ts';
@@ -23,6 +24,8 @@ import type {Message} from './runtime.ts';
 const sab = globalThis.__escapeSab;
 const workers: Worker[] = [];
 let started: Promise<void> | null = null,
+  // the options the pool started with: a later start() gives none, or these
+  startedWith: Required<Options> | null = null,
   // fails the start that is under way: its workers are terminated as they
   // load, and never report ready
   failStart: ((e: Error) => void) | null = null,
@@ -56,13 +59,24 @@ type Options = {
   onLog?: (text: string) => void;
 };
 
-export function start({
-  workers: count = navigator.hardwareConcurrency ?? 8,
-  check = false,
-  onLog = text => console.log(text.replace(/\n$/, '')),
-}: Options = {}) {
+export function start(options: Options = {}) {
   forThePage('start()');
-  if (started) return started;
+  if (started) {
+    // the pool runs, or is starting, with options of its own: other ones
+    // would be ignored
+    const was = startedWith!;
+    for (const k of ['workers', 'check', 'onLog'] as const)
+      if (options[k] !== undefined && options[k] !== was[k])
+        throw new Error(
+          'threads: the pool is already started, with other options (run() starts it with the defaults): call start() before the first run(), or stop() first',
+        );
+    return started;
+  }
+  const {
+    workers: count = navigator.hardwareConcurrency ?? 8,
+    check = false,
+    onLog = text => console.log(text.replace(/\n$/, '')),
+  } = options;
   if (!sab)
     throw new Error(
       'threads: import "@arv/threads/heap" first in the page\'s entry module',
@@ -79,7 +93,7 @@ export function start({
       if (generation === g)
         add().catch(e => {
           if (generation === g) workersComing(sab, -1);
-          console.error(String(e));
+          console.error(e);
         });
     }
     // the page holds up freeing: between tasks, as now, it holds no uncounted
@@ -87,7 +101,7 @@ export function start({
     // that makes safe
     else if (m.type === 'nudge') $nudged();
     else if (m.type === 'crash')
-      console.error(`threads: a worker crashed: ${m.message}`);
+      console.error($failed(m.message, m.stack, 'threads: a worker crashed: '));
   };
   const add = () =>
     new Promise<void>((resolve, reject) => {
@@ -104,7 +118,9 @@ export function start({
         } else if (m.type === 'crash' && !ready)
           // the worker could not start (the runtime did not load, say): a
           // start that waits for it would wait for good
-          reject(new Error(`threads: a worker failed to start: ${m.message}`));
+          reject(
+            $failed(m.message, m.stack, 'threads: a worker failed to start: '),
+          );
         else onMessage(m);
       };
       w.onerror = e =>
@@ -143,6 +159,7 @@ export function start({
       failStart = reject;
     }),
   ]);
+  startedWith = {workers: count, check, onLog};
   stopped = false;
   // a start that fails is over: its workers (those that did start) are
   // terminated, and the next start() starts afresh, on a pool reset first;
@@ -189,6 +206,9 @@ export async function run<A extends unknown[], R>(
 // event loop: stopped mid-way through them, the next start takes the second
 export function stop() {
   forThePage('stop()');
+  // no pool runs, or is starting: none was started (the heap perhaps not even
+  // made), or it was stopped since
+  if (started === null) return;
   shutdown(sab!);
   for (const w of workers.splice(0)) w.terminate();
   for (const fail of waiting) fail(new Error(STOPPED));
@@ -197,7 +217,8 @@ export function stop() {
   failStart = null;
   generation++;
   stopped = true;
-  // the page's thread, if start() began it: quiescent until start() again
-  if (started !== null) $waitBegin();
+  // the page's thread: quiescent until start() again
+  $waitBegin();
   started = null;
+  startedWith = null;
 }

@@ -39,10 +39,17 @@ const report = (
 };
 
 async function run() {
-  const {initShared, shutdown, counters, workersComing} =
+  const {sharedHeap, shutdown, counters, workersComing} =
     await import('./runtime/runtime.ts');
-  const sab = new SharedArrayBuffer(Number(params.get('heap') ?? 512) << 20);
-  initShared(sab);
+  // a heap refused (a ?heap= that is not a whole number of MB from 2 to 2047)
+  // fails the page as finish would, with no heap to shut down
+  let sab: SharedArrayBuffer;
+  try {
+    sab = sharedHeap(Number(params.get('heap') ?? 512));
+  } catch (e) {
+    report(false, String(e));
+    throw e;
+  }
 
   const workers: Worker[] = [];
   let finished = false;
@@ -66,7 +73,7 @@ async function run() {
       } else if (m.type === 'grow') {
         if (!finished) start('pool');
       } else if (m.type === 'done') finish(true);
-      else if (m.type === 'crash') finish(false, m.message);
+      else if (m.type === 'crash') finish(false, m.stack ?? m.message);
     };
     // the page reports a worker's error itself (uncanceled, it would be the
     // page's own too); one whose module did not load has no message
