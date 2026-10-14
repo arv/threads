@@ -67,8 +67,9 @@ queued rings the bells of the hosts behind it, and each passes one.
 
 This is quiescent-state-based reclamation: a global epoch, and a word per thread
 with the epoch it last saw at a quiescent point. The epoch is an i32 that wraps:
-two epochs are compared by their difference, and a thread that falls half the
-range behind (hours of other threads' reclaims without a quiescent point of its
+two epochs are compared by their difference, which holds while they are less
+than half the range apart, and a thread that falls a quarter of the range behind
+(2^29 reclaims by other threads, hours of them, without a quiescent point of its
 own) stalls the epoch, and memory grows, until it passes one.
 
 ## Runtime (own.ts)
