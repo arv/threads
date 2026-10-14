@@ -359,6 +359,7 @@ function oldestEpoch(but = 0) {
 function reclaim() {
   if (pend.length === 0 && Atomics.load(I32, C_PEND_LEN) === 0) {
     stuckLen = -1;
+    pendLimit = 4096;
     return;
   }
   // so what is queued now is older than every later quiescent point
@@ -514,11 +515,14 @@ function pagePoint() {
 // looks again at the next task, and then at longer intervals while anything
 // is left, up to a second: a timer, which a hidden page throttles, does for
 // the page's own queue, small as it is (workers' queues are nudged for). not
-// on a page that stopped: start() reclaims
+// before the page's thread began (ME is 0 until start()'s threadBegin: a
+// point would write to the control words), and not on a page that stopped:
+// start() reclaims, in both cases
 let pageTimer: ReturnType<typeof setTimeout> | null = null,
   pageDelay = 0;
 function pageLater() {
-  if (pageTimer !== null || Atomics.load(I32, ME + T_QS) === IDLE) return;
+  if (ME === 0 || pageTimer !== null || Atomics.load(I32, ME + T_QS) === IDLE)
+    return;
   pageTimer = setTimeout(pageReclaim, pageDelay);
 }
 function pageReclaim() {
@@ -554,6 +558,10 @@ function handOffPending() {
       Atomics.store(I32, C_PEND_MIN, pend[0]);
     Atomics.store(I32, C_PEND_LEN, want);
     pend = [];
+    // the queue is another thread's from here (a pool worker runs more): what
+    // a reclaim learnt of this one's growth is not that one's
+    pendLimit = 4096;
+    stuckLen = -1;
   } catch (e) {
     // a full heap: the queue stays this worker's, to work off at its next
     // quiescent point (a pool worker runs more threads). the thread's end
