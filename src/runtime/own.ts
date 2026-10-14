@@ -1688,10 +1688,17 @@ export function scope<R>(body: (s: Scope) => R): R {
     result = body(s);
     // an async body returns at its first await, and a thread it spawned after
     // that would outlive the scope
-    if (isThenable(result))
+    if (isThenable(result)) {
+      // a spawn after the await throws, as the scope is closed by then: its
+      // rejection, which this error explains, is not reported as unhandled
+      // too, as nobody has the promise to handle it
+      try {
+        (result as PromiseLike<unknown>).then(undefined, () => {});
+      } catch {}
       throw new TypeError(
         'own: the body of scope() must not be async, nor return a promise: what it spawns after an await would outlive the scope. in an async function, spawn the threads and await joinAsync() on each',
       );
+    }
   } catch (e) {
     joinAll();
     throw e;

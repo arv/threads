@@ -242,11 +242,12 @@ function threadOrScope(c: Own, t: Type): string {
 }
 
 // A Thread or a Scope of the runtime's in a value of type t, where a message or
-// a share reaches at run time: t itself, a member of a union, an element of an
-// array or a tuple, or a property of an object type (a plain object, at run
-// time). Not in a cell, which goes by reference, nor in a function or an object
-// of the default library's (a Map, a Promise), which are not sent as plain
-// objects are; its mapped types (Record, Readonly) are plain objects.
+// a share reaches at run time: t itself, a member of a union or an
+// intersection, a type parameter's constraint, an element of an array or a
+// tuple, or a property of an object type (a plain object, at run time). Not in
+// a cell, which goes by reference, nor in a function or an object of the
+// default library's (a Map, a Promise), which are not sent as plain objects
+// are; its mapped types (Record, Readonly) are plain objects.
 function findStaysHere(c: Own, t: Type, seen: Set<Type>): Type | undefined {
   if (
     seen.has(t) ||
@@ -263,10 +264,17 @@ function findStaysHere(c: Own, t: Type, seen: Set<Type>): Type | undefined {
     return undefined;
   };
   if (t.flags & TypeFlags.Union) return inAny(host.memberTypes(t));
+  if (t.flags & TypeFlags.Instantiable) {
+    const constraint = host.checker.getBaseConstraintOfType(t as any) as
+      | Type
+      | undefined;
+    return constraint ? findStaysHere(c, constraint, seen) : undefined;
+  }
   if (!(t.flags & (TypeFlags.Object | TypeFlags.Intersection)))
     return undefined;
   if (threadOrScope(c, t)) return t;
   if (isCellBranded(c, t)) return undefined;
+  if (t.flags & TypeFlags.Intersection) return inAny(host.memberTypes(t));
   if (host.checker.isArrayType(t as any) || host.checker.isTupleType(t as any))
     return inAny(host.typeArguments(t));
   const handle = host.typeSymbol(t)?.declarations[0];
@@ -292,7 +300,9 @@ function findStaysHere(c: Own, t: Type, seen: Set<Type>): Type | undefined {
 // to another thread or share, which the runtime refuses: an argument to a
 // `Sending` parameter, which a thread, a goroutine, a channel or a map takes,
 // or share() freezes (partition's but for, which splits an array on its
-// thread), and a thread's result, which moves to the thread that joins it.
+// thread), and what an iterable argument gives, for a map's or a set's entries;
+// and the result of a function argument declared to return `Sending<T>` , a
+// thread's, which moves to the thread that joins it, or a map's computed value.
 export function checkStaysHere(c: Own, call: Node): void {
   const host = c.host;
   const handle = host.signatureOf(call).declaration;
@@ -303,7 +313,7 @@ export function checkStaysHere(c: Own, call: Node): void {
     (decl.kind === K.FunctionDeclaration && decl.name?.text === 'partition')
   )
     return;
-  const report = (node: Node, t: Type) => {
+  const report = (node: Node, t: Type): boolean => {
     const found = findStaysHere(c, t, new Set());
     if (found)
       c.error(
@@ -312,36 +322,98 @@ export function checkStaysHere(c: Own, call: Node): void {
         host.typeToString(found),
         staysWith[threadOrScope(c, found)]!,
       );
+    return !!found;
   };
   const params = ((decl.parameters ?? []) as Node[]).filter(
     p => !isThisParameter(p),
   );
-  const args = (call.arguments ?? []) as Node[];
-  args.forEach((arg, i) => {
+  const last = params[params.length - 1];
+  // an argument of type t at a position (Infinity: somewhere in the rest)
+  const check = (pos: number, t: Type, node: Node): void => {
     const param =
-      i < params.length
-        ? params[i]
-        : params[params.length - 1]?.dotDotDotToken
-          ? params[params.length - 1]
+      pos < params.length
+        ? params[pos]
+        : last?.dotDotDotToken
+          ? last
           : undefined;
-    if (!param || !isSendingParameterType(c, param.type)) return;
-    const expr = arg.kind === K.SpreadElement ? (arg.expression as Node) : arg;
-    report(expr, host.typeOf(expr));
-  });
-  // spawn's: the thread's result, as the Thread<R> it returns has it
-  const thread = host.typeOf(call);
-  if (args.length > 0 && threadOrScope(c, thread) === 'Thread') {
-    const result = host.typeArguments(thread)[0];
-    if (result) report(args[0]!, result);
+    if (!param) return;
+    let sent = sendingOperand(c, param.type);
+    // `...entry: Sending<[key: K, callback: ...]>` : its element there
+    if (param === last && param.dotDotDotToken && sent?.kind === K.TupleType) {
+      const element = (sent.elements as Node[])[pos - params.indexOf(param)];
+      sent = element?.kind === K.NamedTupleMember ? element.type : element;
+    }
+    const declared = sent ?? param.type;
+    if (returnsSending(c, declared)) {
+      for (const signature of host.callSignatures(t))
+        if (
+          report(
+            node,
+            host.awaitedType(
+              host.checker.getReturnTypeOfSignature(signature as any) as Type,
+            ),
+          )
+        )
+          return;
+      return;
+    }
+    if (!sent) return;
+    if (report(node, t)) return;
+    if (sent.kind === K.TypeReference && sent.typeName.text === 'Iterable')
+      for (const e of host.iteratedTypes(t)) if (report(node, e)) return;
+  };
+  // a spread tuple's elements at their places; a spread array, which TypeScript
+  // passes to a rest parameter, at the rest
+  let pos = 0;
+  for (const arg of (call.arguments ?? []) as Node[]) {
+    if (arg.kind !== K.SpreadElement) {
+      check(pos++, host.typeOf(arg), arg);
+      continue;
+    }
+    const expr = arg.expression as Node;
+    const t = host.typeOf(expr);
+    if (!host.checker.isTupleType(t as any)) {
+      for (const e of host.iteratedTypes(t)) check(Infinity, e, expr);
+      pos = Infinity;
+      continue;
+    }
+    const fixed = (host.typeTarget(t) as any).fixedLength as number;
+    host
+      .typeArguments(t)
+      .forEach((e, k) => check(k < fixed ? pos + k : Infinity, e, expr));
+    pos = fixed === host.typeArguments(t).length ? pos + fixed : Infinity;
   }
 }
 
-// `Sending<T>` , or a union of it with null or undefined (a SharedMap's
-// entries), as the runtime's declarations write a parameter that moves.
-function isSendingParameterType(c: Own, t: Node | undefined): boolean {
+// The T of a parameter type `Sending<T>` , or of a union of it with null or
+// undefined (a SharedMap's entries), as the runtime's declarations write a
+// parameter that moves.
+function sendingOperand(c: Own, t: Node | undefined): Node | undefined {
+  const marked = (m: Node) =>
+    getTypeMarker(c, m) === 'Sending'
+      ? (m.typeArguments[0] as Node)
+      : undefined;
   if (t?.kind === K.UnionType)
-    return (t.types as Node[]).some(m => getTypeMarker(c, m) === 'Sending');
-  return getTypeMarker(c, t) === 'Sending';
+    for (const m of t.types as Node[]) {
+      const operand = marked(m);
+      if (operand) return operand;
+    }
+  return t && marked(t);
+}
+
+// Reports whether a parameter's type is a function's that returns
+// `Sending<T>` or `Promise<Sending<T>>` (a thread's function, a map's
+// callback): what it returns moves.
+function returnsSending(c: Own, t: Node | undefined): boolean {
+  if (t?.kind !== K.FunctionType) return false;
+  const result = t.type as Node | undefined;
+  if (getTypeMarker(c, result) === 'Sending') return true;
+  return (
+    result?.kind === K.TypeReference &&
+    result.typeName.kind === K.Identifier &&
+    result.typeName.text === 'Promise' &&
+    getTypeMarker(c, result.typeArguments?.[0]) === 'Sending'
+  );
 }
 
 // The `struct(...)` calls of the program's source files, by the type of their

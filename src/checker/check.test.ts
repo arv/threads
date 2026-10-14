@@ -204,6 +204,8 @@ describe('threads-check, where it differs from the fork', () => {
     const dir = join(checker, 'test/diverging/threads-stay');
     const thread =
       "error TS96037: A value of type 'Thread<number>' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.";
+    const scope =
+      "error TS96037: A value of type 'Scope' cannot be sent to another thread or shared: it stays on the thread that made it, which spawns on it in its body.";
     expect(
       check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
         .map(d => formatDiagnostic(d, dir))
@@ -211,7 +213,7 @@ describe('threads-check, where it differs from the fork', () => {
     ).toEqual(
       [
         `threads.ts(13,17): ${thread}`,
-        "threads.ts(14,18): error TS96037: A value of type 'Scope' cannot be sent to another thread or shared: it stays on the thread that made it, which spawns on it in its body.",
+        `threads.ts(14,18): ${scope}`,
         `threads.ts(15,14): ${thread}`,
         `threads.ts(16,11): ${thread}`,
         `threads.ts(17,14): ${thread}`,
@@ -219,6 +221,19 @@ describe('threads-check, where it differs from the fork', () => {
         `threads.ts(19,9): ${thread}`,
         `threads.ts(20,9): ${thread}`,
         'threads.ts(24,33): error TS96015: A shared struct field must be a number, a boolean, a string, a shared struct, a SharedArray or a Channel.',
+        // from the review: a constraint, an intersection, a map's or a set's
+        // entries, a map's computed value, and spread tuples
+        `threads.ts(36,9): ${thread}`,
+        `threads.ts(37,9): ${scope}`,
+        `threads.ts(40,9): ${thread}`,
+        `threads.ts(41,9): ${scope}`,
+        `threads.ts(44,17): ${thread}`,
+        `threads.ts(45,17): ${thread}`,
+        `threads.ts(46,30): ${thread}`,
+        `threads.ts(53,12): ${thread}`,
+        `threads.ts(54,9): ${thread}`,
+        `threads.ts(55,14): ${scope}`,
+        `threads.ts(56,20): ${thread}`,
       ].sort(),
     );
   });

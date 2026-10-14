@@ -1085,6 +1085,27 @@ describe('threads and scopes', () => {
     await expect(late).rejects.toThrow(/this one has returned/);
   });
 
+  it('leaves no unhandled rejection from an async body it refuses', async () => {
+    own.fns({noop});
+    // the body's spawn after its await throws, in a promise nobody has
+    const unhandled: unknown[] = [];
+    const note = (e: unknown) => unhandled.push(e);
+    process.on('unhandledRejection', note);
+    try {
+      expect(() =>
+        T.scope(async s => {
+          await Promise.resolve();
+          s.spawn(noop);
+        }),
+      ).toThrow(/must not be async/);
+      // past the microtasks, after which a rejection is reported unhandled
+      await new Promise(resolve => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', note);
+    }
+    expect(unhandled).toEqual([]);
+  });
+
   it('a Thread or a Scope is not sent, shared or held in a field', () => {
     own.fns({noop});
     const s = T.scope(s => s),

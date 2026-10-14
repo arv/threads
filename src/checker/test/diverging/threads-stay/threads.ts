@@ -1,6 +1,6 @@
 // A Thread or a Scope stays on the thread that made it: neither is a cell, and the runtime refuses
 // to send or share one, or to store one in a struct's field.
-import { Channel, f64, go, partition, ref, scope, share, SharedMap, spawn, struct, type Scope, type Sending, type Thread } from "threads";
+import { Channel, f64, go, partition, ref, scope, share, SharedMap, SharedSet, spawn, struct, type Scope, type Sending, type Thread } from "threads";
 
 function inner(): number { return 1; }
 function joiner(t: Thread<number>): number { return t.join(); }
@@ -28,4 +28,30 @@ export function fine(ts: Sending<Thread<number>[]>, s: Scope) {
   partition(ts, 2);                          // fine: split on this thread
   spawn(inner).join();                       // fine: joined where it was spawned
   return kept.map(t => t.join());
+}
+
+// From the review: a Thread or a Scope behind a type parameter's constraint or in an intersection,
+// a map's or a set's entries iterated, a map's computed value, and a tuple spread into arguments.
+export function constrained<T extends Thread<number>, S extends Scope>(t: Sending<T>, s: Sending<S>) {
+  share(t);                                  // error: a Thread, as T's constraint says
+  share({ s });                              // error: a Scope, as S's constraint says
+}
+export function intersected() {
+  share(Object.assign(spawn(inner), { tag: 1 })); // error: a Thread, with more
+  share(Object.assign(scope(s => s), { tag: 1 })); // error: a Scope, with more
+}
+export function iterated(m: SharedMap<string, Thread<number>>) {
+  new SharedSet(new Set([spawn(inner)]));    // error: a set's values, shared one by one
+  new SharedMap(new Map([["t", spawn(inner)]])); // error: a map's entries, shared one by one
+  m.getOrInsertComputed("t", () => spawn(inner)); // error: a computed value, shared
+  new SharedSet(new Set([1]));               // fine
+}
+declare const toSpawn: [typeof joiner, Thread<number>];
+declare const toGo: [typeof holder, { ts: Thread<number>[] }];
+declare const toScope: [typeof spawner, Scope];
+export function spreads(s: Scope) {
+  spawn(...toSpawn);                         // error: a thread's argument, spread
+  go(...toGo);                               // error: a goroutine's argument, spread
+  s.spawn(...toScope);                       // error: a Scope, spread
+  spawn(joiner, ...[spawn(inner)] as const); // error: spread after an argument
 }
