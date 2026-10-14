@@ -306,6 +306,15 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
       host.typeToString(host.typeOf(expr)),
     );
   };
+  // A yielded value, or a generator's result, goes into an IteratorResult, an
+  // ordinary object, which the caller keeps after the generator's own count of
+  // it ended (REFCOUNT.md: an owned local is released when its block ends).
+  const yielded = (expr: Node | undefined): void => {
+    if (!expr) return;
+    const count = getCount(c, expr);
+    if (count === Count.None || count === Count.Null) return;
+    c.error(expr, Messages.Yielded, host.typeToString(host.typeOf(expr)));
+  };
   const destructured = (name: Node, t: Type): void => {
     if (isCellType(c, t))
       c.error(name, Messages.BoundByDestructuring, name.text);
@@ -369,6 +378,16 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
           }
         }
         return false;
+      case K.YieldExpression:
+        if (!node.asteriskToken) yielded(node.expression);
+        break;
+      case K.ReturnStatement:
+        if (
+          getFunctionFlags(getContainingFunction(node)) &
+          FunctionFlags.Generator
+        )
+          yielded(node.expression);
+        break;
       case K.ArrayLiteralExpression:
         if (isAssignmentTarget(node)) {
           checkPattern(node);
