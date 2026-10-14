@@ -43,7 +43,9 @@ it('start() takes options once: a later start() with others throws', async () =>
   const started = browser.start();
   expect(browser.start()).toBe(started);
   expect(browser.start({check: false})).toBe(started); // the default's own
-  expect(() => browser.start({workers: 1})).toThrow(/already started/);
+  expect(() =>
+    browser.start({workers: navigator.hardwareConcurrency + 1}),
+  ).toThrow(/already started/);
   expect(() => browser.start({onLog: () => {}})).toThrow(/already started/);
   await started;
   expect(made).toHaveLength(navigator.hardwareConcurrency);

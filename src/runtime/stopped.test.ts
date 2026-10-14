@@ -18,12 +18,18 @@ const live = () => {
   return s.allocated - s.freed;
 };
 
+// a struct's count
+const refs = (a: number) => runtime.I32[(a >> 2) + 1];
+
 function count(o: {n: number}) {
   return o.n;
 }
+function address(a: number) {
+  return a;
+}
 async function asyncNoop() {}
 
-own.fns({count, asyncNoop});
+own.fns({count, address, asyncNoop});
 runtime.shutdown(sab);
 
 it('a spawn on a pool that was shut down throws, and changes nothing', () => {
@@ -41,6 +47,17 @@ it('a spawn on a pool that was shut down throws, and changes nothing', () => {
   expect(word(QS_1)).toBe(IDLE);
   expect(live()).toBe(before);
   expect(args.n).toBe(1);
+});
+
+it('a spawn refused gives back the count a counted argument came with', () => {
+  // compiled code passes a struct to spawn as __countedRef(p), retained for
+  // the thread before spawn runs
+  const a = own.newStruct(own.sharedStruct('Stopped', ['v'], []));
+  expect(refs(a)).toBe(1);
+  expect(() => own.spawn(address, own.countedRef(a))).toThrow(
+    /the pool was stopped/,
+  );
+  expect(refs(a)).toBe(1);
 });
 
 it('the runtime queues no thread on a pool that was shut down', () => {
