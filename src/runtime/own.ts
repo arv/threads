@@ -1445,15 +1445,18 @@ export type ThreadFn = (...args: never[]) => unknown;
 const byKey = new Map<string, ThreadFn>(),
   keyOf = new Map<ThreadFn, string>();
 export function register(url: string, table: Record<string, ThreadFn>) {
+  // read once: a getter could give the check one function and the registration
+  // another
+  const entries = Object.entries(table);
   if (url === '')
-    for (const [name, f] of Object.entries(table)) {
+    for (const [name, f] of entries) {
       const known = byKey.get(`#${name}`);
       if (known !== undefined && known !== f)
         throw new TypeError(
           `own: fns() has a function named ${name} already: a thread finds its function by name, so each name is one function's`,
         );
     }
-  for (const [name, f] of Object.entries(table)) {
+  for (const [name, f] of entries) {
     const key = `${url}#${name}`;
     byKey.set(key, f);
     keyOf.set(f, key);

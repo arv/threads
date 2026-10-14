@@ -1123,6 +1123,16 @@ describe('the rest', () => {
     own.fns({twice: first}); // the same function again
     expect(() => own.fns({twice: second})).toThrow(/named twice already/);
     expect(() => own.spawn(second)).toThrow(/registers it/);
+    // a table is read once: a getter cannot give the check one function and
+    // the registration another
+    own.fns({once: first});
+    let reads = 0;
+    own.fns({
+      get once() {
+        return reads++ === 0 ? first : second;
+      },
+    });
+    expect(() => own.fns({once: second})).toThrow(/named once already/);
     // a module's functions are keyed by its url: should it load again, its
     // new functions are the ones to run
     own.register('mod.ts', {twice: first});
