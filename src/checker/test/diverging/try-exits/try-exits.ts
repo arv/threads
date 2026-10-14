@@ -122,3 +122,10 @@ export function divisionThenForever(ch: Channel<number[]>, n: bigint) {
   const xs = [1];
   try { void (1n / n); for (;;) {} } finally { ch.send(xs); use(xs); }  // error
 }
+// such a throw may also come in a try that completes, before what it does
+export function getterThenReassigned(ch: Channel<number[]>) {
+  let xs = [1];
+  ch.send(xs);
+  try { void getter.value; xs = [2]; } finally { use(xs); }  // error: the getter may throw before xs is new
+  use(xs);                                                    // fine: the try completed, xs is new
+}

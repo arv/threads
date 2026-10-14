@@ -1463,32 +1463,27 @@ class FunctionAnalysis {
       if (outer) (outer.catches ? outer.caught : outer.thrown).push(st);
     };
     if (node.finallyBlock) {
-      // the finally once as the try completes normally, from the end of its
-      // block or its catch, which goes on after it; and once more for the
-      // throws and for each place the early exits go to, which do not: those
-      // runs report what they reach, and what of them is still reachable (a
-      // finally may return or throw instead) goes on to the next try out, or
-      // to its target. None of them starts from the try's entry: a throw is
-      // recorded where a call, a construction or an await may make one. A try
-      // that does not complete normally (it never ends, or always leaves
-      // early) has no first run, as nothing reaches its end
-      if (!after.unreachable) {
-        this.statement(node.finallyBlock, after);
-      } else if (thrown.length === 0 && exits.length === 0) {
-        // nothing the analysis follows reaches the finally, but a throw it
-        // does not record (a getter's, a division's) may: the finally is
-        // checked from the try's entry for what it reports, in a try of its
-        // own, which keeps what it would throw, return or jump to
-        const nowhere: TryContext = {
-          catches: false,
-          caught: [],
-          thrown: [],
-          exits: [],
-        };
-        this.tries.push(nowhere);
-        this.statement(node.finallyBlock, entry);
-        this.tries.pop();
-      }
+      // the finally first for what it reports alone, from the try's entry
+      // joined with its end: a throw the analysis does not record (a
+      // getter's, a division's) may come anywhere in the block, and reach the
+      // finally with what the block had done so far. That run is in a try of
+      // its own, which keeps what it would throw, return or jump to. Then once
+      // as the try completes normally, from the end of its block or its catch
+      // alone, which goes on after it; and once more for the throws and for
+      // each place the early exits go to, which do not: those runs report
+      // what they reach, and what of them is still reachable (a finally may
+      // return or throw instead) goes on to the next try out, or to its
+      // target
+      const nowhere: TryContext = {
+        catches: false,
+        caught: [],
+        thrown: [],
+        exits: [],
+      };
+      this.tries.push(nowhere);
+      this.statement(node.finallyBlock, joinStates(entry, after));
+      this.tries.pop();
+      if (!after.unreachable) this.statement(node.finallyBlock, after);
       const run = (early: State[]) => {
         const fe = joinAllStates(early[0]!, early.slice(1));
         this.statement(node.finallyBlock, fe);
