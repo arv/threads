@@ -707,6 +707,41 @@ describe('strings are collected', () => {
     own.__collect();
   });
 
+  it('a cached string is not taken for one its block is becoming', () => {
+    // a thread's cache maps a dead string to its block. as it checks the cache
+    // (kind, serial, count), the block is retired and its reuse begun (the new
+    // count written, the rest not yet): the check must fail, not take the
+    // block, half written, for the dead string
+    const s = 'a string that dies mid-check';
+    const a = runtime.$internRef(s);
+    expect(runtime.$str(a)).toBe(s); // cached here
+    own.release(a); // dead, not yet retired
+    const atomics = Atomics as unknown as {
+      load: (arr: Int32Array, i: number) => number;
+    };
+    const load = atomics.load;
+    let armed = true;
+    atomics.load = (arr, i) => {
+      if (armed && arr === runtime.I32 && i === (a >> 2) + 5) {
+        armed = false;
+        own.__collect(); // retired
+        runtime.I32[(a >> 2) + 1] = 1; // a new string's count, its first word
+      }
+      return load(arr, i);
+    };
+    let b = 0;
+    try {
+      b = runtime.$internRef(s);
+    } finally {
+      atomics.load = load;
+    }
+    expect(armed).toBe(false);
+    expect(runtime.I32[b >> 2]).toBe(9); // K_STR: a string's block, written
+    expect(runtime.$str(b)).toBe(s);
+    expect(runtime.$internFind(s)).toBe(b);
+    own.release(b);
+  });
+
   it('an address a string left is never that string again', () => {
     for (let i = 0; i < 200; i++) {
       const a = runtime.$internRef(`gone ${i}`);

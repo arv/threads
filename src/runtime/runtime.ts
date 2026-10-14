@@ -747,11 +747,16 @@ function known(s: string) {
   const k = strAddr.get(s);
   if (k === undefined) return 0;
   const a = k[0];
-  // the kind first, atomically: written last by strAdd, so the serial and the
-  // count read after it are the string's that the block is
+  // the three words are read one by one, and the block may be retired and
+  // reused as another string meanwhile (the thread may have passed a quiescent
+  // point since the string died): the serial is read again after the count.
+  // serials are unique and a retired block's is cleared (retire), so the
+  // serial the same both times means the count read between is that string's
+  // count, not the next one's
   return Atomics.load(I32, a >> 2) === K_STR &&
     Atomics.load(I32, (a >> 2) + 5) === k[1] &&
-    Atomics.load(I32, (a >> 2) + 1) > 0
+    Atomics.load(I32, (a >> 2) + 1) > 0 &&
+    Atomics.load(I32, (a >> 2) + 5) === k[1]
     ? a
     : 0;
 }
@@ -953,6 +958,9 @@ export function $stringDying(a: number) {
 // a block whose grace period is over: a string that left, or a string table
 // that was replaced
 function retire(p: number) {
+  // a string's serial cleared first: a thread whose cache has the string checks
+  // it (known), and the block is reused as a string of another serial
+  if (I32[p >> 2] === K_STR) Atomics.store(I32, (p >> 2) + 5, 0);
   $freeBlock(
     p,
     I32[p >> 2] === K_STR ? strBytes(p) : 16 + I32[(p >> 2) + 1] * 4,
