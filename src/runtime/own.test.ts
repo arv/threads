@@ -302,7 +302,7 @@ describe('reference counts', () => {
       QS_3 = 2048 + 3 * 8 + 5,
       EPOCH = 17, // C_EPOCH
       NEXT_TID = 4, // C_NEXT_TID
-      IDLE = 0x7fffffff;
+      IDLE = 1;
     // threads 2 and 3 are to count as running: the tests' threadBegin(n) does
     // not claim n as a worker does, from the counter the scan goes up to
     if (Atomics.load(runtime.I32, NEXT_TID) < 4)
@@ -439,7 +439,7 @@ describe('reference counts', () => {
     // waits on
     const QS_2 = 2048 + 2 * 8 + 5, // thread 2's quiescent state (T_QS)
       PEND_LEN = 20, // C_PEND_LEN
-      IDLE = 0x7fffffff;
+      IDLE = 1;
     const posted: unknown[] = [];
     const nudges = () =>
       posted.filter(m => (m as {type: string}).type === 'nudge').length;
@@ -476,6 +476,53 @@ describe('reference counts', () => {
     runtime.$waitEnd();
     runtime.threadEnd();
     runtime.threadBegin(1);
+    own.release(a);
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {},
+      () => {},
+      text => logged.push(text),
+    );
+  });
+
+  it('the epoch wraps, and reclamation goes on', () => {
+    // the epoch is an i32: at the last even value before the wrap, a worker
+    // defers, the page passes points, and the decrements are applied though
+    // every comparison now crosses the wrap
+    const EPOCH = 17; // C_EPOCH
+    const posted: unknown[] = [];
+    const nudges = () =>
+      posted.filter(m => (m as {type: string}).type === 'nudge').length;
+    runtime.attach(
+      globalThis.__escapeSab!,
+      {nudge: true},
+      m => posted.push(m),
+      text => logged.push(text),
+    );
+    Atomics.store(runtime.I32, EPOCH, 0x7ffffffe);
+    runtime.$nudged(); // the page is at a point of its own, the last before
+    runtime.threadBegin(2);
+    const a = own.newStruct(N),
+      b = own.newStruct(N);
+    own.store(next(a), b);
+    own.store(next(a), 0);
+    runtime.threadEnd(); // its reclaim wraps the epoch; b to the shared list
+    expect(Atomics.load(runtime.I32, EPOCH)).toBeLessThan(0);
+    expect(nudges()).toBe(1);
+    expect(runtime.I32[b >> 2]).toBe(N.kind);
+    runtime.threadBegin(1);
+    runtime.$nudged(); // past the wrap: b is older than the page's point
+    expect(runtime.I32[b >> 2]).toBe(runtime.K_FREE);
+    // and on, after the wrap
+    runtime.threadBegin(2);
+    const c = own.newStruct(N);
+    own.store(next(a), c);
+    own.store(next(a), 0);
+    runtime.threadEnd();
+    expect(nudges()).toBe(2);
+    runtime.threadBegin(1);
+    runtime.$nudged();
+    expect(runtime.I32[c >> 2]).toBe(runtime.K_FREE);
     own.release(a);
     runtime.attach(
       globalThis.__escapeSab!,
