@@ -486,6 +486,11 @@ function get(base: number, at: number, frozen: boolean): unknown {
       return c;
     }
     case T_COUNTED:
+      if (rawRoot === false && at === 0) {
+        const value = box(p);
+        if (!frozen) release(p);
+        return value;
+      }
       if (countedInto !== null) countedInto.push(p);
       return p; // else the reader owns it
   }
@@ -499,8 +504,10 @@ let decoded: string[] | null | undefined = null,
   shapesRead: Map<number, Maker> | null | undefined = null,
   lastShapeRead = -1,
   lastMakerRead: Maker | null = null;
-let rawRoot = false;
-function read(a: number, frozen: boolean, raw = false) {
+// Channels explicitly choose a root representation. Other message protocols
+// leave this undefined and preserve CountedArg addresses, including nested ones.
+let rawRoot: boolean | undefined;
+function read(a: number, frozen: boolean, raw?: boolean) {
   const outerRaw = rawRoot;
   rawRoot = raw;
   const outer = [decoded, shapesRead, lastShapeRead, lastMakerRead] as const,
@@ -623,7 +630,7 @@ let given: number[] | null = null;
 export function __unmessage<T = unknown>(
   a: number,
   bytes: number,
-  raw = false,
+  raw?: boolean,
 ) {
   const outer = given;
   given = [];
@@ -651,10 +658,11 @@ export function share<T>(v: T) {
 // Compiled share(): the caller owns the blob, without a boxed handle.
 export function newShared(v: unknown): number {
   $quiescent(); // a compiled call holds no uncounted argument across it
+  if (v == null) return 0;
   if (typeof v === 'number') return retain(v);
-  if (v !== null && typeof v === 'object') {
-    const known = sharedAddr.get(v);
-    if (known !== undefined) return retain(known);
+  if (typeof v === 'object') {
+    const address = (v as CellObject).$cell ?? sharedAddr.get(v);
+    if (address !== undefined) return retain(address);
   }
   return write(v as Sent, null, true);
 }
@@ -809,11 +817,12 @@ export function newCell(
   }
 }
 // A temporary receiver for built-in methods. Waiting methods retain the cell
-// themselves; this view must never escape into user code.
-export function cellView(a: number, keepAlive = false): CellObject {
+// themselves; escaping iterators keep a handle. Decode raw only when the
+// channel element's static type is represented as a counted address.
+export function cellView(a: number, keepAlive = false, raw = true): CellObject {
   return Object.assign(Object.create(cellKinds.get(I32[a >> 2])!.prototype), {
     $cell: a,
-    $raw: true,
+    $raw: raw,
     // An iterator starts after its iterable expression has been evaluated.
     // Keep a canonical handle alive from then until the iterator is dropped.
     ...(keepAlive ? {$handle: cell(a)} : {}),
@@ -1563,9 +1572,9 @@ export class SharedArray<E extends ElementType = ElementType> {
     return h;
   }
 }
-export function unbox(v: MaybeCell) {
+export function unbox(v: MaybeCell | number) {
   if (v == null) return 0;
-  const a = typeof v === 'object' ? (v.$cell ?? sharedAddr.get(v)) : undefined;
+  const a = typeof v === 'number' ? v : (v.$cell ?? sharedAddr.get(v));
   if (a === undefined || !counted(I32[a >> 2]))
     throw new TypeError('own: not a shared struct or SharedArray');
   return a;

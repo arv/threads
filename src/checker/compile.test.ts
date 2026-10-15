@@ -298,6 +298,50 @@ describe('compile, where the fork does not', () => {
 });
 
 describe('what the lowering moves, as it runs', () => {
+  it('preserves boxed map values, mixed sharing, narrowed properties and escaping channel iterators', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-boundaries-'));
+    dirs.push(out);
+    const result = compile(path.join(checker, 'test/run/tsconfig.json'), {
+      runtime: '@arv/threads',
+      api,
+      check: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    const file = result.files.find(f => f.fileName.endsWith('/boundaries.ts'))!;
+    const code = toJavaScript(file).code;
+    // Hold the field receiver before the potentially collecting allocation.
+    expect(code).toContain(
+      '__store(((_a = __retain(__I32[(root >> 2) + 2])) >> 2) + 2, __newStruct(Node));\n\t__release(_a);',
+    );
+    fs.writeFileSync(path.join(out, 'boundaries.js'), code);
+    const run = spawnSync(
+      process.execPath,
+      [
+        path.join(checker, '../run.ts'),
+        path.join(out, 'boundaries.js'),
+        '--threads=1',
+        '--pool=0',
+      ],
+      {encoding: 'utf8', timeout: 60_000},
+    );
+    expect(run.status, run.stderr).toBe(0);
+    expect(JSON.parse(run.stdout.trim())).toEqual({
+      nullable: true,
+      calleeEffects: true,
+      countedMap: true,
+      iteratorValue: true,
+      maps: 9,
+      iterators: 16,
+      asyncIterators: 6,
+      mixed: 9,
+      narrowed: 1,
+      unknown: true,
+      union: 10,
+      asyncUnknown: true,
+      unknownIteration: true,
+    });
+  }, 60_000);
+
   it('counts cells and immutable values through constructors, returns and reference fields', () => {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-cells-'));
     dirs.push(out);

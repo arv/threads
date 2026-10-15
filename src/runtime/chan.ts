@@ -178,7 +178,7 @@ const EMPTY = Symbol('empty'),
 // holding the lock: the next message's value (unlocking), or EMPTY, or DONE
 // when closed and empty. functions, not private methods: another thread's
 // handle for a channel is made by own.ts, from the class's prototype
-function take(c: number, raw = false): unknown {
+function take(c: number, raw?: boolean): unknown {
   if (I32[c + COUNT] === 0) return I32[c + CLOSED] !== 0 ? DONE : EMPTY;
   const h = I32[c + HEAD],
     m = I32[c + RING + 2 * h],
@@ -190,7 +190,7 @@ function take(c: number, raw = false): unknown {
   return __unmessage(m, bytes, raw);
 }
 // the same without blocking
-async function receiveAsync(c: number, raw = false) {
+async function receiveAsync(c: number, raw?: boolean) {
   retain(c * 4);
   try {
     lock(c + LOCK);
@@ -216,7 +216,7 @@ function receive(
   c: number,
   what = "a channel's recv()",
   instead = 'await recvAsync() (or for await)',
-  raw = false,
+  raw?: boolean,
 ) {
   retain(c * 4);
   try {

@@ -78,8 +78,9 @@ import {
   write,
 } from './ir.ts';
 import type {Edit, Ir, Names, Part, Scope, Src, Temp} from './ir.ts';
-import {isRuntimeCellType, isSharedValueType, isCellType} from './layout.ts';
+import {isRuntimeCellType, isCellType} from './layout.ts';
 import {getCallMarker} from './markers.ts';
+import {getChannelElementType} from './refcount.ts';
 import {Count, Local} from './resolver.ts';
 import type {AtomicCall, Resolver, StructCall} from './resolver.ts';
 import {
@@ -769,6 +770,11 @@ class Lowering {
             '__cellView',
             this.visitValue(node, Ctx.AtOnce),
             raw('true'),
+            raw(
+              String(
+                isCellType(this.r.c, getChannelElementType(this.r.c, type)),
+              ),
+            ),
           );
         if (
           isRuntimeCellType(this.r.c, this.r.c.host.typeOf(node)) &&
@@ -793,7 +799,23 @@ class Lowering {
             ].some(n => this.r.assignsIn(n, id))
           )
             value = this.temporary(this.call('__retain', value));
-          return this.call('__cellView', value);
+          // Computed keys can produce an escaping iterator. Its receiver must
+          // own a handle before the generator's first next().
+          return this.call(
+            '__cellView',
+            value,
+            raw(String(access.kind === K.ElementAccessExpression)),
+            raw(
+              String(
+                isCellType(this.r.c, getChannelElementType(this.r.c, type)) &&
+                  ['recv', 'recvAsync', 'recvOk', 'recvOkAsync'].includes(
+                    this.r.c.host.declarationOf(
+                      this.r.c.host.signatureOf(invocation).declaration,
+                    )?.name?.text,
+                  ),
+              ),
+            ),
+          );
         }
         return this.call('__box', this.visitValue(node, Ctx.AtOnce));
       }
@@ -1772,20 +1794,47 @@ class Lowering {
         if (
           getCallMarker(this.r.c, node) === 'share' &&
           this.r.isCellExpression(node)
-        )
-          return this.call(
-            isSharedValueType(this.r.c, this.r.c.host.typeOf(node))
-              ? '__newShared'
-              : '__retain',
-            this.visitIn(node.arguments[0], Ctx.Argument)!,
-          );
+        ) {
+          if (isOptionalChain(node)) {
+            // Preserve short-circuiting and callee evaluation in optional calls.
+            // A native share returns a handle; take the result's own count.
+            const result = this.update(node, [
+              [node.expression, this.visit(node.expression)],
+              ...this.visitArguments(node, true),
+            ]);
+            return this.call('__retain', this.call('__unbox', result));
+          }
+          return comma([
+            this.visitIn(node.expression, Ctx.Discard)!,
+            this.call(
+              '__newShared',
+              this.visitIn(node.arguments[0], Ctx.Argument)!,
+            ),
+          ]);
+        }
         const structCall = this.r.structCall(node);
         if (structCall) return this.sharedStruct(structCall);
         const atomic = this.r.atomicCall(node);
         if (atomic) return this.lowerAtomic(node, atomic);
         const callee = this.visit(node.expression);
         const args = this.visitArguments(node, isOptionalChain(node));
-        return this.update(node, [[node.expression, callee], ...args]);
+        const result = this.update(node, [[node.expression, callee], ...args]);
+        // Native map lookups return boxed values, including immutable blobs.
+        // The compiler represents wholly counted results as borrowed addresses.
+        const handle = this.r.c.host.signatureOf(node)?.declaration;
+        const decl =
+          handle && this.r.c.isRuntimePath(handle.path)
+            ? this.r.c.host.declarationOf(handle)
+            : undefined;
+        if (
+          this.r.isCellExpression(node) &&
+          (decl?.parent as Node | undefined)?.name?.text === 'SharedMap' &&
+          ['get', 'getOrInsert', 'getOrInsertComputed'].includes(
+            decl?.name?.text,
+          )
+        )
+          return this.call('__unbox', result);
+        return result;
       }
       case K.PropertyAccessExpression:
       case K.ElementAccessExpression: {
@@ -1793,7 +1842,8 @@ class Lowering {
         if (lowered) return lowered;
         if (
           this.r.cellType(node.expression).kind === CellKind.None &&
-          isCellType(this.r.c, this.r.c.host.typeOf(node))
+          isCellType(this.r.c, this.r.c.host.typeOf(node)) &&
+          this.r.rawCount(node) !== Count.None
         )
           return this.call('__unbox', this.visitEachChild(node));
         break;
@@ -2353,7 +2403,7 @@ class Lowering {
   }
 
   // Reports whether evaluating an expression may call a function (and so
-  // reach a quiescent point). Allocating a struct or a SharedArray does not.
+  // reach a quiescent point). Allocations may collect when the heap is full.
   private containsCall(node: Node | undefined): boolean {
     if (!node) return false;
     let found = false;
@@ -2366,7 +2416,7 @@ class Lowering {
           found = true;
           break;
         case K.NewExpression:
-          found = this.r.cellType(n).kind === CellKind.None;
+          found = true;
           break;
         case K.ArrowFunction:
         case K.FunctionExpression:

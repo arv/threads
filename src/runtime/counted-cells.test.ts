@@ -20,6 +20,25 @@ const condition = (p: number) =>
 const field = (p: number) => (p >> 2) + 2;
 
 describe('counted built-in cells', () => {
+  it('boxes counted messages for boxed receivers and explicit iterators', () => {
+    for (const iterator of [false, true]) {
+      const ch = own.newCell(T.Channel, 1),
+        p = own.newCell(T.Lock);
+      channel(ch).send(own.countedRef(p));
+      own.release(p);
+      channel(ch).close();
+      const boxed = own.cellView(ch, true, false) as InstanceType<
+        typeof T.Channel
+      >;
+      const value = iterator
+        ? boxed[Symbol.iterator]().next().value
+        : boxed.recv();
+      expect(value).toBeInstanceOf(T.Lock);
+      expect(count(p)).toBe(1); // only the handle; no transferred raw count leaked
+      own.release(ch);
+    }
+  });
+
   it('transfers boxed cell messages into raw receivers without losing ownership', async () => {
     const ch = own.newCell(T.Channel, 1),
       handle = new T.Lock();

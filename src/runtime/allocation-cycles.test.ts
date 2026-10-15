@@ -8,6 +8,13 @@ it('collects cycles and retries once before an unlocked allocation reports a ful
   const p = own.newStruct(Node);
   own.store((p >> 2) + 2, own.retain(p));
   own.release(p);
+  const root = own.newStruct(Node),
+    child = own.newStruct(Node);
+  own.store((root >> 2) + 2, child);
+  // Compiled root.next.next = new Node() retains its borrowed receiver before
+  // allocating. Model another thread removing that child before recovery.
+  const receiver = own.retain(runtime.I32[(root >> 2) + 2]);
+  own.store((root >> 2) + 2, 0);
   for (const bytes of [1 << 20, 8]) {
     for (;;) {
       try {
@@ -21,5 +28,10 @@ it('collects cycles and retries once before an unlocked allocation reports a ful
   const q = own.newStruct(Node);
   expect(q).toBe(p);
   expect(T.heapStats().freed).toBe(before + 1);
-  own.release(q);
+  expect(runtime.I32[receiver >> 2]).toBe(Node.kind);
+  expect(runtime.I32[(receiver >> 2) + 1]).toBe(1);
+  own.store((receiver >> 2) + 2, q);
+  own.release(receiver);
+  own.release(root);
+  own.__collect();
 });
