@@ -211,6 +211,62 @@ describe('compile, where the fork does not', () => {
   });
 });
 
+describe('what the lowering moves, as it runs', () => {
+  it('runs defaults in order, reads what they read, keeps functions with their bindings, and frees field initializers', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-moved-'));
+    dirs.push(out);
+    const compiled = spawnSync(
+      process.execPath,
+      [
+        'cli.ts',
+        'compile',
+        '-p',
+        'test/run',
+        '--runtime',
+        '@arv/threads',
+        '--outDir',
+        out,
+      ],
+      {cwd: checker, encoding: 'utf8', timeout: 60_000},
+    );
+    expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
+    const r = spawnSync(
+      process.execPath,
+      [
+        path.join(checker, '../run.ts'),
+        path.join(out, 'moved.js'),
+        '--threads=1',
+      ],
+      {encoding: 'utf8', timeout: 60_000},
+    );
+    expect(r.stdout.trim(), r.stderr).toBe(
+      '[0,true,2,1,6,6,10,1] blocks left 0',
+    );
+  }, 60_000);
+
+  it("emits a package's sources for analysis only", () => {
+    const dir = project({
+      'app.ts': `import {n} from 'pkg';\n${APP}export const m = n;\n`,
+    });
+    fs.mkdirSync(path.join(dir, 'node_modules/pkg'), {recursive: true});
+    fs.writeFileSync(
+      path.join(dir, 'node_modules/pkg/package.json'),
+      JSON.stringify({name: 'pkg', type: 'module', exports: './index.ts'}),
+    );
+    fs.writeFileSync(
+      path.join(dir, 'node_modules/pkg/index.ts'),
+      'export const n: number = 1;\n',
+    );
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+    });
+    expect(result.files.map(f => path.basename(f.fileName))).toEqual([
+      'app.ts',
+    ]);
+  });
+});
+
 describe('threads-check compile', () => {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-compile-'));
   afterAll(() => fs.rmSync(out, {recursive: true, force: true}));

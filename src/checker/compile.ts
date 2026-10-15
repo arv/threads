@@ -132,6 +132,8 @@ function compileProgram(
   const forceModule = compilerOptions.moduleDetection === 3; // Force
   const files: CompiledFile[] = [];
   for (const file of program.files) {
+    // the project's own sources only: a package's are analyzed, not emitted
+    if (program.external.has(file.fileName as string)) continue;
     const esModule =
       program.esModule && !/\.c[jt]sx?$/i.test(file.fileName as string);
     const result = transformFile(resolver, file, {

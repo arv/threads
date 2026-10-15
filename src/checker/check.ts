@@ -90,6 +90,8 @@ export interface LoadedProgram {
   host: Host;
   own: Own;
   files: SourceFile[];
+  // the files of packages among them
+  external: ReadonlySet<string>;
   esModule: boolean;
   diagnostics: Diagnostic[];
 }
@@ -135,6 +137,10 @@ export function loadProgram(
   const files = api
     .batch(...wanted.map(name => program.getSourceFile.gen(name)))
     .filter((f): f is SourceFile => !!f);
+  // the sources packages ship (a .ts in node_modules): analyzed, not emitted
+  const external = new Set(
+    names.filter((_, i) => metadata[i]?.isFromExternalLibrary),
+  );
 
   // The files the runtime specifier resolves to, from any file that imports it.
   const runtimeFiles = new Map<string, SourceFile>();
@@ -160,7 +166,7 @@ export function loadProgram(
     );
   const own = new Own(host, runtime, [...runtimeFiles.values()], checked);
   for (const file of checked) host.prefetch(file);
-  return {host, own, files: checked, esModule, diagnostics};
+  return {host, own, files: checked, external, esModule, diagnostics};
 }
 
 // The diagnostics of a program, sorted, but for those a comment suppresses.

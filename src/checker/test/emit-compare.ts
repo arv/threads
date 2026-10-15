@@ -59,6 +59,12 @@ const computedImport =
 const markedNotTyped =
   "a struct() field whose type is not its marker's (a number marked i32, a `boolean | undefined` marked bool), an error: the fork lays the field out as its type says (an f64 where the type is no field type), threads-check as its marker says";
 const knownDifferences: Record<string, string> = {
+  'emit/corners.ts':
+    "defaults() has an owned parameter's default, which moves into the body: threads-check puts the body in a block of its own after the defaults, so its declarations can't shadow what the defaults read (the fork leaves the body as it is)",
+  'cases/counting/counting.ts':
+    "a class field's initializer with temporaries: threads-check gives it temporaries of its own, `(() => { var _a, _b; return ...; })()`, so a construction inside it can't overwrite them; the fork declares them in the module",
+  'run/moved.ts':
+    'the program compile.test.ts runs: the defaults, declarations and initializers the lowering moves, which the fork gets wrong (as it runs, its emit gives [0,false,2,1,"ReferenceError","TypeError","ReferenceError",1] and leaks 3 blocks; threads-check\'s [0,true,2,1,6,6,10,1], leaking none)',
   'emit/fixes.ts':
     "what the fork gets wrong (compile.test.ts tests each): an arrow whose concise body is a closure keeps its owned parameter's default (the fork drops it), defaults after one that moves into the body move too, so they still run left to right, and an array that its index assigns is read (and held) before the index",
   'playground/main.ts': computedImport,
@@ -98,6 +104,13 @@ const projects: Project[] = [
     rootDir: join(repo, 'playground'),
   },
 ];
+// what the lowering moves, as compile.test.ts runs it
+projects.push({
+  name: 'run',
+  tsconfig: join(checkerDir, 'test/run/tsconfig.json'),
+  runtime: '@arv/threads',
+  rootDir: join(checkerDir, 'test/run'),
+});
 // corners of the lowering the others reach little
 projects.push({
   name: 'emit',

@@ -84,10 +84,13 @@ import {
   forEachChild,
   isAssignmentOperator,
   isAssignmentTarget,
+  isClassLike,
+  isDeclarationName,
   isExpression,
   isFunctionLike,
   isFunctionLikeDeclaration,
   isOptionalChain,
+  isOwnReferencePosition,
   isTypeNode,
   K,
   NodeFlags,
@@ -190,6 +193,18 @@ class Lowering {
   private readonly movedDefaults = new Map<Node, Ir | undefined>();
   // the functions some of whose parameters' defaults move into the body
   private readonly movingDefaults = new Set<Node>();
+  // binding-pattern parameters from the first default that moves on: a
+  // temporary parameter, destructured in the body in order (with the
+  // default, visited already or to visit there)
+  private readonly movedPatterns = new Map<
+    Node,
+    {temp: Temp; pattern: Ir; init: Ir | undefined}
+  >();
+  // variables renamed where a moved default would see them instead of what
+  // it reads (by symbol id), and the file's identifiers, which a new name
+  // avoids
+  private readonly renamed = new Map<number, string>();
+  private fileIdentifiers = new Set<string>();
   // the var scopes of the functions being visited, innermost last
   private readonly scopes: Scope[] = [];
   private readonly starts = new Map<Node, number>();
@@ -204,6 +219,7 @@ class Lowering {
   run(ms: MagicString): string[] {
     const file = this.file;
     if (!this.usesRuntime()) return [];
+    this.fileIdentifiers = this.identifiers();
     const fileScope: Scope = {temps: []};
     this.scopes.push(fileScope);
     // the source file's statements, each visited (as VisitEachChild does: no
@@ -216,7 +232,7 @@ class Lowering {
     this.scopes.pop();
 
     // helpers and registration
-    const identifiers = this.identifiers();
+    const identifiers = this.fileIdentifiers;
     const used = new Set<string>();
     const helperNames = new Map<string, string>();
     const unique = (name: string): string => {
@@ -454,6 +470,11 @@ class Lowering {
 
   private visit(node: Node, ctx: Ctx = Ctx.AtOnce): Ir {
     if (isErased(node)) return this.src(node);
+    if (node.kind === K.Identifier && this.renamed.size > 0) {
+      const renamed = this.renamedName(node);
+      if (renamed !== undefined)
+        return gen(Prec.Primary, [renamed], {t: 'simple'});
+    }
     // an arrow's concise body, even one that is itself a function: the arrow's
     // parameters' prologue goes around it (the fork visits a function there
     // as a closure only, and drops an owned parameter's default)
@@ -563,7 +584,23 @@ class Lowering {
           const ir = this.visit(child);
           if (!isIdentity(ir, child)) edits.push(this.editOf(child, ir));
         });
-        const initializer = this.fullExpression(node.initializer, Ctx.AtOnce);
+        // its temporaries its own: each construction runs it, and one may
+        // construct another (`(() => { var _a; return E; })()`)
+        const scope = this.pushScope();
+        let initializer = this.fullExpression(node.initializer, Ctx.AtOnce);
+        this.popScope();
+        if (initializer && scope.temps.length > 0)
+          initializer = call(
+            paren(
+              gen(Prec.Assignment, [
+                '() => {',
+                varsStatement(scope),
+                returnStatement(initializer),
+                '\n}',
+              ]),
+            ),
+            [],
+          );
         if (initializer && !isIdentity(initializer, node.initializer))
           edits.push(this.editOf(node.initializer, initializer));
         return this.src(node, edits);
@@ -931,14 +968,22 @@ class Lowering {
   // A parameter: the default value of an owned parameter moves into the
   // function's body.
   private visitParameter(node: Node): Ir {
+    const fn = node.parent as Node;
+    const pattern = node.name.kind !== K.Identifier;
+    const lowerable = !!fn.body && isFunctionLikeDeclaration(fn);
+    let name: Ir = this.src(node.name);
     const edits: Edit[] = [];
     forEachChild(node, child => {
       if (child === node.initializer || isErased(child)) return;
       const ir = this.visit(child);
+      if (child === node.name) name = ir;
       if (!isIdentity(ir, child)) edits.push(this.editOf(child, ir));
     });
+    // after a default that moved into the body, a binding pattern is a
+    // temporary parameter, destructured there in order
+    if (pattern && lowerable && this.movingDefaults.has(fn))
+      return this.lowerPattern(node, name, undefined);
     if (node.initializer) {
-      const fn = node.parent as Node;
       // ` = init` goes
       const before = node.type ?? node.questionToken ?? node.name;
       const remove = {
@@ -947,30 +992,40 @@ class Lowering {
         ir: raw(''),
       };
       const local = this.r.local(node);
-      const movable = node.name.kind === K.Identifier && !!fn.body;
       if (local === Local.Owned || local === Local.OwnedMoved) {
         this.paramInits.set(node, node.initializer);
         this.movingDefaults.add(fn);
         edits.push(remove);
-      } else if (movable && this.movingDefaults.has(fn)) {
-        // after a default that moved: visited in the body
+      } else if (lowerable && this.movingDefaults.has(fn)) {
+        // after a default that moved: visited in the body, in order
         this.movedDefaults.set(node, undefined);
         edits.push(remove);
       } else {
         const scope = this.scopes[this.scopes.length - 1]!;
         const temps = scope.temps.length;
         const initializer = this.fullExpression(node.initializer, Ctx.AtOnce)!;
-        if (movable && scope.temps.length > temps) {
+        if (lowerable && scope.temps.length > temps) {
           // its temporaries are the body's: it moves there, as the fork's
           // emit moves it (`if (n === void 0) { n = ...; }`)
-          this.movedDefaults.set(node, initializer);
           this.movingDefaults.add(fn);
+          if (pattern) return this.lowerPattern(node, name, initializer);
+          this.movedDefaults.set(node, initializer);
           edits.push(remove);
         } else if (!isIdentity(initializer, node.initializer))
           edits.push(this.editOf(node.initializer, initializer));
       }
     }
     return this.src(node, edits);
+  }
+
+  // A binding-pattern parameter as a temporary one (`..._a` for a rest),
+  // which the body destructures in its place among the defaults.
+  private lowerPattern(node: Node, pattern: Ir, init: Ir | undefined): Ir {
+    const temp = this.newTemp();
+    this.movedPatterns.set(node, {temp, pattern, init});
+    return this.src(node, [
+      {start: this.startOf(node.name), end: node.end, ir: tempRef(temp)},
+    ]);
   }
 
   // `=> E`: a function's result, or a block if the function owns a parameter.
@@ -1002,6 +1057,30 @@ class Lowering {
     const owned: Node[] = [];
     for (const param of fn.parameters as Node[]) {
       const name = param.name as Node;
+      const moved = this.movedPatterns.get(param);
+      if (moved) {
+        // `var {x} = _a === void 0 ? init : _a;`
+        let value: Ir = tempRef(moved.temp);
+        if (param.initializer) {
+          const init =
+            moved.init ?? this.fullExpression(param.initializer, Ctx.AtOnce)!;
+          value = cond(
+            binary(tempRef(moved.temp), '===', raw('void 0', Prec.Unary)),
+            copyOf(init),
+            tempRef(moved.temp),
+          );
+        }
+        prologue.push(
+          gen(Prec.Primary, [
+            '\nvar ',
+            copyOf(moved.pattern),
+            ' = ',
+            value,
+            ';',
+          ]),
+        );
+        continue;
+      }
       if (!name || name.kind !== K.Identifier) continue;
       if (this.movedDefaults.has(param)) {
         // `if (p === void 0) { p = init; }`, in the parameters' order
@@ -1057,8 +1136,10 @@ class Lowering {
       (isFunctionLikeDeclaration(parent) ||
         parent.kind === K.ClassStaticBlockDeclaration) &&
       parent.body === node;
+    const moving = isBody && this.movingDefaults.has(parent!);
     if (isBody && isFunctionLikeDeclaration(parent))
       [prologue, owned] = this.functionPrologue(parent!);
+    if (moving) this.renameShadowingVars(parent!, node);
     const directives: Node[] = [];
     if (prologue.length > 0 || isBody) {
       while (list.length > 0 && isPrologueDirective(list[0]!)) {
@@ -1067,10 +1148,13 @@ class Lowering {
       }
     }
     let result = this.visitStatements(list);
-    if (owned.length > 0) {
-      const [functions, rest] = splitFunctionDeclarations(result);
-      result = [...functions, this.tryFinally(rest, owned)];
-    }
+    // after defaults that moved into the body, the body in a block of its
+    // own, so that its declarations neither shadow what they read nor put
+    // it in their temporal dead zone
+    if (moving) result = [block(result)];
+    // the whole body is in the try, its function declarations in place
+    // (the fork moves them ahead of it)
+    if (owned.length > 0) result = [this.tryFinally(result, owned)];
     const head: Ir[] = directives.map(d => this.src(d));
     if (isBody) {
       // the function's temporaries, declared once it is visited
@@ -1115,8 +1199,9 @@ class Lowering {
     interface Level {
       statements: Ir[];
       owned: Node[];
+      nodes: Node[]; // the statements after its owned locals' declaration
     }
-    const levels: Level[] = [{statements: [], owned: []}];
+    const levels: Level[] = [{statements: [], owned: [], nodes: []}];
     let top = levels[0]!;
     top.statements.push(...(holds.get(-1) ?? []));
     list.forEach((statement, i) => {
@@ -1126,15 +1211,24 @@ class Lowering {
       else top.statements.push(visited);
       const owned = this.ownedLocalsOf(statement);
       if (owned.length > 0) {
-        top = {statements: [], owned};
+        top = {statements: [], owned, nodes: []};
         levels.push(top);
-      }
+      } else top.nodes.push(statement);
       top.statements.push(...(holds.get(i) ?? []));
     });
+    // the lexical names declared in each level's try and the ones inside it
+    const declared: Set<string>[] = [];
+    for (let i = levels.length - 1, names = new Set<string>(); i > 0; i--) {
+      for (const n of lexicalNames(levels[i]!.nodes)) names.add(n);
+      declared[i] = new Set(names);
+    }
     for (let i = levels.length - 1; i > 0; i--) {
       const inner = levels[i]!,
         outer = levels[i - 1]!;
-      const [functions, rest] = splitFunctionDeclarations(inner.statements);
+      const [functions, rest] = splitFunctionDeclarations(
+        inner.statements,
+        declared[i]!,
+      );
       outer.statements.push(...functions);
       if (rest.length === 0)
         outer.statements.push(...this.releases(inner.owned));
@@ -1407,6 +1501,14 @@ class Lowering {
           [node.expression, this.visitIn(node.expression, Ctx.Discard)],
         ]);
       case K.ShorthandPropertyAssignment: {
+        // `{ b }` where b was renamed: `{ b: b_1 }`
+        const renamed =
+          this.renamed.size > 0 ? this.renamedName(node.name) : undefined;
+        if (
+          renamed !== undefined &&
+          this.r.conversion(node.name) === Conversion.None
+        )
+          return gen(Prec.Primary, [raw(node.name.text), ': ', raw(renamed)]);
         // `{ b }` where b is boxed or unboxed: `{ b: __box(b) }`
         if (this.r.conversion(node.name) !== Conversion.None) {
           const value = this.visitExpression(node.name, Ctx.AtOnce);
@@ -1979,7 +2081,88 @@ class Lowering {
 
   // A new reference to a variable, by name.
   private name(name: Node): Ir {
-    return gen(Prec.Primary, [name.text as string], {t: 'simple'});
+    const text =
+      (this.renamed.size > 0 && this.renamedName(name)) ||
+      (name.text as string);
+    return gen(Prec.Primary, [text], {t: 'simple'});
+  }
+
+  // The new name of a variable that an identifier declares or refers to, if
+  // it was renamed.
+  private renamedName(id: Node): string | undefined {
+    const host = this.r.c.host;
+    const parent = id.parent as Node | undefined;
+    const symbol =
+      parent &&
+      isDeclarationName(id) &&
+      parent.kind !== K.ShorthandPropertyAssignment
+        ? host.symbolOfDeclaration(parent)
+        : host.resolvedSymbol(id);
+    return symbol ? this.renamed.get(host.symbolId(symbol)) : undefined;
+  }
+
+  // Renames the `var`s of a function's body (outside the functions in it)
+  // that its moved defaults would see instead of what they read: the
+  // defaults now run in the body, whose other declarations are in a block of
+  // their own.
+  private renameShadowingVars(fn: Node, body: Node): void {
+    const host = this.r.c.host;
+    const reads = new Map<string, unknown>();
+    const collect = (node: Node | undefined): void => {
+      if (!node) return;
+      if (node.kind === K.Identifier) {
+        if (isOwnReferencePosition(node))
+          reads.set(node.text, host.resolvedSymbol(node));
+        return;
+      }
+      forEachChild(node, child => {
+        collect(child);
+      });
+    };
+    for (const param of fn.parameters as Node[]) {
+      if (
+        this.paramInits.has(param) ||
+        this.movedDefaults.has(param) ||
+        this.movedPatterns.has(param)
+      ) {
+        collect(param.initializer);
+        if (param.name.kind !== K.Identifier) collect(param.name);
+      }
+    }
+    if (reads.size === 0) return;
+    const visit = (node: Node): void => {
+      if (isTypeNode(node) || isFunctionLike(node) || isClassLike(node)) return;
+      if (
+        node.kind === K.VariableDeclarationList &&
+        !(node.flags & (NodeFlags.Let | NodeFlags.Const))
+      ) {
+        const names = (name: Node): void => {
+          if (name.kind === K.Identifier) {
+            if (!reads.has(name.text)) return;
+            const symbol = host.symbolOfDeclaration(name.parent as Node);
+            if (!symbol || symbol === reads.get(name.text)) return;
+            const id = host.symbolId(symbol);
+            if (this.renamed.has(id)) return;
+            let n = name.text as string;
+            for (let i = 1; this.fileIdentifiers.has(n); i++)
+              n = `${name.text}_${i}`;
+            this.fileIdentifiers.add(n);
+            this.renamed.set(id, n);
+            return;
+          }
+          forEachChild(name, child => {
+            if (child.kind === K.BindingElement) names(child.name);
+          });
+        };
+        for (const decl of node.declarations as Node[]) names(decl.name);
+      }
+      forEachChild(node, child => {
+        visit(child);
+      });
+    };
+    forEachChild(body, child => {
+      visit(child);
+    });
   }
 
   private sequence(temps: Ir[], expr: Ir): Ir {
@@ -2162,16 +2345,78 @@ function embedded(ir: Ir | undefined): Ir | undefined {
   return ir;
 }
 
-// Function declarations move ahead of a `try` (they are hoisted anyway).
-function splitFunctionDeclarations(list: Ir[]): [Ir[], Ir[]] {
+// Function declarations move ahead of a `try` (they are hoisted, and code
+// before the try may call them), but for those that read a lexical binding
+// declared in the try (`const n` there, or a class), which stay with it, as
+// do those that read them (the fork moves them all, away from what they
+// read).
+function splitFunctionDeclarations(
+  list: Ir[],
+  declared: Set<string>,
+): [Ir[], Ir[]] {
+  const names = new Set(declared);
+  const fns = list.filter(
+    ir => ir.k === 'src' && ir.node.kind === K.FunctionDeclaration,
+  ) as Src[];
+  const stays = new Set<Ir>();
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const f of fns) {
+      if (stays.has(f) || !readsAny(f.node, names)) continue;
+      stays.add(f);
+      if (f.node.name) names.add(f.node.name.text);
+      changed = true;
+    }
+  }
   const functions: Ir[] = [],
     rest: Ir[] = [];
   for (const ir of list) {
-    if (ir.k === 'src' && ir.node.kind === K.FunctionDeclaration)
+    if (
+      ir.k === 'src' &&
+      ir.node.kind === K.FunctionDeclaration &&
+      !stays.has(ir)
+    )
       functions.push(ir);
     else rest.push(ir);
   }
   return [functions, rest];
+}
+
+// The names that statements declare lexically: `let`, `const`, classes and
+// enums (and function declarations, which the try would hold in its block).
+function lexicalNames(statements: Node[]): Set<string> {
+  const names = new Set<string>();
+  const bind = (name: Node): void => {
+    if (name.kind === K.Identifier) names.add(name.text);
+    else
+      forEachChild(name, child => {
+        if (child.kind === K.BindingElement) bind(child.name);
+      });
+  };
+  for (const s of statements) {
+    if (
+      s.kind === K.VariableStatement &&
+      s.declarationList.flags & (NodeFlags.Let | NodeFlags.Const)
+    )
+      for (const d of s.declarationList.declarations as Node[]) bind(d.name);
+    else if (
+      (s.kind === K.ClassDeclaration || s.kind === K.EnumDeclaration) &&
+      s.name
+    )
+      names.add(s.name.text);
+  }
+  return names;
+}
+
+// Reports whether a function reads (or names) any of names.
+function readsAny(fn: Node, names: Set<string>): boolean {
+  if (names.size === 0) return false;
+  const visit = (node: Node): boolean => {
+    if (node.kind === K.Identifier)
+      return names.has(node.text) && isOwnReferencePosition(node);
+    return forEachChild(node, visit);
+  };
+  return forEachChild(fn, visit);
 }
 
 // The loop a `continue` statement continues.
