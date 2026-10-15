@@ -235,9 +235,9 @@ class Lowering {
   private readonly hoistedVars = new Set<Node>();
   private readonly functionScopedVars = new Set<Node>();
   private readonly functionQueueVars = new Map<Node, Node[]>();
-  // for-let bindings stay in the head. A separate owner tracks their current
-  // count across iterations and is available to the enclosing finally.
-  private readonly loopOwners = new Map<
+  // Loop and switch bindings keep their lexical scope. Separate owners
+  // track their current counts for cleanup outside that scope.
+  private readonly lexicalOwners = new Map<
     number,
     {temp: Temp; fn: Node | undefined}
   >();
@@ -826,10 +826,10 @@ class Lowering {
         }
     }
     let count = this.r.rawCount(node);
-    // The loop's outer owner releases its count; a return retains it.
+    // An outer lexical owner releases its count; a return retains it.
     if (
       node.kind === K.Identifier &&
-      this.loopOwner(node) &&
+      this.lexicalOwner(node) &&
       count === Count.OwnedLocal
     )
       count = Count.Stable;
@@ -1115,7 +1115,7 @@ class Lowering {
     let initializer = this.fullExpression(node.initializer, ctx);
     if (initializer && this.hoistedVars.has(node))
       initializer = this.replaceLocal(node.name, initializer, true);
-    const owner = this.loopOwner(node.name);
+    const owner = this.lexicalOwner(node.name);
     if (initializer && owner)
       initializer = paren(this.assign(tempRef(owner), initializer));
     const name = this.visit(node.name);
@@ -1543,8 +1543,10 @@ class Lowering {
   // locals are wrapped in `try { ... } finally { __release(x) }`, and a nested
   // function declaration that captures counted variables is held
   // (`__capture(f, x)`) as soon as they are declared.
-  private visitStatements(list: Node[]): Ir[] {
-    const holds = this.holdStatements(list);
+  private visitStatements(
+    list: Node[],
+    holds = this.holdStatements(list),
+  ): Ir[] {
     if (this.splitsScope(list)) return this.visitStatementsFlat(list, holds);
     interface Level {
       statements: Ir[];
@@ -1627,12 +1629,8 @@ class Lowering {
   // visitStatements for a block whose trys would split its scope: one try
   // around all of it, the owned locals declared (as 0) ahead of it and
   // assigned where they were declared, function declarations in place.
-  private visitStatementsFlat(
-    list: Node[],
-    holds: Map<number, Ir[]>,
-    switchOwned?: Node[],
-  ): Ir[] {
-    const owned: Node[] = switchOwned ?? [];
+  private visitStatementsFlat(list: Node[], holds: Map<number, Ir[]>): Ir[] {
+    const owned: Node[] = [];
     const statements: Ir[] = [...(holds.get(-1) ?? [])];
     list.forEach((statement, i) => {
       const names = this.ownedLocalsOf(statement);
@@ -1666,7 +1664,6 @@ class Lowering {
       }
       statements.push(...(holds.get(i) ?? []));
     });
-    if (switchOwned) return statements;
     return [this.ownedDeclarations(owned), this.tryFinally(statements, owned)];
   }
 
@@ -1691,43 +1688,72 @@ class Lowering {
           if (!this.functionScopedVars.has(decl) && this.prepareQueue(decl))
             queues.push(decl);
       }
-    const owned: Node[] = [];
+    // Function declarations are initialized throughout the CaseBlock,
+    // even when dispatch skips the clause containing their declaration.
+    // Enter their holds before the first case test (or a default-only body).
+    const functions = clauses
+      .flatMap(clause => clause.statements as Node[])
+      .filter(s => s.kind === K.FunctionDeclaration && s.name)
+      .map(fn => ({fn, captures: this.r.captures(fn)}))
+      .filter(({captures}) => captures.length > 0);
+    const held = functions.length ? this.freshName('__held') : undefined;
+    const enter = held
+      ? binary(
+          raw(held),
+          '||',
+          paren(
+            comma([
+              this.assign(raw(held), raw('true')),
+              ...functions.map(({fn, captures}) =>
+                this.holdClosure(this.name(fn.name), captures),
+              ),
+            ]),
+          ),
+        )
+      : undefined;
+    const owned = clauses.flatMap(clause =>
+      (clause.statements as Node[]).flatMap(s => this.ownedLocalsOf(s)),
+    );
+    const owners = owned.map(name => {
+      const temp = this.newTemp();
+      this.lexicalOwners.set(this.symbolId(name), {
+        temp,
+        fn: getContainingFunction(node),
+      });
+      return temp;
+    });
     const caseBlock = this.update(
       node.caseBlock,
       clauses.map(clause => {
-        const value = this.fullExpression(clause.expression, Ctx.AtOnce);
+        let value = this.fullExpression(clause.expression, Ctx.AtOnce);
+        if (value && enter) value = paren(comma([enter, value]));
         const list = clause.statements as Node[];
         return [
           clause,
           this.withStatements(
             clause,
             clause.statements,
-            this.visitStatementsFlat(list, this.holdStatements(list), owned),
+            [
+              ...(enter ? [exprStatement(enter)] : []),
+              ...this.visitStatements(list, new Map()),
+            ],
             value ? [[clause.expression, value]] : [],
           ),
         ];
       }),
     );
-    // The discriminant runs outside the switch's lexical environment.
-    // Stage it before entering the block that declares its owned bindings.
-    const discriminant = owned.length ? this.newTemp() : undefined;
+    for (const name of owned) this.lexicalOwners.delete(this.symbolId(name));
     const result = this.update(node, [
-      [node.expression, discriminant ? tempRef(discriminant) : expression],
+      [node.expression, expression],
       [node.caseBlock, caseBlock],
     ]);
-    if (!owned.length && !queues.length) return result;
-    const scope = block([
+    if (!owners.length && !queues.length && !held) return result;
+    return block([
       ...queues.map(d => this.queueDeclaration(d)),
-      ...(owned.length
-        ? [this.ownedDeclarations(owned), this.tryFinally([result], owned)]
-        : [result]),
+      ...(held ? [raw(`\nlet ${held} = false;`)] : []),
+      ...owners.map(t => exprStatement(this.assign(tempRef(t), num(0)))),
+      ...(owners.length ? [this.tryFinallyTemps([result], owners)] : [result]),
     ]);
-    return discriminant
-      ? block([
-          exprStatement(this.assign(tempRef(discriminant), expression!)),
-          scope,
-        ])
-      : scope;
   }
 
   // The names of the owned locals a statement declares.
@@ -1742,7 +1768,8 @@ class Lowering {
       const local = this.r.local(decl);
       if (
         (local === Local.Owned || local === Local.OwnedMoved) &&
-        !this.hoistedVars.has(decl)
+        !this.hoistedVars.has(decl) &&
+        !this.lexicalOwner(decl.name)
       )
         owned.push(decl.name);
     }
@@ -1861,9 +1888,9 @@ class Lowering {
     return symbol ? host.symbolId(symbol) : -1;
   }
 
-  private loopOwner(name: Node): Temp | undefined {
+  private lexicalOwner(name: Node): Temp | undefined {
     if (name.kind !== K.Identifier) return undefined;
-    const owner = this.loopOwners.get(this.symbolId(name));
+    const owner = this.lexicalOwners.get(this.symbolId(name));
     return owner?.fn === getContainingFunction(name) ? owner?.temp : undefined;
   }
 
@@ -1926,6 +1953,18 @@ class Lowering {
     ]);
   }
 
+  private tryFinallyTemps(list: Ir[], owners: Temp[]): Ir {
+    return gen(Prec.Primary, [
+      '\ntry {',
+      ...list,
+      '\n} finally {',
+      ...[...owners]
+        .reverse()
+        .map(t => exprStatement(this.call('__release', tempRef(t)))),
+      '\n}',
+    ]);
+  }
+
   // The owned locals a `for` statement declares in its head.
   private ownedLocalsOfFor(node: Node): Node[] {
     const init = node.initializer as Node | undefined;
@@ -1945,7 +1984,7 @@ class Lowering {
     const owned = this.ownedLocalsOfFor(node);
     const owners = owned.map(name => {
       const temp = this.newTemp();
-      this.loopOwners.set(this.symbolId(name), {
+      this.lexicalOwners.set(this.symbolId(name), {
         temp,
         fn: getContainingFunction(node),
       });
@@ -1959,7 +1998,7 @@ class Lowering {
     const condition = this.fullExpression(node.condition, Ctx.AtOnce);
     const incrementor = this.fullExpression(node.incrementor, Ctx.Discard);
     const body = this.visitLoopBody(node.statement, node);
-    for (const name of owned) this.loopOwners.delete(this.symbolId(name));
+    for (const name of owned) this.lexicalOwners.delete(this.symbolId(name));
     let loop = this.update(node, [
       [init, initializer],
       [node.condition, condition],
@@ -1974,15 +2013,7 @@ class Lowering {
     return block([
       ...queues.map(d => this.queueDeclaration(d)),
       ...owners.map(t => exprStatement(this.assign(tempRef(t), num(0)))),
-      gen(Prec.Primary, [
-        '\ntry {',
-        loop,
-        '\n} finally {',
-        ...[...owners]
-          .reverse()
-          .map(t => exprStatement(this.call('__release', tempRef(t)))),
-        '\n}',
-      ]),
+      this.tryFinallyTemps([loop], owners),
     ]);
   }
 
@@ -2364,7 +2395,7 @@ class Lowering {
         this.conditional++;
         const value = this.visitIn(node.right, Ctx.Take)!;
         this.conditional--;
-        const owner = this.loopOwner(x);
+        const owner = this.lexicalOwner(x);
         return binary(
           this.name(x),
           '||',
@@ -2392,7 +2423,7 @@ class Lowering {
     // the same saved address twice.
     const staged = this.newTemp();
     const old = this.newTemp();
-    const owner = this.loopOwner(x);
+    const owner = this.lexicalOwner(x);
     const next = owner
       ? this.assign(tempRef(owner), tempRef(staged))
       : tempRef(staged);

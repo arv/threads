@@ -369,6 +369,82 @@ describe('what the lowering moves, as it runs', () => {
 describe('counting lowering review regressions', () => {
   const cases = [
     {
+      name: 'preserves module var scope and lifetime through a switch',
+      source: `switch (0) {
+        case 0:
+          var p = new P(); p.x = 131;
+          break;
+      }
+      const q = new P(); q.x = 99;
+      export function main() { log(p.x); }`,
+      expected: '131',
+    },
+    {
+      name: 'preserves the switch temporal dead zone while evaluating case tests',
+      source: `function f() {
+        switch (0) {
+          case read():
+            const p = new P();
+            function read() { return p.x; }
+        }
+      }
+      export function main() {
+        try { f(); } catch (e) { log(e instanceof ReferenceError); }
+      }`,
+      expected: 'true',
+    },
+    {
+      name: 'tracks switch owners through nested assignments and a returned binding',
+      source: `function f(): P {
+        switch (0) {
+          case 0:
+            let p = new P(); p.x = 1;
+            p = (p = new P()); p.x = 127;
+            return p;
+        }
+        throw new Error('unreachable');
+      }
+      export function main() {
+        const before = heapStats();
+        const result = f().x;
+        const after = heapStats();
+        log(JSON.stringify([result,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[127,0]',
+    },
+    {
+      name: 'captures switch functions exposed by case tests without a matched clause',
+      source: `let saved = () => 0;
+      function save(get: () => number) { saved = get; return 1; }
+      function f() {
+        const p = new P(); p.x = 109;
+        switch (0) {
+          case save(get):
+            function get() { return p.x; }
+        }
+      }
+      export function main() {
+        f(); const q = new P(); q.x = 99; log(saved());
+      }`,
+      expected: '109',
+    },
+    {
+      name: 'captures hoisted functions on default entry without case tests',
+      source: `function f() {
+        const p = new P(); p.x = 113;
+        switch (0) {
+          default:
+            return get;
+            function get() { return p.x; }
+        }
+      }
+      export function main() {
+        const get = f(); const q = new P(); q.x = 99; log(get());
+      }`,
+      expected: '113',
+    },
+    {
       name: 'evaluates a derived receiver exactly once before replacing its owner',
       source: `export function main() {
         let a = new SharedArray(P, 2), q = new SharedArray(P, 2);
@@ -503,6 +579,21 @@ describe('counting lowering review regressions', () => {
         }
       }
       export function main() { log(f(0)()); }`,
+      expected: '97',
+    },
+    {
+      name: 'captures hoisted switch functions when entering a later clause',
+      source: `function f(n: number) {
+        switch (n) {
+          case 0:
+            function get() { return p.x; }
+          case 1:
+            const p = new P(); p.x = 97;
+          default:
+            return get;
+        }
+      }
+      export function main() { const get = f(1); const q = new P(); q.x = 99; log(get()); }`,
       expected: '97',
     },
     {

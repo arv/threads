@@ -423,6 +423,21 @@ export class Resolver {
         statement.parent?.kind === K.ModuleBlock)
     )
       return Local.Module;
+    // A var nested in a top-level block, loop, or switch still belongs to
+    // the source file (or namespace), rather than that lexical block.
+    if (!(list.flags & (NodeFlags.Let | NodeFlags.Const))) {
+      let scope = statement.parent as Node | undefined;
+      while (scope) {
+        if (scope.kind === K.SourceFile || scope.kind === K.ModuleBlock)
+          return Local.Module;
+        if (
+          isFunctionLike(scope) ||
+          scope.kind === K.ClassStaticBlockDeclaration
+        )
+          break;
+        scope = scope.parent as Node | undefined;
+      }
+    }
     if (!this.isAssigned(symbol)) {
       if (!decl.initializer || this.isBorrowable(decl.initializer))
         return Local.Borrowed; // (always 0 without an initializer)
