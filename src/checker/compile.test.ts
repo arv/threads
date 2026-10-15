@@ -313,6 +313,7 @@ describe('what the lowering moves, as it runs', () => {
     expect(code).toContain(
       '__store(((_a = __retain(__I32[(root >> 2) + 2])) >> 2) + 2, __newStruct(Node));\n\t__release(_a);',
     );
+    expect(code).toContain('__callbackView(makeLock, 0, false, true)');
     fs.writeFileSync(path.join(out, 'boundaries.js'), code);
     const run = spawnSync(
       process.execPath,
@@ -326,6 +327,14 @@ describe('what the lowering moves, as it runs', () => {
     );
     expect(run.status, run.stderr).toBe(0);
     expect(JSON.parse(run.stdout.trim())).toEqual({
+      nullishMapEntries: true,
+      keyLookups: true,
+      computedKeyCallback: true,
+      conditionalReceives: true,
+      conditionalIteration: true,
+      fallback: true,
+      widenedCallbacks: true,
+      computedCallback: true,
       unionReceivers: true,
       asyncUnionReceivers: true,
       parenthesizedReceive: true,

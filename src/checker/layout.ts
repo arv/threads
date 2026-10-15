@@ -1020,7 +1020,15 @@ function computeConversion(c: Own, node: Node): void {
               : undefined;
           const runtimeMethod =
             decl?.name?.text === 'wait' || decl?.name?.text === 'waitAsync';
-          if (
+          const container = (decl?.parent as Node | undefined)?.name?.text;
+          const mapLookup =
+            (container === 'SharedMap' || container === 'SharedSet') &&
+            ['get', 'has', 'delete'].includes(decl?.name?.text);
+          const mapNullish =
+            (container === 'SharedMap' || container === 'SharedSet') &&
+            nonNullishMembers(c, host.typeOf(arg)).length === 0;
+          if (mapLookup || mapNullish) setTarget(c, arg, false);
+          else if (
             param &&
             (runtimeMethod ||
               decl?.name?.text === 'select' ||

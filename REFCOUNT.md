@@ -239,6 +239,10 @@ things:
    - A callback whose type in the runtime has a `Sending` result
      (getOrInsertComputed's) returns a counted value as `__moved(E)`, with its
      count.
+   - Map and set entries tag cells and shared blobs separately from ordinary
+     numbers. Native reads and callbacks receive handles; the compiler unboxes
+     counted results and adapts callback parameters. Named computed callbacks
+     transfer their owned results through the same protocol as inline callbacks.
    - A map or set holds a count on each counted key and value. It defers the
      decrement of one it drops, and releases the rest when it's freed.
    - A `for...of` over a channel owns each value and releases it at the end of

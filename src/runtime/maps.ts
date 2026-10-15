@@ -20,10 +20,11 @@
 // address (0 for ""), a cell's handle's, a shared value's. strings are
 // interned, as a `str` field's are, so two equal strings are one address, and
 // the map holds a count on each (runtime.ts $intern): a string no map, field or
-// message refers to goes. compiled code passes a shared struct or SharedArray
-// as its address, a number, and reads one back as that: the map keeps it as
-// that number, and the compiler's __countedRef(p) (set's parameters are a `Sending`
-// rest parameter, as spawn's are) says it is an address. the map holds a count
+// message refers to goes. compiled code passes counted addresses through
+// __countedRef(p) (set's parameters are a `Sending` rest parameter, as spawn's
+// are). The map tags these as cells or blobs, so a native reader can distinguish
+// them from ordinary numbers, and the compiler unboxes counted results.
+// The map holds a count
 // on each cell and string in it, a flag in the entry saying which of its words
 // do (REFCOUNT.md); a map is counted too, as a SharedArray is, and freeing it
 // gives back what it held. an object or array stored moves in (the ownership
@@ -56,7 +57,8 @@ import {
 // a map's block: [0 kind][1 count][2 lock][3 table][4 size][5 generation, one
 // more with each rehash][6, 7 insertions so far, an f64]
 const K_SHARED_MAP = 25,
-  K_SHARED_SET = 26;
+  K_SHARED_SET = 26,
+  K_SHARED = 27; // immutable blob kind, shared with own.ts
 const HEADER = 32,
   LOCK = 2,
   TABLE = 3,
@@ -153,10 +155,14 @@ function encode(v: unknown, key: boolean, adding: boolean): boolean {
       }
       if (__isCounted(v)) {
         // compiled code's address, with a count for the map
-        scratch[0] = (v as {a: number}).a;
-        lo = bits[0];
-        hi = bits[1];
-        held = ADOPT;
+        lo = (v as {a: number}).a;
+        hi =
+          lo === 0
+            ? BOX | (T_NULL << 11)
+            : I32[lo >> 2] === K_SHARED
+              ? BOX | (T_SHARED << 11)
+              : CELL_HI;
+        held = lo === 0 ? 0 : ADOPT;
         return true;
       }
       const c = (v as {$cell?: number}).$cell;
@@ -224,19 +230,12 @@ function keyed(
 }
 // gives back the count a word encode made came with, which the map does not
 // keep (its key was there already)
-function unheld(l: number, h: number, how: number) {
+function unheld(l: number, _h: number, how: number) {
   if (how !== ADOPT) return;
-  if (h === STR_HI) {
-    release(l);
-    return;
-  }
-  bits[0] = l;
-  bits[1] = h;
-  release(scratch[0]);
+  release(l);
 }
-// what a key or value is to the code that passed it: compiled code's __countedRef(p)
-// is p
-const plain = (v: unknown) => (__isCounted(v) ? (v as {a: number}).a : v);
+// Native callbacks always receive handles; the compiler adapts counted parameters.
+const plain = (v: unknown) => (__isCounted(v) ? box((v as {a: number}).a) : v);
 // a value word, as its f64 and its two i32s, as a value of this thread: a map's
 // methods read the words they return under its lock, and decode them once it
 // is released. decoding a shared value builds this thread's copy of it, which

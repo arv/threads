@@ -185,12 +185,21 @@ export function getChannelElementType(
   return c.host.typeArguments(t)[0];
 }
 
+// Every possible channel element must use the address representation.
+export function hasCountedChannelElements(c: Own, t: Type): boolean {
+  const members = nonNullishMembers(c, t);
+  return (
+    members.length > 0 &&
+    members.every(member => isCellType(c, getChannelElementType(c, member)))
+  );
+}
+
 // Reports whether a for-of statement receives counted values from a channel:
 // its variable owns each.
 export function isChannelReceiveLoop(c: Own, loop: Node): boolean {
   return (
     loop.kind === K.ForOfStatement &&
-    isCellType(c, getChannelElementType(c, c.host.typeOf(loop.expression)))
+    hasCountedChannelElements(c, c.host.typeOf(loop.expression))
   );
 }
 
@@ -748,7 +757,9 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
         if (
           node.kind === K.ForOfStatement &&
           !node.awaitModifier &&
-          getChannelElementType(c, host.typeOf(node.expression)) &&
+          nonNullishMembers(c, host.typeOf(node.expression)).some(member =>
+            getChannelElementType(c, member),
+          ) &&
           getFunctionFlags(getContainingFunction(node)) & FunctionFlags.Async
         ) {
           reportBlocking(c, node.expression, 'for...of', 'for await');

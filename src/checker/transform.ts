@@ -80,7 +80,7 @@ import {
 import type {Edit, Ir, Names, Part, Scope, Src, Temp} from './ir.ts';
 import {isRuntimeCellType, isCellType} from './layout.ts';
 import {getCallMarker} from './markers.ts';
-import {getChannelElementType} from './refcount.ts';
+import {hasCountedChannelElements} from './refcount.ts';
 import {Count, Local} from './resolver.ts';
 import type {AtomicCall, Resolver, StructCall} from './resolver.ts';
 import {
@@ -762,6 +762,7 @@ class Lowering {
           callee = callee.parent as Node;
         const invocation = callee?.parent as Node | undefined;
         const type = this.r.c.host.typeOf(node);
+        const receiverType = this.r.c.host.typeOf(receiver);
         if (
           isRuntimeCellType(this.r.c, type) &&
           access?.kind === K.CallExpression
@@ -799,11 +800,7 @@ class Lowering {
             '__cellView',
             this.visitValue(node, Ctx.AtOnce),
             raw('true'),
-            raw(
-              String(
-                isCellType(this.r.c, getChannelElementType(this.r.c, type)),
-              ),
-            ),
+            raw(String(hasCountedChannelElements(this.r.c, receiverType))),
           );
         if (
           isRuntimeCellType(this.r.c, this.r.c.host.typeOf(node)) &&
@@ -840,10 +837,7 @@ class Lowering {
                   this.r.c,
                   this.r.c.host.awaitedType(this.r.c.host.typeOf(invocation)),
                 ) ||
-                  (isCellType(
-                    this.r.c,
-                    getChannelElementType(this.r.c, type),
-                  ) &&
+                  (hasCountedChannelElements(this.r.c, receiverType) &&
                     ['recv', 'recvAsync', 'recvOk', 'recvOkAsync'].includes(
                       this.r.c.host.declarationOf(
                         this.r.c.host.signatureOf(invocation).declaration,
@@ -1864,13 +1858,15 @@ class Lowering {
         const container = (decl?.parent as Node | undefined)?.name?.text;
         if (
           (container === 'SharedMap' || container === 'SharedSet') &&
-          decl?.name?.text === 'forEach' &&
-          args[0]?.[1]
+          (decl?.name?.text === 'forEach' ||
+            decl?.name?.text === 'getOrInsertComputed')
         ) {
+          const callbackIndex = decl.name.text === 'forEach' ? 0 : 1;
+          const callbackArgument = args[callbackIndex];
           const callback = this.r.c.host.callSignatures(
-            this.r.c.host.typeOf(node.arguments[0]),
+            this.r.c.host.typeOf(node.arguments[callbackIndex]),
           )[0];
-          if (callback) {
+          if (callback && callbackArgument?.[1]) {
             const mask = callback.parameters.reduce(
               (mask, _parameter, index) =>
                 mask |
@@ -1884,16 +1880,20 @@ class Lowering {
             );
             const returns =
               this.r.c.host.checker.getReturnTypeOfSignature(callback);
-            const dropResult = isCellType(
+            const countedResult = isCellType(
               this.r.c,
               this.r.c.host.awaitedType(returns),
             );
-            if (mask || dropResult)
-              args[0][1] = this.call(
+            const moveResult =
+              decl.name.text === 'getOrInsertComputed' && countedResult;
+            const dropResult = decl.name.text === 'forEach' && countedResult;
+            if (mask || dropResult || moveResult)
+              callbackArgument[1] = this.call(
                 '__callbackView',
-                args[0][1],
+                callbackArgument[1],
                 num(mask),
                 raw(String(dropResult)),
+                raw(String(moveResult)),
               );
           }
         }

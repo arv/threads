@@ -421,9 +421,9 @@ function get(base: number, at: number, frozen: boolean): unknown {
   if ((hi & BOX) !== BOX) return NaN;
   switch ((hi >>> 11) & 0xff) {
     case T_UNDEF:
-      return undefined;
+      return rawRoot && at === 0 ? 0 : undefined;
     case T_NULL:
-      return null;
+      return rawRoot && at === 0 ? 0 : null;
     case T_FALSE:
       return false;
     case T_TRUE:
@@ -819,7 +819,12 @@ export function newCell(
 // A temporary receiver for built-in methods. Waiting methods retain the cell
 // themselves; escaping iterators keep a handle. Decode raw only when the
 // channel element's static type is represented as a counted address.
-export function cellView(a: number, keepAlive = false, raw = true): CellObject {
+export function cellView(
+  a: number,
+  keepAlive = false,
+  raw = true,
+): CellObject | null {
+  if (a === 0) return null;
   return Object.assign(Object.create(cellKinds.get(I32[a >> 2])!.prototype), {
     $cell: a,
     $raw: raw,
@@ -836,6 +841,7 @@ export function callbackView(
   fn: (...args: any[]) => any,
   mask: number,
   dropResult = false,
+  moveResult = false,
 ) {
   return function (this: unknown, ...args: any[]) {
     const held: number[] = [];
@@ -847,6 +853,14 @@ export function callbackView(
         args[i] = p;
       }
       const result = fn.apply(this, args);
+      if (moveResult) {
+        // Contextual callbacks already emit moved(); named compiled functions
+        // return an owned address. A native callback may return a handle.
+        if (result instanceof CountedArg) return result;
+        return typeof result === 'number'
+          ? moved(result)
+          : countedRef(unbox(result));
+      }
       if (dropResult) {
         if (result != null && typeof result.then === 'function')
           return Promise.resolve(result).then(value => release(value));
@@ -1604,7 +1618,7 @@ export class SharedArray<E extends ElementType = ElementType> {
   }
 }
 export function unbox(v: MaybeCell | number) {
-  if (v == null) return 0;
+  if (v == null || v === 0) return 0;
   const a = typeof v === 'number' ? v : (v.$cell ?? sharedAddr.get(v));
   if (a === undefined || !counted(I32[a >> 2]))
     throw new TypeError('own: not a shared struct or SharedArray');

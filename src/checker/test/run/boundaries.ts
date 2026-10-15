@@ -12,6 +12,97 @@ import {
   ref,
 } from '@arv/threads';
 
+function conditionalReceives(flag: boolean): boolean {
+  const locks = new Channel<Lock>(1),
+    numbers = new Channel<number>(1);
+  locks.send(new Lock());
+  numbers.send(12);
+  const value = (flag ? locks : numbers).recv();
+  return flag ? value instanceof Lock : value === 12;
+}
+function conditionalIteration(flag: boolean): boolean {
+  const locks = new Channel<Lock>(1),
+    numbers = new Channel<number>(1);
+  locks.send(new Lock());
+  numbers.send(12);
+  locks.close();
+  numbers.close();
+  for (const value of flag ? locks : numbers)
+    return flag ? value instanceof Lock : value === 12;
+  return false;
+}
+function fallback(maybe: Channel<number> | null): boolean {
+  const ch = new Channel<number>(2);
+  ch.send(1);
+  ch.send(2);
+  return (maybe || ch).recv() === 1 && (maybe ?? ch).recv() === 2;
+}
+function widenedCallbacks(): boolean {
+  const map = new SharedMap<string, Lock>();
+  map.set('lock', new Lock());
+  const set = new SharedSet<Lock>();
+  set.add(new Lock());
+  let fromMap = false,
+    fromSet = false;
+  map.forEach((value: unknown) => {
+    fromMap = value instanceof Lock;
+  });
+  set.forEach((value: unknown) => {
+    fromSet = value instanceof Lock;
+  });
+  return fromMap && fromSet;
+}
+function makeLock(): Lock {
+  return new Lock();
+}
+function computedCallback(): boolean {
+  const map = new SharedMap<string, Lock>();
+  const value = map.getOrInsertComputed('lock', makeLock);
+  {
+    using _ = value.hold();
+  }
+  map.clear();
+  return value instanceof Lock;
+}
+function keyLookups(): boolean {
+  const key = new Lock(),
+    map = new SharedMap<Lock, number>(),
+    set = new SharedSet<Lock>();
+  map.set(key, 3);
+  set.add(key);
+  const result = map.get(key) === 3 && map.has(key) && set.has(key);
+  return result && map.delete(key) && set.delete(key);
+}
+function computedKeyCallback(): boolean {
+  const key = new Lock(),
+    map = new SharedMap<Lock, Lock>();
+  const value = map.getOrInsertComputed(key, key => {
+    using _ = key.hold();
+    return new Lock();
+  });
+  {
+    using _ = value.hold();
+  }
+  return map.has(key);
+}
+function nullishMapEntries(): boolean {
+  const map = new SharedMap<Lock | null | undefined, Lock | null | undefined>();
+  map.set(null, null);
+  map.set(void 0, void 0);
+  const set = new SharedSet<Lock | null | undefined>();
+  set.add(null);
+  set.add(void 0);
+  return (
+    map.size === 2 &&
+    set.size === 2 &&
+    map.has(null) &&
+    map.has(undefined) &&
+    map.get(null) === null &&
+    map.get(undefined) === undefined &&
+    set.has(null) &&
+    set.has(undefined)
+  );
+}
 function channelUnion(flag: boolean): Channel<Lock> | Channel<Condition> {
   if (flag) {
     const ch = new Channel<Lock>(1);
@@ -239,6 +330,48 @@ export function allocatingStore(root: Node): void {
 }
 export async function main() {
   const results: Record<string, unknown> = {};
+  try {
+    results.nullishMapEntries = nullishMapEntries();
+  } catch (e) {
+    results.nullishMapEntries = String(e);
+  }
+  try {
+    results.keyLookups = keyLookups();
+  } catch (e) {
+    results.keyLookups = String(e);
+  }
+  try {
+    results.computedKeyCallback = computedKeyCallback();
+  } catch (e) {
+    results.computedKeyCallback = String(e);
+  }
+  try {
+    results.conditionalReceives =
+      conditionalReceives(true) && conditionalReceives(false);
+  } catch (e) {
+    results.conditionalReceives = String(e);
+  }
+  try {
+    results.conditionalIteration =
+      conditionalIteration(true) && conditionalIteration(false);
+  } catch (e) {
+    results.conditionalIteration = String(e);
+  }
+  try {
+    results.fallback = fallback(null);
+  } catch (e) {
+    results.fallback = String(e);
+  }
+  try {
+    results.widenedCallbacks = widenedCallbacks();
+  } catch (e) {
+    results.widenedCallbacks = String(e);
+  }
+  try {
+    results.computedCallback = computedCallback();
+  } catch (e) {
+    results.computedCallback = String(e);
+  }
   try {
     results.unionReceivers = unionReceivers(true) && unionReceivers(false);
   } catch (e) {

@@ -20,6 +20,43 @@ const condition = (p: number) =>
 const field = (p: number) => (p >> 2) + 2;
 
 describe('counted built-in cells', () => {
+  it('normalizes native nullish messages only for raw counted receivers', () => {
+    const p = own.newCell(T.Channel, 1);
+    for (const value of [null, undefined]) {
+      channel(p).send(value);
+      expect(channel(p).recv()).toBe(0);
+      channel(p).send(value);
+      const boxed = own.cellView(p, false, false) as InstanceType<
+        typeof T.Channel
+      >;
+      expect(boxed.recv()).toBe(value);
+    }
+    own.release(p);
+    expect(own.unbox(0)).toBe(0);
+  });
+
+  it('preserves nullish receiver fallback semantics', () => {
+    expect(own.cellView(0)).toBeNull();
+    expect(own.cellView(0, true, true)).toBeNull();
+  });
+
+  it('moves named callback results into map ownership without leaking their counts', () => {
+    const p = own.newCell(T.Lock);
+    const callback = own.callbackView(() => p, 0, false, true);
+    const map = new T.SharedMap<string, unknown>();
+    map.set('lock', callback());
+    expect(count(p)).toBe(1); // entry owns the function's initial count
+    map.clear();
+    own.__collect();
+    expect(runtime.I32[p >> 2]).toBe(runtime.K_FREE);
+    const q = own.newCell(T.Lock),
+      alreadyMoved = own.moved(q);
+    expect(own.callbackView(() => alreadyMoved, 0, false, true)()).toBe(
+      alreadyMoved,
+    );
+    own.release(q);
+  });
+
   it('defaults native receivers, iterators and selects to boxed counted messages', async () => {
     const readers: ((ch: InstanceType<typeof T.Channel>) => unknown)[] = [
       ch => ch.recv(),

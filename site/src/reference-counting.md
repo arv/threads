@@ -203,7 +203,7 @@ things:
 - **An unstable borrow.** These are a reference field read `e.f`, `A[i]` where A
   is an unstable borrow, and the result of any other call. A generic or declared
   function adds no count. An unstable borrow is valid only until the thread's
-  next quiescent point, so it's never held across a call.
+  next quiescent point, so it's never held across a call or allocation.
 
 ### Rules
 
@@ -230,11 +230,11 @@ things:
 
 4. **Arguments.** Parameters borrow. An unstable borrow passed to a function is
    retained around the call, because the callee may reach a quiescent point.
-   Helpers and intrinsics don't need this.
+   Allocating helpers can collect on a full heap, so they need this too.
 
 5. **Field stores.** `e.f = E` becomes `__store((e >> 2) + 2 + 2k, E')`, where
    E' is E if E is owned, and `__retain(E)` otherwise. If `e` is an unstable
-   borrow and E contains a call, `e` is retained first.
+   borrow and E contains a call or allocation, `e` is retained first.
 
 6. **Field reads.** `e.f` becomes `__I32[(e >> 2) + 2 + 2k]`.
 
@@ -252,6 +252,10 @@ things:
    - A callback whose type in the runtime has a `Sending` result
      (getOrInsertComputed's) returns a counted value as `__moved(E)`, with its
      count.
+   - Map and set entries tag cells and shared blobs separately from ordinary
+     numbers. Native reads and callbacks receive handles; the compiler unboxes
+     counted results and adapts callback parameters. Named computed callbacks
+     transfer their owned results through the same protocol as inline callbacks.
    - A map or set holds a count on each counted key and value. It defers the
      decrement of one it drops, and releases the rest when it's freed.
    - A `for...of` over a channel owns each value and releases it at the end of
@@ -358,8 +362,11 @@ When a recyclable allocation would exhaust the heap, the allocator attempts a
 cycle collection with a 50 ms timeout, then retries once. This runs only outside
 internal runtime locks: collecting under a string-table or map lock could
 re-enter that lock while releasing garbage. A locked allocation still throws
-when it cannot fit. Call `collectCycles()` explicitly where a program drops
-structures that may hold cycles to reclaim them before the heap fills.
+when it cannot fit. Compiled code retains borrowed field receivers across
+allocations, including struct and SharedArray construction; runtime helper
+callers must also hold counts across potentially collecting allocations. Call
+`collectCycles()` explicitly where a program drops structures that may hold
+cycles to reclaim them before the heap fills.
 
 ## Limits
 
