@@ -1877,7 +1877,9 @@ class Lowering {
     const queues: Node[] = [];
     if (node.initializer?.kind === K.VariableDeclarationList)
       for (const decl of node.initializer.declarations as Node[])
-        if (this.prepareQueue(decl)) queues.push(decl);
+        // Hoisted vars already have their queue in the function body.
+        if (!this.hoistedVars.has(decl) && this.prepareQueue(decl))
+          queues.push(decl);
     const owned = this.ownedLocalsOfFor(node);
     const owners = owned.map(name => {
       const temp = this.newTemp();
@@ -2323,10 +2325,17 @@ class Lowering {
   }
 
   private replaceLocal(x: Node, value: Ir, keepValue: boolean): Ir {
+    // The right side can assign x too. Acquire its result before reading
+    // the current count to replace, so an inner assignment cannot release
+    // the same saved address twice.
+    const staged = this.newTemp();
     const old = this.newTemp();
     const owner = this.loopOwner(x);
-    const next = owner ? this.assign(tempRef(owner), value) : value;
+    const next = owner
+      ? this.assign(tempRef(owner), tempRef(staged))
+      : tempRef(staged);
     const list = [
+      this.assign(tempRef(staged), value),
       this.assign(tempRef(old), this.name(x)),
       this.assign(this.name(x), next),
       this.call('__release', tempRef(old)),

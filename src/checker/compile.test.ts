@@ -181,15 +181,15 @@ describe('compile, where the fork does not', () => {
 
   it('reads an array before the index that assigns it, and holds it', () => {
     expect(fixes).toContain(
-      '_a = __retain(a), _c = (_b = a, a = __retain(b), __release(_b), 0), _c >>> 0 === _c && _c < __I32[_a + 4 >> 2] ? __F64[(_a + 16 >> 3) + _c] : __outOfBounds[_c]), __release(_a)',
+      '_a = __retain(a), _d = (_b = __retain(b), _c = a, a = _b, __release(_c), 0), _d >>> 0 === _d && _d < __I32[_a + 4 >> 2] ? __F64[(_a + 16 >> 3) + _d] : __outOfBounds[_d]), __release(_a)',
     );
   });
 
   it("runs a class's heritage as a full expression, which releases what it holds", () => {
     expect(fixes).toContain(
-      'export class Derived extends (_d = (element = (_a = __retain(first),',
+      'export class Derived extends (_e = (element = (_a = __retain(first),',
     );
-    expect(fixes).toContain('Base), __release(_a), _a = 0, _d) {}');
+    expect(fixes).toContain('Base), __release(_a), _a = 0, _e) {}');
   });
 
   it('keeps a parameter whose default moves optional, after an optional one', () => {
@@ -590,6 +590,56 @@ describe('counting lowering review regressions', () => {
         log(after.allocated - before.allocated - (after.freed - before.freed));
       }`,
       expected: '0',
+    },
+    {
+      name: 'stages var initializers that also assign the same binding',
+      source: `function f(): number {
+        var p = new P(); p.x = 79;
+        const alias = p;
+        var p = (p = new P()); p.x = 83;
+        const q = new P(); q.x = 99;
+        return alias.x;
+      }
+      export function main() {
+        const before = heapStats();
+        const result = f();
+        const after = heapStats();
+        log(JSON.stringify([result,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[79,0]',
+    },
+    {
+      name: 'stages nested assignments before replacing the binding',
+      source: `function f(): number {
+        let p = new P(); p.x = 79;
+        const alias = p;
+        p = (p = new P()); p.x = 83;
+        const q = new P(); q.x = 99;
+        return alias.x;
+      }
+      export function main() {
+        const before = heapStats();
+        const result = f();
+        const after = heapStats();
+        log(JSON.stringify([result,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[79,0]',
+    },
+    {
+      name: 'flushes the function capture queue for a hoisted var loop head',
+      source: `function f(): () => number {
+        const get = () => p.x;
+        for (var p = new P();;) { p.x = 73; break; }
+        return get;
+      }
+      export function main() {
+        const get = f();
+        const q = new P(); q.x = 99;
+        log(get() + q.x - 99);
+      }`,
+      expected: '73',
     },
   ];
   it.each(cases)(
