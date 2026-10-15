@@ -109,4 +109,17 @@ describe('programs on threads', () => {
     expect(out).toMatch(/bad reads 0/);
     expect(out).toMatch(/pending 0/);
   });
+
+  it('collecting cycles under a race frees no block that is reachable, and leaves none behind', () => {
+    // --check poisons freed blocks: a read of one is a bad read
+    const lines = run('cycles-hand', '--threads=1,4', '--check')
+      .trim()
+      .split('\n');
+    expect(lines).toEqual([
+      'race, 1 readers, 1 collectors: bad reads 0, blocks freed by collections some, by the last some, blocks left 0',
+      'held, 1 threads: bad reads 0, blocks left 0',
+      'race, 3 readers, 2 collectors: bad reads 0, blocks freed by collections some, by the last some, blocks left 0',
+      'held, 4 threads: bad reads 0, blocks left 0',
+    ]);
+  }, 60_000);
 });
