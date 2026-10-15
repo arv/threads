@@ -401,3 +401,48 @@ export function nonNullBindingSource() {
   let xs = [1];
   try { consume(xs); const { [(xs = [2], "a")]: held } = pair; use(held); } finally { use(xs); }  // fine
 }
+// a nested pattern's source is its parent's part, with its default
+declare const src: { a?: any };
+declare const solid: { a: { b: string } };
+export function nestedBindingSource() {
+  let xs = [1];
+  try { const { a: { [(xs = [2], "b")]: y } = (consume(xs), null) } = src; use(y); } finally { use(xs); }  // error: the default may be null
+}
+export function nestedBindingNonNull() {
+  let xs = [1];
+  try { const { a: { [(xs = [2], "b")]: y } = (consume(xs), { b: "" }) } = solid; use(y); } finally { use(xs); }  // fine
+}
+export function nestedAssignmentSource() {
+  let xs = [1];
+  let y: unknown;
+  try { ({ a: { [(xs = [2], "b")]: y } = (consume(xs), null as any) } = src); } finally { use(xs, y); }  // error
+}
+// a class's static members run as it is defined, with the class as `this`
+export function staticNotCaptured(ch: Channel<number[]>) {
+  const xs = [1];
+  const C = class { static done = ch.send(xs); };
+  return new C();                                             // fine: done holds nothing of xs
+}
+export function staticThis(ch: Channel<number[]>) {
+  const xs = [1];
+  class C { static value: number[]; static { this.value = xs; } }
+  ch.send(xs);                                                // fine: the class, not the caller, holds xs
+  return C;                                                   // error: C holds xs, which was sent
+}
+// `==` and `!=` with null convert nothing
+declare const someObj: object;
+export function looseNullish() {
+  let xs = [1];
+  try { consume(xs); void (someObj == null); void (someObj != undefined); xs = [2]; } finally { use(xs); }  // fine
+}
+// an element's key is converted before the value is made
+declare const target: Record<string, number>;
+export function keyBeforeValue() {
+  let xs = [1];
+  try { consume(xs); target[anyKey] = (xs = [2], 0); } finally { use(xs); }  // error: the key's conversion may throw
+}
+// what a branch that cannot reach the write consumed does not count
+export function unreachableConsume(flag: boolean) {
+  let xs = [8];
+  xs[0] = flag ? (use(class { static { consume(xs); throw 0; } }), 0) : 1;  // fine
+}

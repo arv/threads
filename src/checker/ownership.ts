@@ -20,7 +20,7 @@
 
 import type {SourceFile} from 'typescript/ast';
 import type {Own} from './context.ts';
-import {SymbolFlags, TypeFlags} from './host.ts';
+import {IndexKind, SymbolFlags, TypeFlags} from './host.ts';
 import type {NodeHandle, Signature, TsSymbol, Type} from './host.ts';
 import {getSharedArrayElementType, isCellType, spreadShape} from './layout.ts';
 import {getTypeMarker, isCellBranded, isConsumeCall} from './markers.ts';
@@ -99,11 +99,27 @@ const noInfo: RegionInfo = {flags: 0, sent: undefined, maybe: false};
 
 // The abstract state at a program point. Region infos are immutable, so copies
 // share them.
+// What a destructuring pattern takes apart: the type of its value, where it
+// is known, and whether that may be null or undefined.
+interface Part {
+  readonly type?: Type;
+  readonly nullable: boolean;
+}
+
+// A consume() of a local variable: which, holding what.
+interface ConsumeEvent {
+  readonly id: number;
+  readonly region: Region;
+  readonly send: Send;
+}
+
 class State {
   unreachable = false;
   vars = new Map<TsSymbol, Value>();
   parent = new Map<Region, Region>(); // union-find links (absent for roots)
   info = new Map<Region, RegionInfo>(); // by root
+  // the consume()s on the paths here, in order (see checkStillThere)
+  consumes: readonly ConsumeEvent[] = [];
 
   static unreachable(): State {
     const s = new State();
@@ -117,6 +133,7 @@ class State {
     r.vars = new Map(this.vars);
     r.parent = new Map(this.parent);
     r.info = new Map(this.info);
+    r.consumes = this.consumes;
     return r;
   }
 
@@ -125,6 +142,7 @@ class State {
     this.vars = other.vars;
     this.parent = other.parent;
     this.info = other.info;
+    this.consumes = other.consumes;
   }
 
   find(r: Region): Region {
@@ -305,6 +323,8 @@ class State {
         (o, i) => o.region === y![i]!.region && o.maybe === y![i]!.maybe,
       );
     return (
+      this.consumes.length === o.consumes.length &&
+      this.consumes.every((e, i) => e === o.consumes[i]) &&
       sameMap(this.parent, o.parent, (x, y) => x === y) &&
       sameMap(
         this.info,
@@ -392,6 +412,10 @@ function joinStates(a: State, b: State): State {
   for (const [symbol, vb] of b.vars) {
     if (!a.vars.has(symbol)) r.vars.set(symbol, vb);
   }
+  r.consumes = [
+    ...a.consumes,
+    ...b.consumes.filter(e => !a.consumes.includes(e)),
+  ];
   return r;
 }
 
@@ -516,6 +540,16 @@ const arrayMutators = new Set([
   'fill',
   'copyWithin',
 ]);
+
+// The key a pattern's element is read by, a name or a literal, or undefined
+// for a computed one.
+function keyOf(name: Node): string | undefined {
+  return name.kind === K.Identifier ||
+    name.kind === K.StringLiteral ||
+    name.kind === K.NumericLiteral
+    ? name.text
+    : undefined;
+}
 
 // Reports whether a statement is a `using` or `await using` declaration.
 function isUsingDeclaration(node: Node): boolean {
@@ -1258,6 +1292,25 @@ class Analyzer {
         visit(child, childInArrow);
       });
     };
+    if (fn.kind === K.ClassDeclaration || fn.kind === K.ClassExpression) {
+      // what runs as the class is defined (its heritage, decorators, computed
+      // keys, static fields and blocks) is evaluated there, not captured:
+      // only its methods, accessors, constructor and instance fields are
+      for (const m of fn.members as Node[]) {
+        const isStatic = ((m.modifiers ?? []) as Node[]).some(
+          x => x.kind === K.StaticKeyword,
+        );
+        if (m.kind === K.ClassStaticBlockDeclaration) continue;
+        if (m.kind === K.PropertyDeclaration && isStatic) continue;
+        for (const p of (m.parameters ?? []) as Node[])
+          forEachChild(p, child => {
+            if (child.kind !== K.Decorator) visit(child, false);
+          });
+        if (m.body) visit(m.body, false);
+        if (m.initializer) visit(m.initializer, false);
+      }
+      return captures;
+    }
     forEachChild(fn, child => {
       visit(child, fn.kind === K.ArrowFunction);
     });
@@ -1316,9 +1369,6 @@ class FunctionAnalysis {
   // the regions of what the for-of loops being analyzed iterate, which they
   // hold outside any binding
   readonly iterating: Region[] = [];
-  // the consume()s of local variables, in the order they are analyzed: which
-  // variable, holding what (see checkStillThere)
-  readonly consumes: {id: number; region: Region; send: Send}[] = [];
   readonly building = new Set<Node>(); // closures whose value is being computed
 
   constructor(a: Analyzer, node: Node, result: FunctionResult) {
@@ -1384,11 +1434,16 @@ class FunctionAnalysis {
         }
         break;
       }
-      case K.ClassDeclaration:
+      case K.ClassDeclaration: {
         // analyzed on its own, but defined here: its heritage, computed keys,
-        // decorators and static members are evaluated as it is
-        this.evalClassDefinition(node, s);
+        // decorators and static members are evaluated as it is; its name
+        // holds the class from here, with what its static fields hold
+        const cls = this.closureValue(node, s);
+        this.evalClassDefinition(node, s, cls);
+        const symbol = this.a.c.host.symbolOfDeclaration(node);
+        if (symbol) s.vars.set(symbol, cls);
         break;
+      }
       case K.EnumDeclaration:
         // its members' values are evaluated, in order, as it is defined
         for (const member of node.members as Node[])
@@ -1472,7 +1527,7 @@ class FunctionAnalysis {
         decl,
         v,
         s,
-        decl.initializer && this.a.typeOf(decl.initializer),
+        decl.initializer && this.wholePart(this.a.typeOf(decl.initializer)),
       );
     }
   }
@@ -1486,7 +1541,7 @@ class FunctionAnalysis {
     decl: Node,
     v: Value,
     s: State,
-    source?: Type,
+    part?: Part,
   ): void {
     if (!name) return;
     if (name.kind === K.Identifier) {
@@ -1500,21 +1555,31 @@ class FunctionAnalysis {
       const elements = name.elements as Node[];
       if (
         elements.length === 0 ||
-        (name.kind === K.ObjectBindingPattern &&
-          source &&
-          this.mayBeNullish(source))
+        (name.kind === K.ObjectBindingPattern && part?.nullable)
       )
         this.mayThrow(s);
-      for (const element of elements) {
+      elements.forEach((element, index) => {
         if (element.propertyName?.kind === K.ComputedPropertyName)
           this.eval(element.propertyName.expression, s);
         this.mayThrow(s);
-        if (element.kind !== K.BindingElement) continue;
+        if (element.kind !== K.BindingElement) return;
         let ev = v;
         if (element.initializer)
           ev = s.mergeValues(ev, this.eval(element.initializer, s));
-        this.bindName(element.name, element, ev, s);
-      }
+        const key =
+          name.kind === K.ArrayBindingPattern
+            ? index
+            : keyOf((element.propertyName ?? element.name) as Node);
+        this.bindName(
+          element.name,
+          element,
+          ev,
+          s,
+          element.dotDotDotToken
+            ? {nullable: false}
+            : this.partOf(part, key, element.initializer),
+        );
+      });
       if (name.kind === K.ArrayBindingPattern) this.mayThrow(s);
     }
   }
@@ -1994,7 +2059,7 @@ class FunctionAnalysis {
         return this.closureValue(node, s);
       case K.ClassExpression: {
         const v = this.closureValue(node, s);
-        this.evalClassDefinition(node, s);
+        this.evalClassDefinition(node, s, v);
         return v;
       }
       case K.CallExpression: {
@@ -2044,7 +2109,7 @@ class FunctionAnalysis {
   // included) once the members are defined, a field's initializer as the field
   // is, and the class's after them, before its static fields or after them
   // as the proposal or TypeScript's older decorators have it.
-  evalClassDefinition(node: Node, s: State): void {
+  evalClassDefinition(node: Node, s: State, cls: Value): void {
     const decorators = (n: Node) =>
       ((n.modifiers ?? []) as Node[]).filter(m => m.kind === K.Decorator);
     const memberDecorators = (m: Node) => [
@@ -2070,12 +2135,27 @@ class FunctionAnalysis {
     if (classDecorated) this.mayThrow(s);
     const isStatic = (m: Node) =>
       ((m.modifiers ?? []) as Node[]).some(x => x.kind === K.StaticKeyword);
-    for (const m of members) {
-      if (m.kind === K.ClassStaticBlockDeclaration) this.statement(m.body, s);
-      else if (m.kind === K.PropertyDeclaration && isStatic(m)) {
-        if (decorators(m).length > 0) this.mayThrow(s); // its initializers
-        if (m.initializer) this.eval(m.initializer, s);
+    // its static members run with the class as `this` , and what its static
+    // fields are given the class holds
+    const thisRegion = this.thisRegion,
+      thisFlags = this.thisFlags;
+    this.thisRegion =
+      cls.kind === ValueKind.InRegion ? cls.region : this.a.newRegion();
+    this.thisFlags = 0;
+    try {
+      for (const m of members) {
+        if (m.kind === K.ClassStaticBlockDeclaration) this.statement(m.body, s);
+        else if (m.kind === K.PropertyDeclaration && isStatic(m)) {
+          if (decorators(m).length > 0) this.mayThrow(s); // its initializers
+          if (m.initializer) {
+            const v = this.eval(m.initializer, s);
+            if (cls.kind === ValueKind.InRegion) s.mergeValues(cls, v);
+          }
+        }
       }
+    } finally {
+      this.thisRegion = thisRegion;
+      this.thisFlags = thisFlags;
     }
     if (classDecorated) this.mayThrow(s);
   }
@@ -2189,11 +2269,10 @@ class FunctionAnalysis {
           consume: true,
         };
         if (v.kind === ValueKind.InRegion)
-          this.consumes.push({
-            id: this.a.idOf(symbol),
-            region: v.region,
-            send,
-          });
+          s.consumes = [
+            ...s.consumes,
+            {id: this.a.idOf(symbol), region: v.region, send},
+          ];
         s.vars.set(symbol, {
           kind: ValueKind.Consumed,
           region: 0,
@@ -2220,14 +2299,14 @@ class FunctionAnalysis {
     const member = isAssignmentOperator(op) && isMemberAccess(place);
     if (op === K.EqualsToken) {
       if (member) {
-        const since = this.consumes.length;
+        const since = s.consumes;
         const obj = this.evalPlace(place, s);
         const v = this.eval(node.right, s);
         this.writeMember(place, obj, v, s, since);
         return v;
       }
       const v = this.eval(node.right, s);
-      this.assign(node.left, v, s, this.a.typeOf(node.right));
+      this.assign(node.left, v, s, this.wholePart(this.a.typeOf(node.right)));
       return v;
     }
     if (
@@ -2236,7 +2315,7 @@ class FunctionAnalysis {
       op === K.QuestionQuestionEqualsToken
     ) {
       if (member) {
-        const since = this.consumes.length;
+        const since = s.consumes;
         const obj = this.evalPlace(place, s);
         this.mayThrow(s); // its read, a getter's
         const old = this.readMember(place, place.expression, obj, s);
@@ -2258,7 +2337,7 @@ class FunctionAnalysis {
       // (a getter's) may throw before the right side is made, its conversion
       // and its write (a setter's) after
       if (member) {
-        const since = this.consumes.length;
+        const since = s.consumes;
         const obj = this.evalPlace(place, s);
         this.checkWrite(place, place.expression, obj);
         this.mayThrow(s);
@@ -2293,9 +2372,18 @@ class FunctionAnalysis {
     // an operator that converts its operands (arithmetic, a comparison) may
     // throw, but for plain primitives; `in` and `instanceof` may; `===` and
     // `!==` do not
+    const nullishOnly = (t: Type) =>
+      !!(t.flags & (TypeFlags.Null | TypeFlags.Undefined | TypeFlags.Void)) &&
+      !(t.flags & TypeFlags.Union);
     if (
       op !== K.EqualsEqualsEqualsToken &&
       op !== K.ExclamationEqualsEqualsToken &&
+      // `==` and `!=` with null or undefined convert nothing
+      !(
+        (op === K.EqualsEqualsToken || op === K.ExclamationEqualsToken) &&
+        (nullishOnly(this.a.typeOf(node.left)) ||
+          nullishOnly(this.a.typeOf(node.right)))
+      ) &&
       (op === K.InKeyword ||
         op === K.InstanceOfKeyword ||
         !this.convertsSafely(node.left) ||
@@ -2356,7 +2444,7 @@ class FunctionAnalysis {
   // whose property is written.
   // source: the type of what is assigned, where it is known (an object
   // pattern rejects null and undefined before its first target)
-  assign(target: Node, v: Value, s: State, source?: Type): void {
+  assign(target: Node, v: Value, s: State, part?: Part): void {
     target = skipOuterExpressions(target, OEK.Assertions | OEK.Parentheses);
     const a = this.a;
     switch (target.kind) {
@@ -2372,7 +2460,7 @@ class FunctionAnalysis {
       }
       case K.PropertyAccessExpression:
       case K.ElementAccessExpression: {
-        const since = this.consumes.length;
+        const since = s.consumes;
         this.writeMember(target, this.evalPlace(target, s), v, s, since);
         return;
       }
@@ -2381,27 +2469,33 @@ class FunctionAnalysis {
         // each step may, after the defaults and the assignments before it;
         // then the iterator is closed
         this.mayThrow(s);
-        for (const element of target.elements as Node[]) {
+        (target.elements as Node[]).forEach((element, index) => {
           if (element.kind === K.OmittedExpression) this.mayThrow(s);
           else if (element.kind === K.SpreadElement)
-            this.assignRead(element.expression, undefined, v, s);
+            this.assignRead(element.expression, undefined, v, s, {
+              nullable: false,
+            });
           else if (
             element.kind === K.BinaryExpression &&
             element.operatorToken.kind === K.EqualsToken
           )
-            this.assignRead(element.left, element.right, v, s);
-          else this.assignRead(element, undefined, v, s);
-        }
+            this.assignRead(
+              element.left,
+              element.right,
+              v,
+              s,
+              this.partOf(part, index, element.right),
+            );
+          else
+            this.assignRead(element, undefined, v, s, this.partOf(part, index));
+        });
         this.mayThrow(s);
         return;
       case K.ObjectLiteralExpression:
         // a source that may be null or undefined throws before any target is
         // evaluated; each property read (a getter's) may, after the defaults
         // and the assignments before it
-        if (
-          (target.properties as Node[]).length === 0 ||
-          (source && this.mayBeNullish(source))
-        )
+        if ((target.properties as Node[]).length === 0 || part?.nullable)
           this.mayThrow(s);
         for (const property of target.properties as Node[]) {
           if (property.name?.kind === K.ComputedPropertyName) {
@@ -2413,12 +2507,20 @@ class FunctionAnalysis {
           switch (property.kind) {
             case K.PropertyAssignment: {
               const init = property.initializer as Node;
+              const key = keyOf(property.name as Node);
               if (
                 init.kind === K.BinaryExpression &&
                 init.operatorToken.kind === K.EqualsToken
               )
-                this.assignRead(init.left, init.right, v, s);
-              else this.assignRead(init, undefined, v, s);
+                this.assignRead(
+                  init.left,
+                  init.right,
+                  v,
+                  s,
+                  this.partOf(part, key, init.right),
+                );
+              else
+                this.assignRead(init, undefined, v, s, this.partOf(part, key));
               break;
             }
             case K.ShorthandPropertyAssignment:
@@ -2430,7 +2532,9 @@ class FunctionAnalysis {
               );
               break;
             case K.SpreadAssignment:
-              this.assignRead(property.expression, undefined, v, s);
+              this.assignRead(property.expression, undefined, v, s, {
+                nullable: false,
+              });
               break;
           }
         }
@@ -2448,25 +2552,68 @@ class FunctionAnalysis {
     initializer: Node | undefined,
     v: Value,
     s: State,
+    part?: Part,
   ): void {
     const place = skipOuterExpressions(
       target,
       OEK.Assertions | OEK.Parentheses,
     );
-    const since = this.consumes.length;
+    const since = s.consumes;
     const obj = isMemberAccess(place) ? this.evalPlace(place, s) : undefined;
     this.mayThrow(s);
     const read = initializer ? s.mergeValues(v, this.eval(initializer, s)) : v;
     if (obj) this.writeMember(place, obj, read, s, since);
-    else this.assign(target, read, s);
+    else this.assign(target, read, s, part);
+  }
+
+  // A pattern's whole value, of type t.
+  wholePart(t: Type): Part {
+    return {type: t, nullable: this.mayBeNullish(t)};
+  }
+
+  // What a pattern's element takes apart: the part at a key (a property's
+  // name, an element's index) of its pattern's part, with its default. Where
+  // the pattern's type is not known, neither is the part's, which is then
+  // taken not to be null (as a for-of variable's pattern is); where only the
+  // part's is not known (a computed key), it may be.
+  partOf(
+    part: Part | undefined,
+    key: string | number | undefined,
+    initializer?: Node,
+  ): Part {
+    if (!part?.type) return {nullable: false};
+    const host = this.a.c.host;
+    let type: Type | undefined;
+    if (typeof key === 'number')
+      type = host.checker.isTupleType(part.type)
+        ? host.typeArguments(part.type)[key]
+        : (host.checker.getIndexTypeOfType(part.type, IndexKind.Number) ??
+          undefined);
+    else if (key !== undefined) {
+      const property = host.checker.getPropertyOfType(part.type as any, key);
+      type = property && host.typeOfSymbol(property as any);
+    }
+    const nullable =
+      !type ||
+      this.mayBeNullish(type) ||
+      (!!initializer && this.mayBeNullish(this.a.typeOf(initializer)));
+    return {type, nullable};
   }
 
   // Evaluates the object of a property or element, and its key: what it is
   // read from or written to.
   evalPlace(place: Node, s: State): Value {
     const obj = this.eval(place.expression, s);
-    if (place.kind === K.ElementAccessExpression)
+    if (place.kind === K.ElementAccessExpression) {
       this.eval(place.argumentExpression, s);
+      // the key is converted then, which an object's may throw in
+      const key = this.a.typeOf(place.argumentExpression);
+      if (
+        !this.a.isPlainPrimitive(key) &&
+        !(key.flags & TypeFlags.ESSymbolLike)
+      )
+        this.mayThrow(s);
+    }
     return obj;
   }
 
@@ -2478,7 +2625,7 @@ class FunctionAnalysis {
     obj: Value,
     v: Value,
     s: State,
-    since: number,
+    since: readonly ConsumeEvent[],
   ): void {
     this.checkStillThere(place.expression, obj, s, since);
     this.checkWrite(place, place.expression, obj);
@@ -2491,7 +2638,12 @@ class FunctionAnalysis {
   // (obj, its value then) sent it, or consumed the variable it was read from
   // while that still held it, on some paths or all (a consume() ends the
   // binding, and leaves the region as it was).
-  checkStillThere(expr: Node, obj: Value, s: State, since: number): void {
+  checkStillThere(
+    expr: Node,
+    obj: Value,
+    s: State,
+    since: readonly ConsumeEvent[],
+  ): void {
     let root = skipOuterExpressions(expr, OEK.Assertions | OEK.Parentheses);
     while (
       root.kind === K.PropertyAccessExpression ||
@@ -2525,9 +2677,12 @@ class FunctionAnalysis {
     const id = symbol && this.a.idOf(symbol);
     const consumed =
       obj.kind === ValueKind.InRegion
-        ? this.consumes
-            .slice(since)
-            .find(e => e.id === id && s.find(e.region) === s.find(obj.region))
+        ? s.consumes.find(
+            e =>
+              !since.includes(e) &&
+              e.id === id &&
+              s.find(e.region) === s.find(obj.region),
+          )
         : undefined;
     if (consumed)
       this.a.reportUseAfterSend(root, root.text, consumed.send, true);

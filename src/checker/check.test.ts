@@ -305,6 +305,10 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(389,64): error TS96005: 'xs' was consumed by 'consume' on line 389.",
         "try-exits.ts(393,93): error TS96005: 'xs' was consumed by 'consume' on line 393.",
         "try-exits.ts(398,93): error TS96006: 'xs' may have been consumed by 'consume' on line 398.",
+        "try-exits.ts(409,100): error TS96006: 'xs' may have been consumed by 'consume' on line 409.",
+        "try-exits.ts(418,95): error TS96006: 'xs' may have been consumed by 'consume' on line 418.",
+        "try-exits.ts(430,10): error TS96003: 'C' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 429.",
+        "try-exits.ts(442,70): error TS96006: 'xs' may have been consumed by 'consume' on line 442.",
       ].sort(),
     );
   });
