@@ -45,6 +45,7 @@
   },
   "scripts": {
     "build-dist": "node build-dist.ts",
+    "build-programs": "node src/checker/cli.ts compile -p tsconfig.programs.json --runtime @arv/threads",
     "prepack": "pnpm run build-dist",
     "test-pack": "node src/pack.ts",
     "typecheck": "tsc -p tsconfig.json"
