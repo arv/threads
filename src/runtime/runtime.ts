@@ -430,20 +430,29 @@ export function $quiescent() {
 // nothing but the reclaim when the queue is empty. a thread that waits is
 // asleep too: it changes no count until it wakes, so a collection of cycles
 // need not wait for it (see wake)
-export function $waitBegin() {
+export function $waitBegin(sleep = true) {
   if (ME === 0) return;
   reclaim();
   if (pend.length === 0) {
     Atomics.store(I32, ME + T_QS, IDLE);
-    asleep();
+    if (sleep) asleep();
     return;
   }
   handOffPending();
   // idle first: the page, nudged below, is to see a thread that holds nothing
   Atomics.store(I32, ME + T_QS, IDLE);
   nudgePageForShared();
-  asleep();
+  if (sleep) asleep();
 }
+// a page that stopped its pool (browser.ts stop): quiescent until start()
+// again, as in a wait, but awake. it waits for nothing, and goes on running
+// tasks that may change counts (a handle's finalizer, a map it holds, a late
+// nudge), so a collection must not take it for asleep: one that a worker of
+// the stopped pool, running on, began waits for it, gives up, and frees
+// nothing. it does not wake through wake(), which would wait for that
+// collection: the page cannot block, and one whose worker was terminated in
+// it would never end (start()'s reset clears it)
+export const $stopped = () => $waitBegin(false);
 // awake first, which waits for a collection under way to end: a thread in a
 // wait wakes when it likes, and must not change a count while one runs
 export const $waitEnd = () => {
@@ -626,7 +635,7 @@ export function $nudged() {
 }
 function pagePoint() {
   if (Atomics.load(I32, ME + T_QS) === IDLE) {
-    $waitBegin();
+    $stopped();
     return;
   }
   $quiescent();

@@ -292,9 +292,11 @@ from outside the heap. A collection goes like this:
    It takes part from the moment it attaches, before it loads the program's
    modules, which may make blocks as they load. Hosts get their bells rung and
    the page gets a nudge, so that each passes a quiescent point. The page can't
-   block, so it spins until the collection ends. Threads that waited for one
-   collection to end wake before the next one starts, so a thread that collects
-   again and again doesn't keep the others stopped.
+   block, so it spins until the collection ends. A page that stopped its pool
+   stays awake: it still runs tasks that change counts, so a collection that a
+   worker of the stopped pool began waits for it and gives up. Threads that
+   waited for one collection to end wake before the next one starts, so a thread
+   that collects again and again doesn't keep the others stopped.
 2. **Apply what waits.** Every other thread is quiescent, so every deferred
    decrement is safe, and the collector applies them all. One it can't apply (a
    queue that a full heap left on its thread) only keeps more blocks alive.
