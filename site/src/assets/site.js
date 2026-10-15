@@ -73,16 +73,29 @@ const indexLink = document.querySelector('link[rel="search-index"]');
 const siteRoot = new URL('./', indexLink.href);
 let index = null;
 let loading = null;
+// whether the last load of the index failed
+let failed = false;
 let results = [];
 let selected = 0;
 
 setUpDialog(searchDialog);
 
+// The index loads once, the first time someone searches. A load that fails
+// is forgotten, so the next search tries again
 function loadIndex() {
   loading ??= fetch(indexLink.href)
-    .then(response => response.json())
-    .catch(() => [])
-    .then(entries => (index = entries));
+    .then(response => {
+      if (!response.ok) throw new Error(`${response.status}`);
+      return response.json();
+    })
+    .then(entries => {
+      index = entries;
+      failed = false;
+    })
+    .catch(() => {
+      loading = null;
+      failed = true;
+    });
   return loading;
 }
 
@@ -139,6 +152,9 @@ function render(entries, tokens = []) {
         '</a></li>',
     )
     .join('');
+  emptyMessage.textContent = failed
+    ? "Search couldn't load. Try again."
+    : 'No results found.';
   emptyMessage.hidden = entries.length > 0 || !searchInput.value.trim();
   searchInput.setAttribute('aria-expanded', String(entries.length > 0));
   if (entries.length)
