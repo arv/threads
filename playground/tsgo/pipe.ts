@@ -6,10 +6,13 @@
 // it, write(n) sends what it holds.
 
 // the header's Int32s: the bytes written and read so far (each wraps at 2^32),
-// and whether the writer is done
+// whether the writer is done, and how many times the writer has written or
+// closed, which a reader waits on: a close moves no count of bytes, and a
+// reader that waited on WRITTEN could miss one that came as it went to wait
 const WRITTEN = 0,
   READ = 1,
   CLOSED = 2,
+  WOKEN = 3,
   HEADER = 16;
 
 export class Pipe {
@@ -22,7 +25,7 @@ export class Pipe {
   // a pipe of `capacity` bytes (a power of two), or the other end of one
   constructor(of: number | SharedArrayBuffer, chunk = 1 << 16) {
     this.sab = typeof of === 'number' ? new SharedArrayBuffer(HEADER + of) : of;
-    this.header = new Int32Array(this.sab, 0, 3);
+    this.header = new Int32Array(this.sab, 0, 4);
     this.ring = new Uint8Array(this.sab, HEADER);
     if ((this.ring.length & (this.ring.length - 1)) !== 0)
       throw new Error('a pipe holds a power of two of bytes');
@@ -42,10 +45,17 @@ export class Pipe {
     const read = Atomics.load(h, READ);
     let written: number;
     for (;;) {
+      // read first: whatever the writer does after this wakes the wait below
+      const woken = Atomics.load(h, WOKEN);
       written = Atomics.load(h, WRITTEN);
       if (written !== read) break;
-      if (Atomics.load(h, CLOSED)) return 0;
-      Atomics.wait(h, WRITTEN, written);
+      if (Atomics.load(h, CLOSED)) {
+        // what was written before the close, after the look above
+        written = Atomics.load(h, WRITTEN);
+        if (written !== read) break;
+        return 0;
+      }
+      Atomics.wait(h, WOKEN, woken);
     }
     const count = Math.min(n, (written - read) >>> 0);
     this.copyOut(read, into, at, count);
@@ -74,7 +84,7 @@ export class Pipe {
       const count = Math.min(n, size - ((written - read) >>> 0));
       this.copyIn(written, from, at, count);
       Atomics.store(h, WRITTEN, (written + count) | 0);
-      Atomics.notify(h, WRITTEN);
+      this.wake();
       at += count;
       n -= count;
     }
@@ -83,7 +93,12 @@ export class Pipe {
   // the writer is done: a reader reads what is left, then 0
   close(): void {
     Atomics.store(this.header, CLOSED, 1);
-    Atomics.notify(this.header, WRITTEN);
+    this.wake();
+  }
+
+  private wake() {
+    Atomics.add(this.header, WOKEN, 1);
+    Atomics.notify(this.header, WOKEN);
   }
 
   private copyOut(pos: number, into: Uint8Array, at: number, n: number) {

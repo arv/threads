@@ -8,8 +8,8 @@ import {connect, SyncRpcChannel} from './channel.ts';
 import {Pipe} from './pipe.ts';
 
 // the stand-in: echo answers with the payload, big with a megabyte and a bit,
-// call calls the client's callback "twice" and answers with what it gave,
-// anything else fails
+// call calls the client's callback "twice" and answers with what it gave (or,
+// if the callback failed, answers nothing), anything else fails
 const tsgo = `
 const {workerData: {toTsgo, fromTsgo, url}} = require('node:worker_threads');
 import(url).then(({Pipe}) => {
@@ -40,6 +40,9 @@ import(url).then(({Pipe}) => {
     else if (method === 'call') {
       send(6, text('twice'), payload);
       const [type, , answer] = read();
+      // the callback failed (3): the client gives up the request, and waits
+      // for nothing more of it
+      if (type === 3) continue;
       if (type !== 2) throw new Error('expected a call response');
       send(4, name, answer);
     } else send(5, name, text('no method ' + method));
@@ -60,6 +63,10 @@ connect(args => {
     },
   });
   workers.push(worker);
+  // a stand-in that fails fails the test that started it
+  worker.on('error', e => {
+    throw e;
+  });
   return {out, in: in_, close: () => void worker.terminate()};
 });
 afterAll(() => Promise.all(workers.map(w => w.terminate())));
@@ -84,7 +91,7 @@ it('answers requests, and calls back in the middle of one', () => {
   expect(() => channel.requestSync('echo', '')).toThrow('closed');
 });
 
-it('fails a request whose callback fails, and says why', () => {
+it('fails a request whose callback fails, says why, and stays in step', () => {
   const channel = new SyncRpcChannel('tsgo', [], false);
   channel.registerCallback('twice', () => {
     throw new Error('no');
@@ -92,5 +99,7 @@ it('fails a request whose callback fails, and says why', () => {
   expect(() => channel.requestSync('call', 'ab')).toThrow(
     'Error calling callback `twice`: no',
   );
+  // the stand-in read the failure, and answers what comes next
+  expect(channel.requestSync('echo', 'after')).toBe('after');
   channel.close();
 });

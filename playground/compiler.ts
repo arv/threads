@@ -171,14 +171,23 @@ function compileProgram(
   }
   const ms = Math.round(performance.now() - t0);
   const file = result.files.find(f => f.fileName === PROGRAM);
-  return {
-    js: file ? toJavaScript(file, {}).code : null,
-    erased,
-    ownership: result.diagnostics.filter(ofProgram).map(asPlayground),
-    types: result.typeDiagnostics.filter(ofProgram).map(asPlayground),
-    ms,
-    checkMs: ms,
-  };
+  const ownership = result.diagnostics.filter(ofProgram).map(asPlayground),
+    typeErrors = result.typeDiagnostics.filter(ofProgram).map(asPlayground);
+  let js: string | null = null;
+  // OXC refuses a program that does not parse: no JavaScript, and the errors
+  // say why (or, if none does, OXC)
+  try {
+    if (file) js = toJavaScript(file, {}).code;
+  } catch (e) {
+    if (typeErrors.length === 0)
+      ownership.push({
+        line: 1,
+        col: 1,
+        code: 'TS0',
+        message: String((e as Error).message ?? e),
+      });
+  }
+  return {js, erased, ownership, types: typeErrors, ms, checkMs: ms};
 }
 
 // the program with its types only erased: what tsgo emits for it

@@ -134,61 +134,97 @@ async function programs(
     const results: Program[] = [];
     for (const i of order) {
       if (only && !names[i]!.includes(only) && i !== 0) continue;
-      const compiled = await page.evaluate(async i => {
-        const pg = (window as any).__playground;
-        const status = document.getElementById('status')!;
-        const preset = document.getElementById('preset') as HTMLSelectElement;
-        const before = pg.result;
-        let t0 = 0,
-          t1 = 0;
-        const seen = new MutationObserver(() => {
-          const compiling = status.textContent!.startsWith('Compiling');
-          if (compiling && !t0) t0 = performance.now();
-          else if (!compiling && t0 && !t1) t1 = performance.now();
-        });
-        seen.observe(status, {
-          childList: true,
-          characterData: true,
-          subtree: true,
-        });
-        preset.selectedIndex = i;
-        preset.dispatchEvent(new Event('change'));
-        while (pg.result === before || !t1)
-          await new Promise(r => setTimeout(r, 10));
-        seen.disconnect();
-        const {js, ownership, types} = pg.result.compiled;
-        return {ms: Math.round(t1 - t0), js, ownership, types};
-      }, i);
+      const compiled = await page.evaluate(
+        async ([i, deadline]) => {
+          const pg = (window as any).__playground;
+          const status = document.getElementById('status')!;
+          const preset = document.getElementById('preset') as HTMLSelectElement;
+          const before = pg.result;
+          let t0 = 0,
+            t1 = 0;
+          const seen = new MutationObserver(() => {
+            const compiling = status.textContent!.startsWith('Compiling');
+            if (compiling && !t0) t0 = performance.now();
+            else if (!compiling && t0 && !t1) t1 = performance.now();
+          });
+          seen.observe(status, {
+            childList: true,
+            characterData: true,
+            subtree: true,
+          });
+          try {
+            preset.selectedIndex = i;
+            preset.dispatchEvent(new Event('change'));
+            // done: a result, or a compile that failed (the page keeps the
+            // result before, and says so)
+            const end = performance.now() + deadline;
+            while (!t1) {
+              if (performance.now() > end)
+                throw new Error(
+                  `no compile in ${deadline} ms: ${status.textContent}`,
+                );
+              await new Promise(r => setTimeout(r, 10));
+            }
+            if (pg.result === before)
+              throw new Error(`the compile failed: ${status.textContent}`);
+          } finally {
+            seen.disconnect();
+          }
+          const {js, ownership, types} = pg.result.compiled;
+          return {ms: Math.round(t1 - t0), js, ownership, types};
+        },
+        [i, 120_000] as const,
+      );
       const runs = {compiled: [] as string[], erased: [] as string[]};
       if (options.run && (!only || names[i]!.includes(only)))
         for (const mode of ['compiled', 'erased'] as const)
-          runs[mode] = await page.evaluate(async mode => {
-            const out = document.getElementById('output')!;
-            const run = document.getElementById('run') as HTMLButtonElement;
-            (
-              document.querySelector(
-                `input[name="mode"][value="${mode}"]`,
-              ) as HTMLInputElement
-            ).click();
-            while (run.disabled) await new Promise(r => setTimeout(r, 10));
-            const from = out.childNodes.length;
-            run.click();
-            const ended = () =>
-              [...out.childNodes]
+          runs[mode] = await page.evaluate(
+            async ([mode, deadline]) => {
+              const out = document.getElementById('output')!;
+              const run = document.getElementById('run') as HTMLButtonElement;
+              const end = performance.now() + deadline;
+              const until = async (done: () => boolean, what: string) => {
+                while (!done()) {
+                  if (performance.now() > end)
+                    throw new Error(`${what} in ${deadline} ms`);
+                  await new Promise(r => setTimeout(r, 20));
+                }
+              };
+              (
+                document.querySelector(
+                  `input[name="mode"][value="${mode}"]`,
+                ) as HTMLInputElement
+              ).click();
+              await until(() => !run.disabled, 'Run never enabled');
+              const from = out.childNodes.length;
+              run.click();
+              const isError = (n: Node) =>
+                n instanceof HTMLElement && n.classList.contains('error');
+              await until(
+                () =>
+                  [...out.childNodes]
+                    .slice(from)
+                    .some(
+                      n =>
+                        isError(n) ||
+                        (n instanceof HTMLElement &&
+                          n.classList.contains('done')),
+                    ),
+                'the run did not end',
+              );
+              // a failure as such: the page shows only its message
+              return [...out.childNodes]
                 .slice(from)
-                .some(
+                .map(
                   n =>
-                    n instanceof HTMLElement &&
-                    (n.classList.contains('done') ||
-                      n.classList.contains('error')),
-                );
-            while (!ended()) await new Promise(r => setTimeout(r, 20));
-            return [...out.childNodes]
-              .slice(from)
-              .map(n => (n as HTMLElement).innerText ?? n.textContent)
-              .join('\n')
-              .split('\n');
-          }, mode);
+                    (isError(n) ? 'Error: ' : '') +
+                    ((n as HTMLElement).innerText ?? n.textContent),
+                )
+                .join('\n')
+                .split('\n');
+            },
+            [mode, 300_000] as const,
+          );
       if (!only || names[i]!.includes(only))
         results.push({name: names[i]!, ...compiled, runs});
     }
