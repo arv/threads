@@ -59,6 +59,8 @@ const computedImport =
 const markedNotTyped =
   "a struct() field whose type is not its marker's (a number marked i32, a `boolean | undefined` marked bool), an error: the fork lays the field out as its type says (an f64 where the type is no field type), threads-check as its marker says";
 const knownDifferences: Record<string, string> = {
+  'emit/fixes.ts':
+    "what the fork gets wrong (compile.test.ts tests each): an arrow whose concise body is a closure keeps its owned parameter's default (the fork drops it), defaults after one that moves into the body move too, so they still run left to right, and an array that its index assigns is read (and held) before the index",
   'playground/main.ts': computedImport,
   'playground/compiler.ts': computedImport,
   'cases/commonjs/commonjs.ts':

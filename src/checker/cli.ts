@@ -110,7 +110,7 @@ function main(args: string[]): number {
       diagnostics = check(tsconfig, {runtime});
     }
   } catch (e) {
-    if (e instanceof CheckError) {
+    if (e instanceof CheckError || e instanceof CompileOutputError) {
       console.error(`threads-check: ${e.message}`);
       return 3;
     }
@@ -147,6 +147,18 @@ function writeOutput(
           files.map(f => dirname(f.fileName)),
           tsconfig,
         );
+  // nothing written over a source (a JavaScript input, with allowJs and no
+  // outDir), and nothing written twice
+  const inputs = new Set(files.map(f => resolve(f.fileName)));
+  const outputs = new Map<string, string>();
+  for (const file of files) {
+    const out = resolve(outputPath(file, rootDir, outDir));
+    if (inputs.has(out) || outputs.has(out))
+      throw new CompileOutputError(
+        `cannot write ${relative(process.cwd(), out)}: it would overwrite ${inputs.has(out) ? 'an input of the project' : `the output of ${relative(process.cwd(), outputs.get(out)!)}`}. Name an output directory (--outDir, or the tsconfig's outDir)`,
+      );
+    outputs.set(out, file.fileName);
+  }
   for (const file of files) {
     const js = toJavaScript(file, {
       verbatimModuleSyntax: !!options.verbatimModuleSyntax,
@@ -168,6 +180,10 @@ function writeOutput(
     writeFileSync(out, code);
   }
 }
+
+// An output that cannot be written, which stops the compile before it writes
+// anything.
+class CompileOutputError extends Error {}
 
 // Where a file's JavaScript goes: .ts as .js, .mts as .mjs, .cts as .cjs, .tsx
 // as .jsx (its JSX left for a bundler); beside it without an outDir.

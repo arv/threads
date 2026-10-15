@@ -532,6 +532,12 @@ export class Resolver {
     return assigned;
   }
 
+  // Reports whether code assigns the variable an identifier refers to.
+  assignsIn(node: Node, id: Node): boolean {
+    const symbol = this.c.host.resolvedSymbol(id);
+    return !!symbol && this.isAssignedIn(node, symbol);
+  }
+
   // isOwnAssignedIn: a symbol is assigned (or updated) anywhere within node,
   // nested functions included.
   private isAssignedIn(node: Node | undefined, symbol: TsSymbol): boolean {

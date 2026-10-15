@@ -64,7 +64,9 @@ export interface CompiledFile {
 
 export interface CompileResult {
   files: CompiledFile[];
-  // the tsconfig's errors, or (with `check`) the ownership diagnostics
+  // the tsconfig's errors and the project's (a module kind the runtime's
+  // helpers cannot be imported into), and with `check` the ownership
+  // diagnostics
   diagnostics: Diagnostic[];
   // (with `types`) the files' type errors
   typeDiagnostics: Diagnostic[];
@@ -146,18 +148,24 @@ function compileProgram(
     });
   }
   let typeDiagnostics: Diagnostic[] = [];
-  if (options.types && program.files.length > 0) {
-    const names = program.files.map(f => f.fileName as string);
+  if (options.types) {
+    // the whole program's, declaration files included, as tsc reports them
+    // (skipLibCheck leaves them out)
     typeDiagnostics = sortAndDeduplicate(
       [
-        ...host.program.getSyntacticDiagnostics(names),
-        ...host.program.getSemanticDiagnostics(names),
+        ...host.program.getSyntacticDiagnostics(),
+        ...host.program.getSemanticDiagnostics(),
+        ...host.program.getGlobalDiagnostics(),
       ].map(fromApi),
     );
   }
   return {
     files,
-    diagnostics: options.check ? finish(program) : [],
+    // the project's own (an option the runtime cannot work with), and with
+    // `check` the ownership diagnostics
+    diagnostics: options.check
+      ? finish(program)
+      : sortAndDeduplicate(program.diagnostics),
     typeDiagnostics,
     compilerOptions,
   };

@@ -25,6 +25,43 @@ const corners = (() => {
   return result.files.find(f => f.fileName.endsWith('corners.ts'))!;
 })();
 const js = toJavaScript(corners).code;
+const fixes = (() => {
+  const result = compile(path.join(checker, 'test/emit/tsconfig.json'), {
+    runtime: 'threads',
+    api,
+  });
+  return toJavaScript(result.files.find(f => f.fileName.endsWith('fixes.ts'))!)
+    .code;
+})();
+// a project of these files, in a directory of its own
+const dirs: string[] = [];
+afterAll(() => {
+  for (const dir of dirs) fs.rmSync(dir, {recursive: true, force: true});
+});
+const runtimeTypes = path.join(checker, '../runtime/threads.d.ts');
+function project(files: Record<string, string>, options: object = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-compile-'));
+  dirs.push(dir);
+  fs.writeFileSync(
+    path.join(dir, 'tsconfig.json'),
+    JSON.stringify({
+      compilerOptions: {
+        target: 'es2022',
+        module: 'esnext',
+        moduleResolution: 'bundler',
+        strict: true,
+        lib: ['es2022'],
+        paths: {threads: [runtimeTypes]},
+        ...options,
+      },
+      include: ['*.ts', '*.js'],
+    }),
+  );
+  for (const [name, text] of Object.entries(files))
+    fs.writeFileSync(path.join(dir, name), text);
+  return dir;
+}
+const APP = `import {f64, struct, type Struct} from 'threads';\nconst P = struct({x: f64});\nexport function main(): number {\n  return new P().x;\n}\n`;
 // the JavaScript of one function
 const fn = (name: string) => {
   const start = js.indexOf(`function ${name}(`);
@@ -106,6 +143,74 @@ describe('compile', () => {
   });
 });
 
+describe('compile, where the fork does not', () => {
+  it("runs an owned parameter's default around a concise body that is a closure", () => {
+    expect(fixes).toContain(
+      'export const later = (p) => {\n\tp = p === void 0 ? __newStruct(Node) : __retain(p);',
+    );
+  });
+
+  it('runs the defaults left to right when one moves into the body', () => {
+    expect(fixes).toContain('export function ordered(a, b) {');
+    expect(fixes).toMatch(
+      /a = a === void 0 \? __newStruct\(Node\) : __retain\(a\);\n\tif \(b === void 0\) \{\n\t\tb = a;/,
+    );
+  });
+
+  it('runs a default with temporaries in the body, which declares them', () => {
+    expect(fixes).toContain(
+      'export function counted(n) {\n\tvar _a, _b;\n\tif (n === void 0) {\n\t\tn = (_b = read(_a = __newStruct(Node)), __release(_a), _b);',
+    );
+  });
+
+  it('reads an array before the index that assigns it, and holds it', () => {
+    expect(fixes).toContain(
+      '_a = __retain(a), _c = (_b = a, a = __retain(b), __release(_b), 0), _c >>> 0 === _c && _c < __I32[_a + 4 >> 2] ? __F64[(_a + 16 >> 3) + _c] : __outOfBounds[_c]), __release(_a)',
+    );
+  });
+
+  it('puts the import on a line of its own after a directive', () => {
+    for (const eol of ['\n', '\r\n']) {
+      const dir = project({'app.ts': `"use client"${eol}${APP}`});
+      const [file] = compile(path.join(dir, 'tsconfig.json'), {
+        runtime: 'threads',
+        api,
+      }).files;
+      expect(file!.code).toMatch(
+        new RegExp(
+          `^"use client"${eol}\\n?import \\{ [^\\n]* \\} from "threads";\\n`,
+        ),
+      );
+      expect(() => toJavaScript(file!)).not.toThrow();
+    }
+  });
+
+  it("reports a module kind the runtime's helpers cannot be imported into, unchecked", () => {
+    const dir = project({'app.ts': APP}, {module: 'commonjs'});
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+    });
+    expect(result.diagnostics.map(d => d.code)).toContain(96014);
+    expect(result.files[0]!.changed).toBe(false);
+  });
+
+  it("reports type errors in the project's declaration files", () => {
+    const dir = project({
+      'app.ts': APP,
+      'globals.d.ts': 'declare const x: MissingType;\n',
+    });
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+      types: true,
+    });
+    expect(
+      result.typeDiagnostics.map(d => [path.basename(d.file ?? ''), d.code]),
+    ).toEqual([['globals.d.ts', 2304]]);
+  });
+});
+
 describe('threads-check compile', () => {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-compile-'));
   afterAll(() => fs.rmSync(out, {recursive: true, force: true}));
@@ -137,6 +242,22 @@ describe('threads-check compile', () => {
     expect(map.sources).toEqual([
       path.relative(out, path.join(checker, 'test/emit/corners.ts')),
     ]);
+  });
+
+  it('writes nothing over an input: a JavaScript file, without an outDir', () => {
+    const dir = project(
+      {'app.ts': APP, 'tool.js': 'export const n = 1;\n'},
+      {allowJs: true},
+    );
+    const r = run(['-p', dir, '--runtime', 'threads']);
+    expect(r.stderr).toMatch(
+      /cannot write .*tool\.js: it would overwrite an input of the project\. Name an output directory/,
+    );
+    expect(r.status).toBe(3);
+    expect(fs.readFileSync(path.join(dir, 'tool.js'), 'utf8')).toBe(
+      'export const n = 1;\n',
+    );
+    expect(fs.existsSync(path.join(dir, 'app.js'))).toBe(false);
   });
 
   it('reports the ownership errors, exits 1, and writes the files all the same', () => {

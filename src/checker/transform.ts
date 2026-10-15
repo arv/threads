@@ -183,6 +183,13 @@ class Lowering {
   private conditional = 0;
   // default values of owned parameters, moved into the body
   private readonly paramInits = new Map<Node, Node>();
+  // default values of other parameters that move into the body with them
+  // (visited already, or to visit there): those after one that moves, so
+  // that the defaults still run left to right, and one whose temporaries
+  // (declared in the body) it could not see from the parameter list
+  private readonly movedDefaults = new Map<Node, Ir | undefined>();
+  // the functions some of whose parameters' defaults move into the body
+  private readonly movingDefaults = new Set<Node>();
   // the var scopes of the functions being visited, innermost last
   private readonly scopes: Scope[] = [];
   private readonly starts = new Map<Node, number>();
@@ -252,7 +259,8 @@ class Lowering {
       helpers = helpers.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     }
     if (helpers.length === 0) {
-      if (vars) ms.prependLeft(this.prologueEnd(), vars);
+      const at = this.prologueEnd();
+      if (vars) ms.prependLeft(at, this.prologueBreak(at) + vars);
       return [];
     }
     const specifiers = helpers.map(h => {
@@ -260,7 +268,8 @@ class Lowering {
       return `${h.slice(2)} as ${local}`;
     });
     const importText = `import { ${specifiers.join(', ')} } from ${JSON.stringify(this.options.runtime)};\n`;
-    ms.prependLeft(this.prologueEnd(), vars + importText);
+    const at = this.prologueEnd();
+    ms.prependLeft(at, this.prologueBreak(at) + vars + importText);
     if (functions.length > 0) {
       const register = names.helper('__register');
       const end = this.text.length;
@@ -333,8 +342,16 @@ class Lowering {
         at = s.end;
       else break;
     }
-    if (at > 0 && this.text[at] === '\n') at++;
+    if (this.text.startsWith('\r\n', at)) at += 2;
+    else if (this.text[at] === '\n') at++;
     return at;
+  }
+
+  // What goes before the text inserted at prologueEnd(): a line break where
+  // that is not the start of a line (a directive without a semicolon or a
+  // line break after it, say), so the import is on a line of its own.
+  private prologueBreak(at: number): string {
+    return at > 0 && this.text[at - 1] !== '\n' ? '\n' : '';
   }
 
   // The identifiers of the file (a generated name avoids them all).
@@ -437,6 +454,13 @@ class Lowering {
 
   private visit(node: Node, ctx: Ctx = Ctx.AtOnce): Ir {
     if (isErased(node)) return this.src(node);
+    // an arrow's concise body, even one that is itself a function: the arrow's
+    // parameters' prologue goes around it (the fork visits a function there
+    // as a closure only, and drops an owned parameter's default)
+    if (isExpression(node)) {
+      const fn = conciseBodyOf(node);
+      if (fn) return this.visitConciseBody(node, fn);
+    }
     switch (node.kind) {
       case K.Block:
         return this.visitBlock(node);
@@ -914,15 +938,35 @@ class Lowering {
       if (!isIdentity(ir, child)) edits.push(this.editOf(child, ir));
     });
     if (node.initializer) {
+      const fn = node.parent as Node;
+      // ` = init` goes
+      const before = node.type ?? node.questionToken ?? node.name;
+      const remove = {
+        start: before.end,
+        end: node.initializer.end,
+        ir: raw(''),
+      };
       const local = this.r.local(node);
+      const movable = node.name.kind === K.Identifier && !!fn.body;
       if (local === Local.Owned || local === Local.OwnedMoved) {
         this.paramInits.set(node, node.initializer);
-        // ` = init` goes
-        const before = node.type ?? node.questionToken ?? node.name;
-        edits.push({start: before.end, end: node.initializer.end, ir: raw('')});
+        this.movingDefaults.add(fn);
+        edits.push(remove);
+      } else if (movable && this.movingDefaults.has(fn)) {
+        // after a default that moved: visited in the body
+        this.movedDefaults.set(node, undefined);
+        edits.push(remove);
       } else {
+        const scope = this.scopes[this.scopes.length - 1]!;
+        const temps = scope.temps.length;
         const initializer = this.fullExpression(node.initializer, Ctx.AtOnce)!;
-        if (!isIdentity(initializer, node.initializer))
+        if (movable && scope.temps.length > temps) {
+          // its temporaries are the body's: it moves there, as the fork's
+          // emit moves it (`if (n === void 0) { n = ...; }`)
+          this.movedDefaults.set(node, initializer);
+          this.movingDefaults.add(fn);
+          edits.push(remove);
+        } else if (!isIdentity(initializer, node.initializer))
           edits.push(this.editOf(node.initializer, initializer));
       }
     }
@@ -959,6 +1003,22 @@ class Lowering {
     for (const param of fn.parameters as Node[]) {
       const name = param.name as Node;
       if (!name || name.kind !== K.Identifier) continue;
+      if (this.movedDefaults.has(param)) {
+        // `if (p === void 0) { p = init; }`, in the parameters' order
+        const init =
+          this.movedDefaults.get(param) ??
+          this.fullExpression(param.initializer, Ctx.AtOnce)!;
+        prologue.push(
+          gen(Prec.Primary, [
+            '\nif (',
+            binary(this.name(name), '===', raw('void 0', Prec.Unary)),
+            ') {',
+            exprStatement(this.assign(this.name(name), copyOf(init))),
+            '\n}',
+          ]),
+        );
+        continue;
+      }
       switch (this.r.local(param)) {
         case Local.Owned:
         case Local.OwnedMoved: {
@@ -1290,6 +1350,16 @@ class Lowering {
 
   private lower(node: Node, ctx: Ctx): Ir {
     switch (node.kind) {
+      // (reached as a concise body: elsewhere visit() takes them first)
+      case K.ArrowFunction:
+      case K.FunctionExpression:
+        return this.visitClosure(node);
+      case K.ClassExpression: {
+        this.pushFrame(null);
+        const result = this.visitEachChild(node);
+        this.popFrame();
+        return result;
+      }
       case K.NewExpression: {
         const lowered = this.lowerNew(node);
         if (lowered) return lowered;
@@ -1388,7 +1458,10 @@ class Lowering {
         num(2 + 2 * atomic.field),
       );
     } else {
-      const a = this.copiable(this.visitIn(args[0], objectContext)!, temps);
+      const a = this.copiable(
+        this.receiver(args[0]!, objectContext, args.slice(1)),
+        temps,
+      );
       const i = this.copiable(this.visit(args[1]!), temps);
       const base = paren(binary(paren(binary(a, '+', num(16))), '>>', num(2)));
       index = binary(
@@ -1761,7 +1834,9 @@ class Lowering {
       }
       const temps: Ir[] = [];
       const a = this.copiable(
-        this.visitIn(node.expression, objectContext)!,
+        this.receiver(node.expression, objectContext, [
+          node.argumentExpression,
+        ]),
         temps,
       );
       const i = this.copiable(this.visit(node.argumentExpression), temps);
@@ -1783,7 +1858,7 @@ class Lowering {
     }
     const temps: Ir[] = [];
     const a = this.copiable(
-      this.visitIn(node.expression, objectContext)!,
+      this.receiver(node.expression, objectContext, [node.argumentExpression]),
       temps,
     );
     const i = this.copiable(this.visit(node.argumentExpression), temps);
@@ -1858,6 +1933,27 @@ class Lowering {
     };
     visit(node);
     return found;
+  }
+
+  // The array an element access (or an atomic operation) reads, visited. A
+  // variable that what comes after it assigns (`a[(a = b, 0)]`) is read
+  // before, into a temporary that holds a count until the full expression
+  // ends, as JavaScript reads the array first (the fork reads it again,
+  // after the index).
+  private receiver(object: Node, ctx: Ctx, after: Node[]): Ir {
+    const ir = this.visitIn(object, ctx)!;
+    const id = skipParentheses(object);
+    if (
+      id.kind !== K.Identifier ||
+      !isSimpleCopiable(ir) ||
+      !after.some(n => this.r.assignsIn(n, id))
+    )
+      return ir;
+    const held = this.temporary(this.call('__retain', ir));
+    if (held !== ir) return held;
+    // no full expression around to release it after: a plain copy
+    const temp = this.newTemp();
+    return paren(this.assign(tempRef(temp), ir));
   }
 
   // An expression that can be repeated: the expression itself if it is
