@@ -1467,13 +1467,27 @@ class FunctionAnalysis {
       if (decl.initializer) v = this.eval(decl.initializer, s);
       // a `using` declaration gets its value's dispose method, which may throw
       if (using) this.mayThrow(s);
-      this.bindName(decl.name, decl, v, s);
+      this.bindName(
+        decl.name,
+        decl,
+        v,
+        s,
+        decl.initializer && this.a.typeOf(decl.initializer),
+      );
     }
   }
 
   // Binds the names declared by a variable, parameter or binding element. Every
   // name in a binding pattern is bound to the region of the destructured value.
-  bindName(name: Node | undefined, decl: Node, v: Value, s: State): void {
+  // source: the type of what is bound, where it is known (an object pattern
+  // rejects null and undefined before its first computed key)
+  bindName(
+    name: Node | undefined,
+    decl: Node,
+    v: Value,
+    s: State,
+    source?: Type,
+  ): void {
     if (!name) return;
     if (name.kind === K.Identifier) {
       const symbol = this.a.c.host.symbolOfDeclaration(decl);
@@ -1484,7 +1498,13 @@ class FunctionAnalysis {
       // each property read, or step of the iterator, may throw, after the
       // defaults before it ran; an array pattern then closes its iterator
       const elements = name.elements as Node[];
-      if (elements.length === 0) this.mayThrow(s);
+      if (
+        elements.length === 0 ||
+        (name.kind === K.ObjectBindingPattern &&
+          source &&
+          this.mayBeNullish(source))
+      )
+        this.mayThrow(s);
       for (const element of elements) {
         if (element.propertyName?.kind === K.ComputedPropertyName)
           this.eval(element.propertyName.expression, s);
@@ -1785,12 +1805,14 @@ class FunctionAnalysis {
         for (const symbol of start.vars.keys())
           if (local.has(this.a.idOf(symbol))) start.vars.delete(symbol);
         // and the regions only they held go with them (not `this` , nor
-        // what a loop iterates)
-        start.collect(
-          this.thisRegion === 0
-            ? this.iterating
-            : [this.thisRegion, ...this.iterating],
-        );
+        // what a loop iterates), unless an expression being evaluated may
+        // hold one
+        if (this.evaluating === 0)
+          start.collect(
+            this.thisRegion === 0
+              ? this.iterating
+              : [this.thisRegion, ...this.iterating],
+          );
         const done = runs.find(r => r.start.sameAs(start));
         if (done) return done.end.copy();
         const input = start.copy();
@@ -1843,7 +1865,22 @@ class FunctionAnalysis {
 
   // Expressions
 
+  // How many expressions are being evaluated: one may hold regions outside
+  // any binding (an assignment's object while its value is made, a call's
+  // receiver and arguments), so no state is collected while one is (a class
+  // expression's static block may run a finally).
+  evaluating = 0;
+
   eval(node: Node | undefined, s: State): Value {
+    this.evaluating++;
+    try {
+      return this.evalExpression(node, s);
+    } finally {
+      this.evaluating--;
+    }
+  }
+
+  evalExpression(node: Node | undefined, s: State): Value {
     if (!node) return sharedValue;
     const a = this.a;
     switch (node.kind) {
@@ -2003,9 +2040,18 @@ class FunctionAnalysis {
   // what it extends (which may be no constructor), its computed keys (which
   // are converted), then its static fields' initializers and static blocks.
   // Its methods and its instance fields' initializers run later, as closures.
+  // A decorator is applied, which may throw: a member's (a parameter's
+  // included) once the members are defined, a field's initializer as the field
+  // is, and the class's after them, before its static fields or after them
+  // as the proposal or TypeScript's older decorators have it.
   evalClassDefinition(node: Node, s: State): void {
     const decorators = (n: Node) =>
       ((n.modifiers ?? []) as Node[]).filter(m => m.kind === K.Decorator);
+    const memberDecorators = (m: Node) => [
+      ...decorators(m),
+      ...((m.parameters ?? []) as Node[]).flatMap(decorators),
+    ];
+    const classDecorated = decorators(node).length > 0;
     for (const d of decorators(node)) this.eval(d.expression, s);
     for (const h of (node.heritageClauses ?? []) as Node[]) {
       if (h.token !== K.ExtendsKeyword) continue;
@@ -2014,19 +2060,24 @@ class FunctionAnalysis {
     }
     const members = node.members as Node[];
     for (const m of members) {
-      for (const d of decorators(m)) this.eval(d.expression, s);
+      for (const d of memberDecorators(m)) this.eval(d.expression, s);
       if (m.name?.kind === K.ComputedPropertyName) {
         this.eval(m.name.expression, s);
         this.mayThrow(s);
       }
     }
+    if (members.some(m => memberDecorators(m).length > 0)) this.mayThrow(s);
+    if (classDecorated) this.mayThrow(s);
     const isStatic = (m: Node) =>
       ((m.modifiers ?? []) as Node[]).some(x => x.kind === K.StaticKeyword);
     for (const m of members) {
       if (m.kind === K.ClassStaticBlockDeclaration) this.statement(m.body, s);
-      else if (m.kind === K.PropertyDeclaration && isStatic(m) && m.initializer)
-        this.eval(m.initializer, s);
+      else if (m.kind === K.PropertyDeclaration && isStatic(m)) {
+        if (decorators(m).length > 0) this.mayThrow(s); // its initializers
+        if (m.initializer) this.eval(m.initializer, s);
+      }
     }
+    if (classDecorated) this.mayThrow(s);
   }
 
   // Fallback for expressions without a specific rule (JSX and the like): a

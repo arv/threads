@@ -301,6 +301,10 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(369,80): error TS96006: 'xs' may have been consumed by 'consume' on line 369.",
         "try-exits.ts(374,87): error TS96005: 'xs' was consumed by 'consume' on line 374.",
         "try-exits.ts(378,104): error TS96006: 'xs' may have been consumed by 'consume' on line 378.",
+        "try-exits.ts(383,3): error TS96001: 'box' cannot be used here: it was sent to 'send' on line 383.",
+        "try-exits.ts(389,64): error TS96005: 'xs' was consumed by 'consume' on line 389.",
+        "try-exits.ts(393,93): error TS96005: 'xs' was consumed by 'consume' on line 393.",
+        "try-exits.ts(398,93): error TS96006: 'xs' may have been consumed by 'consume' on line 398.",
       ].sort(),
     );
   });
@@ -367,6 +371,9 @@ describe('threads-check, where it differs from the fork', () => {
         'spreads.ts(83,11): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
         'spreads.ts(88,40): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
         'spreads.ts(93,13): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(102,11): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(103,15): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(104,16): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
       ].sort(),
     );
   });

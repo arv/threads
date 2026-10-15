@@ -377,3 +377,27 @@ export function staticInitializerOfExpression() {
   let xs = [1];
   try { const K = class { static n = (consume(xs), getter.value); }; xs = [2]; use(K); } finally { use(xs); }  // error
 }
+// a finally in a static block, while an assignment holds its object
+export function staticBlockFinally(ch: Channel<{ n: number }>) {
+  let box = { n: 0 };
+  box.n = (ch.send(box), box = { n: 1 }, class { static { try {} finally {} } }, 2);  // error: the first box, which was sent, is written
+}
+// a decorator is applied, which may throw, once the members are defined
+declare function dec(...args: any[]): any;
+export function classDecorator() {
+  let xs = [1];
+  try { consume(xs); @dec class C {} xs = [2]; } finally { use(xs); }  // error
+}
+export function methodDecorator() {
+  let xs = [1];
+  try { consume(xs); class C { @dec method() {} static n = (xs = [2], 0); } } finally { use(xs); }  // error: before the static field
+}
+// an object binding pattern refuses a null or undefined source before its keys
+export function nullishBindingSource() {
+  let xs = [1];
+  try { consume(xs); const { [(xs = [2], "a")]: held } = anyObj; use(held); } finally { use(xs); }  // error
+}
+export function nonNullBindingSource() {
+  let xs = [1];
+  try { consume(xs); const { [(xs = [2], "a")]: held } = pair; use(held); } finally { use(xs); }  // fine
+}

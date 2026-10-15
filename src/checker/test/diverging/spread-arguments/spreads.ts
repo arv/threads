@@ -92,3 +92,14 @@ declare function unionRest(...args: [head?: number, ...tail: i32[]] | [head?: st
 export function spreadIntoUnionRest() {
   unionRest(...numbers);           // error: numbers for the i32 tail
 }
+// what is any may hold anything
+declare const anyValues: any;
+// a generic's rest as an instantiation expression, or a specialized type, has it
+const forwardLong = forward<Parameters<typeof longRest>>;
+interface Forward<A extends unknown[]> { (...args: A): void }
+declare const forwardTyped: Forward<Parameters<typeof longRest>>;
+export function instantiated() {
+  takeAll(...anyValues);           // error: anything for i32s
+  forwardLong(...numbers);         // error: numbers for the i32 tail
+  forwardTyped(...numbers);        // error
+}
