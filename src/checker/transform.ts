@@ -124,6 +124,7 @@ const HELPERS = [
   '__U8',
   '__box',
   '__cellView',
+  '__callbackView',
   '__newCell',
   '__newShared',
   '__cellAddress',
@@ -730,8 +731,36 @@ class Lowering {
   private visitExpression(node: Node, ctx: Ctx): Ir {
     switch (this.r.conversion(node)) {
       case Conversion.Box: {
-        const access = node.parent as Node | undefined;
-        const invocation = access?.parent as Node | undefined;
+        // setTarget distributes a receiver's conversion through parentheses,
+        // conditional branches and logical/comma expressions. Find its use.
+        let receiver = node;
+        for (;;) {
+          const parent = receiver.parent as Node | undefined;
+          if (
+            (parent?.kind === K.ParenthesizedExpression &&
+              parent.expression === receiver) ||
+            (parent?.kind === K.ConditionalExpression &&
+              parent.condition !== receiver) ||
+            (parent?.kind === K.BinaryExpression &&
+              [
+                K.BarBarToken,
+                K.AmpersandAmpersandToken,
+                K.QuestionQuestionToken,
+                K.CommaToken,
+              ].includes(parent.operatorToken.kind))
+          )
+            receiver = parent!;
+          else break;
+        }
+        const access = receiver.parent as Node | undefined;
+        let callee = access;
+        while (
+          callee?.parent &&
+          skipOuterExpressions(callee.parent as Node, OEK.All) ===
+            skipOuterExpressions(callee, OEK.All)
+        )
+          callee = callee.parent as Node;
+        const invocation = callee?.parent as Node | undefined;
         const type = this.r.c.host.typeOf(node);
         if (
           isRuntimeCellType(this.r.c, type) &&
@@ -750,7 +779,7 @@ class Lowering {
           ) {
             let value = this.visitValue(node, Ctx.Argument);
             const id = skipParentheses(node);
-            const index = access.arguments.indexOf(node);
+            const index = access.arguments.indexOf(receiver);
             if (
               id.kind === K.Identifier &&
               access.arguments
@@ -764,7 +793,7 @@ class Lowering {
         if (
           isRuntimeCellType(this.r.c, type) &&
           access?.kind === K.ForOfStatement &&
-          access.expression === node
+          access.expression === receiver
         )
           return this.call(
             '__cellView',
@@ -780,9 +809,9 @@ class Lowering {
           isRuntimeCellType(this.r.c, this.r.c.host.typeOf(node)) &&
           (access?.kind === K.PropertyAccessExpression ||
             access?.kind === K.ElementAccessExpression) &&
-          access.expression === node &&
+          access.expression === receiver &&
           invocation?.kind === K.CallExpression &&
-          invocation.expression === access
+          invocation.expression === callee
         ) {
           // The view holds no count. Stabilize a field borrow before evaluating
           // the method's key or arguments; one may pass a quiescent point or
@@ -807,12 +836,19 @@ class Lowering {
             raw(String(access.kind === K.ElementAccessExpression)),
             raw(
               String(
-                isCellType(this.r.c, getChannelElementType(this.r.c, type)) &&
-                  ['recv', 'recvAsync', 'recvOk', 'recvOkAsync'].includes(
-                    this.r.c.host.declarationOf(
-                      this.r.c.host.signatureOf(invocation).declaration,
-                    )?.name?.text,
-                  ),
+                isCellType(
+                  this.r.c,
+                  this.r.c.host.awaitedType(this.r.c.host.typeOf(invocation)),
+                ) ||
+                  (isCellType(
+                    this.r.c,
+                    getChannelElementType(this.r.c, type),
+                  ) &&
+                    ['recv', 'recvAsync', 'recvOk', 'recvOkAsync'].includes(
+                      this.r.c.host.declarationOf(
+                        this.r.c.host.signatureOf(invocation).declaration,
+                      )?.name?.text,
+                    )),
               ),
             ),
           );
@@ -1818,7 +1854,6 @@ class Lowering {
         if (atomic) return this.lowerAtomic(node, atomic);
         const callee = this.visit(node.expression);
         const args = this.visitArguments(node, isOptionalChain(node));
-        const result = this.update(node, [[node.expression, callee], ...args]);
         // Native map lookups return boxed values, including immutable blobs.
         // The compiler represents wholly counted results as borrowed addresses.
         const handle = this.r.c.host.signatureOf(node)?.declaration;
@@ -1826,6 +1861,43 @@ class Lowering {
           handle && this.r.c.isRuntimePath(handle.path)
             ? this.r.c.host.declarationOf(handle)
             : undefined;
+        const container = (decl?.parent as Node | undefined)?.name?.text;
+        if (
+          (container === 'SharedMap' || container === 'SharedSet') &&
+          decl?.name?.text === 'forEach' &&
+          args[0]?.[1]
+        ) {
+          const callback = this.r.c.host.callSignatures(
+            this.r.c.host.typeOf(node.arguments[0]),
+          )[0];
+          if (callback) {
+            const mask = callback.parameters.reduce(
+              (mask, _parameter, index) =>
+                mask |
+                (isCellType(
+                  this.r.c,
+                  this.r.c.host.parameterTypeAt(callback, index),
+                )
+                  ? 1 << index
+                  : 0),
+              0,
+            );
+            const returns =
+              this.r.c.host.checker.getReturnTypeOfSignature(callback);
+            const dropResult = isCellType(
+              this.r.c,
+              this.r.c.host.awaitedType(returns),
+            );
+            if (mask || dropResult)
+              args[0][1] = this.call(
+                '__callbackView',
+                args[0][1],
+                num(mask),
+                raw(String(dropResult)),
+              );
+          }
+        }
+        const result = this.update(node, [[node.expression, callee], ...args]);
         if (
           this.r.isCellExpression(node) &&
           (decl?.parent as Node | undefined)?.name?.text === 'SharedMap' &&

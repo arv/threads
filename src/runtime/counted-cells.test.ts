@@ -20,6 +20,61 @@ const condition = (p: number) =>
 const field = (p: number) => (p >> 2) + 2;
 
 describe('counted built-in cells', () => {
+  it('defaults native receivers, iterators and selects to boxed counted messages', async () => {
+    const readers: ((ch: InstanceType<typeof T.Channel>) => unknown)[] = [
+      ch => ch.recv(),
+      ch => ch.recvAsync(),
+      ch => ch.recvOk()[0],
+      async ch => (await ch.recvOkAsync())[0],
+      ch => ch[Symbol.iterator]().next().value,
+      async ch => (await ch[Symbol.asyncIterator]().next()).value,
+      ch => T.select(ch)[1],
+      async ch => (await T.selectAsync(ch))[1],
+    ];
+    for (const read of readers) {
+      const ch = own.newCell(T.Channel, 1),
+        p = own.newCell(T.Lock);
+      channel(ch).send(own.countedRef(p));
+      own.release(p);
+      channel(ch).close();
+      // Also exercises prototype-created handles whose $raw is undefined.
+      const native = Object.assign(Object.create(T.Channel.prototype), {
+        $cell: ch,
+      });
+      const value = await read(native);
+      expect(value).toBeInstanceOf(T.Lock);
+      expect(count(p)).toBe(1);
+      own.release(ch);
+    }
+  });
+
+  it('holds native callback arguments across calls and releases them when a callback throws', () => {
+    const p = own.newCell(T.Lock);
+    const callback = own.callbackView((value: number) => {
+      expect(value).toBe(p);
+      expect(count(p)).toBe(2);
+      own.release(p); // the container's count leaves while the callback runs
+      own.collectCycles();
+      expect(count(p)).toBe(1);
+      throw new Error('callback failed');
+    }, 1);
+    expect(() => callback(p)).toThrow('callback failed');
+    expect(runtime.I32[p >> 2]).toBe(runtime.K_FREE);
+  });
+
+  it('drops counted results ignored by native forEach, including asynchronous results', async () => {
+    for (const async of [false, true]) {
+      const p = own.newCell(T.Lock);
+      const callback = own.callbackView(
+        () => (async ? Promise.resolve(p) : p),
+        0,
+        true,
+      );
+      await callback();
+      expect(runtime.I32[p >> 2]).toBe(runtime.K_FREE);
+    }
+  });
+
   it('boxes counted messages for boxed receivers and explicit iterators', () => {
     for (const iterator of [false, true]) {
       const ch = own.newCell(T.Channel, 1),

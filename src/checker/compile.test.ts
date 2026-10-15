@@ -326,6 +326,10 @@ describe('what the lowering moves, as it runs', () => {
     );
     expect(run.status, run.stderr).toBe(0);
     expect(JSON.parse(run.stdout.trim())).toEqual({
+      unionReceivers: true,
+      asyncUnionReceivers: true,
+      parenthesizedReceive: true,
+      callbacks: 18,
       nullable: true,
       calleeEffects: true,
       countedMap: true,

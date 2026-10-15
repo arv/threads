@@ -14,6 +14,7 @@ export const HELPERS = new Set([
   'U8',
   'box',
   'cellView',
+  'callbackView',
   'newCell',
   'newShared',
   'capture',

@@ -829,6 +829,37 @@ export function cellView(a: number, keepAlive = false, raw = true): CellObject {
   });
 }
 
+// Native containers call compiled callbacks with handles. The callback's
+// counted parameters borrow addresses, held until it has returned (async
+// compiled functions retain their own parameters before returning a promise).
+export function callbackView(
+  fn: (...args: any[]) => any,
+  mask: number,
+  dropResult = false,
+) {
+  return function (this: unknown, ...args: any[]) {
+    const held: number[] = [];
+    try {
+      for (let i = 0; i < args.length; i++) {
+        if ((mask & (1 << i)) === 0) continue;
+        const p = retain(unbox(args[i]));
+        held.push(p);
+        args[i] = p;
+      }
+      const result = fn.apply(this, args);
+      if (dropResult) {
+        if (result != null && typeof result.then === 'function')
+          return Promise.resolve(result).then(value => release(value));
+        release(result);
+        return;
+      }
+      return result;
+    } finally {
+      for (const p of held) release(p);
+    }
+  };
+}
+
 // spins before a thread sleeps: the other side is often only a moment away
 const SPINS = 20000;
 
