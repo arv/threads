@@ -296,6 +296,8 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(337,85): error TS96005: 'xs' was consumed by 'consume' on line 337.",
         "try-exits.ts(341,86): error TS96001: 'ys' cannot be used here: it was sent to 'send' on line 341.",
         "try-exits.ts(345,7): error TS96001: 'ys' cannot be used here: it was sent to 'send' on line 344.",
+        "try-exits.ts(350,46): error TS96002: 'row' cannot be used here: it may have been sent to 'send' on line 350.",
+        "try-exits.ts(357,87): error TS96006: 'xs' may have been consumed by 'consume' on line 357.",
       ].sort(),
     );
   });
@@ -359,6 +361,7 @@ describe('threads-check, where it differs from the fork', () => {
         "spreads.ts(43,7): error TS96001: 'xs' cannot be used here: it was sent to 'sendFirst' on line 42.",
         'spreads.ts(58,16): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
         'spreads.ts(77,12): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(83,11): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
       ].sort(),
     );
   });
@@ -411,6 +414,8 @@ describe('threads-check, where it differs from the fork', () => {
         "objects.ts(65,41): error TS96035: A value of type '{ value: number; next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
         "objects.ts(67,51): error TS96035: A value of type '{ value: number; next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
         "objects.ts(71,35): error TS96035: A value of type '{ value: number; next: null; }' cannot be used as 'Node | undefined': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
+        "objects.ts(74,51): error TS96035: A value of type '{ value: number; next: null; }' cannot be used as 'Node | undefined': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
+        "objects.ts(74,54): error TS96021: A value of type 'Node' cannot be stored in an ordinary array or object: reference counting cannot see it there. Use a SharedArray or a shared struct field, or a place typed 'unknown', which holds a handle.",
       ].sort(),
     );
   });
