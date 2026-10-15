@@ -57,9 +57,13 @@
     "vite-plus": "catalog:"
   },
   "peerDependencies": {
+    "@arv/threads-check": "workspace:^",
     "vite": ">=8"
   },
   "peerDependenciesMeta": {
+    "@arv/threads-check": {
+      "optional": true
+    },
     "vite": {
       "optional": true
     }
