@@ -70,6 +70,35 @@ function checkProgram(
   tsconfig: string,
   runtime: string,
 ): Diagnostic[] {
+  const program = loadProgram(host, tsconfig, runtime);
+  const {own: c, files: checked} = program;
+  // (The fork runs these checks after checking each file; the API's checker
+  // answers questions in the order they are asked, and its diagnostics come
+  // from other checkers, so there is no checking a file first here.)
+  for (const file of checked) {
+    checkOwnership(c, file);
+    computeConversions(c, file);
+    checkRefCounts(c, file);
+  }
+  return finish(program);
+}
+
+// A program loaded for the analysis: its source files (prefetched), the
+// state of the analysis, and whether its modules are ES modules (which the
+// runtime's helpers are imported into).
+export interface LoadedProgram {
+  host: Host;
+  own: Own;
+  files: SourceFile[];
+  esModule: boolean;
+  diagnostics: Diagnostic[];
+}
+
+export function loadProgram(
+  host: Host,
+  tsconfig: string,
+  runtime: string,
+): LoadedProgram {
   const {api, program} = host;
   const diagnostics: Diagnostic[] = [];
 
@@ -83,7 +112,8 @@ function checkProgram(
   const moduleKind =
     compilerOptions.module ||
     (target >= 2 /* ES2015 */ ? ModuleKind.ES2015 : ModuleKind.CommonJS);
-  if (moduleKind < ModuleKind.ES2015)
+  const esModule = moduleKind >= ModuleKind.ES2015;
+  if (!esModule)
     diagnostics.push(optionDiagnostic(host, tsconfig, 'ownRuntime'));
 
   // The program's files, but for the default library and the declaration files
@@ -127,19 +157,16 @@ function checkProgram(
     throw new CheckError(
       `no file of the project imports the runtime as '${runtime}', so there is nothing to check: --runtime names the module the programs import it from (@arv/threads, say)`,
     );
-  const c = new Own(host, runtime, [...runtimeFiles.values()], checked);
-  // (The fork runs these checks after checking each file; the API's checker
-  // answers questions in the order they are asked, and its diagnostics come
-  // from other checkers, so there is no checking a file first here.)
+  const own = new Own(host, runtime, [...runtimeFiles.values()], checked);
   for (const file of checked) host.prefetch(file);
-  for (const file of checked) {
-    checkOwnership(c, file);
-    computeConversions(c, file);
-    checkRefCounts(c, file);
-  }
+  return {host, own, files: checked, esModule, diagnostics};
+}
 
-  const byFile = new Map(checked.map(f => [f.fileName as string, f]));
-  for (const d of c.diagnostics) {
+// The diagnostics of a program, sorted, but for those a comment suppresses.
+export function finish(program: LoadedProgram): Diagnostic[] {
+  const diagnostics = [...program.diagnostics];
+  const byFile = new Map(program.files.map(f => [f.fileName as string, f]));
+  for (const d of program.own.diagnostics) {
     const file = byFile.get(d.file!);
     if (!file || !isSuppressed(file, d.start)) diagnostics.push(d);
   }
@@ -190,7 +217,7 @@ function optionDiagnostic(
 // A diagnostic of the API as the checker's, as tsc prints it plain: the message
 // and its chain, each link on a line of its own, indented, and no related
 // information.
-function fromApi(d: TsDiagnostic): Diagnostic {
+export function fromApi(d: TsDiagnostic): Diagnostic {
   const flatten = (d: TsDiagnostic, indent: number): string =>
     (indent ? '\n' + '  '.repeat(indent) : '') +
     d.text +
@@ -237,7 +264,7 @@ function isSuppressed(file: SourceFile, pos: number): boolean {
 }
 
 // compiler.SortAndDeduplicateDiagnostics: by file, position, code and message.
-function sortAndDeduplicate(diagnostics: Diagnostic[]): Diagnostic[] {
+export function sortAndDeduplicate(diagnostics: Diagnostic[]): Diagnostic[] {
   const sorted = [...diagnostics].sort(
     (a, b) =>
       compare(a.file ?? '', b.file ?? '') ||
