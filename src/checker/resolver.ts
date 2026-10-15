@@ -32,6 +32,7 @@ import {
   declaringFunction,
   isAmbientHandle,
   isChannelReceiveLoop,
+  isVarReinitialization,
   referencedVariable,
 } from './refcount.ts';
 import {
@@ -544,6 +545,12 @@ export class Resolver {
     if (!node) return false;
     const visit = (n: Node): boolean => {
       if (isTypeNode(n)) return false;
+      if (
+        n.kind === K.VariableDeclaration &&
+        isVarReinitialization(this.c, n) &&
+        this.c.host.symbolOfDeclaration(n) === symbol
+      )
+        return true;
       if (n.kind === K.Identifier)
         return (
           isAssignmentTarget(n) && this.c.host.resolvedSymbol(n) === symbol

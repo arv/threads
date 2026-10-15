@@ -221,6 +221,44 @@ export function referencedVariable(c: Own, id: Node): TsSymbol | undefined {
   return symbol;
 }
 
+// An initialized var declaration can replace the same function-scoped
+// binding more than once. let/const declarations in a loop are new bindings.
+export function isVarReinitialization(c: Own, decl: Node): boolean {
+  const list = decl.parent as Node;
+  if (
+    list.kind !== K.VariableDeclarationList ||
+    list.flags & (NodeFlags.Let | NodeFlags.Const)
+  )
+    return false;
+  const statement = list.parent as Node;
+  if (
+    !decl.initializer &&
+    statement.kind !== K.ForOfStatement &&
+    statement.kind !== K.ForInStatement
+  )
+    return false;
+  const symbol = c.host.symbolOfDeclaration(decl);
+  if (symbol && c.host.valueDeclaration(symbol) !== decl) return true;
+  let child = list;
+  for (
+    let parent: Node | undefined = statement;
+    parent &&
+    !isFunctionLikeDeclaration(parent) &&
+    parent.kind !== K.SourceFile;
+    child = parent, parent = parent.parent as Node | undefined
+  ) {
+    if (
+      parent.kind === K.ForOfStatement ||
+      parent.kind === K.ForInStatement ||
+      parent.kind === K.WhileStatement ||
+      parent.kind === K.DoStatement ||
+      (parent.kind === K.ForStatement && parent.initializer !== child)
+    )
+      return true;
+  }
+  return false;
+}
+
 // The counted variables that functions other than the declaring one refer to,
 // and the references from methods and classes (getOwnCaptureInfo).
 export function getCaptureInfo(c: Own, file: SourceFile): CaptureInfo {
@@ -577,6 +615,17 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
   const visit = (node: Node): boolean => {
     if (isTypeNode(node)) return false;
     switch (node.kind) {
+      case K.VariableDeclaration: {
+        if (!isVarReinitialization(c, node)) break;
+        const symbol = host.symbolOfDeclaration(node);
+        if (
+          symbol &&
+          info.captured.has(symbol) &&
+          isCellType(c, host.typeOfSymbol(symbol))
+        )
+          c.error(node.name, Messages.CapturedReassigned, node.name.text);
+        break;
+      }
       case K.Identifier:
         if (getAssignmentTarget(node)) {
           const symbol = referencedVariable(c, node);

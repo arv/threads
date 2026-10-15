@@ -82,6 +82,7 @@ import {Count, Local} from './resolver.ts';
 import type {AtomicCall, Resolver, StructCall} from './resolver.ts';
 import {
   forEachChild,
+  getContainingFunction,
   isAssignmentOperator,
   isAssignmentTarget,
   isClassExtends,
@@ -220,6 +221,20 @@ class Lowering {
   // the var scopes of the functions being visited, innermost last
   private readonly scopes: Scope[] = [];
   private readonly starts = new Map<Node, number>();
+  // Forward captures wait in the captured binding's lexical scope until it
+  // initializes. null means initialized; closures created later hold at once.
+  private readonly forwardCaptures = new Set<Node>();
+  private readonly captureQueues = new Map<Node, string>();
+  private readonly parameterQueues = new Map<Node, Node[]>();
+  // Owned var bindings belong to the function, including declarations in loops.
+  private readonly functionVars = new Map<Node, Node[]>();
+  private readonly hoistedVars = new Set<Node>();
+  // for-let bindings stay in the head. A separate owner tracks their current
+  // count across iterations and is available to the enclosing finally.
+  private readonly loopOwners = new Map<
+    number,
+    {temp: Temp; fn: Node | undefined}
+  >();
 
   constructor(r: Resolver, file: Node, options: TransformOptions) {
     this.r = r;
@@ -232,6 +247,19 @@ class Lowering {
     const file = this.file;
     if (!this.usesRuntime()) return [];
     this.fileIdentifiers = this.identifiers();
+    const findForward = (node: Node): void => {
+      if (isErased(node)) return;
+      if (isFunctionLikeDeclaration(node))
+        for (const decl of this.r.captures(node))
+          if (
+            (node.kind === K.FunctionDeclaration &&
+              decl.kind !== K.Parameter) ||
+            node.pos < decl.end
+          )
+            this.forwardCaptures.add(decl);
+      forEachChild(node, findForward);
+    };
+    findForward(file);
     const fileScope: Scope = {temps: []};
     this.scopes.push(fileScope);
     // the source file's statements, each visited (as VisitEachChild does: no
@@ -566,12 +594,26 @@ class Lowering {
         return this.visitForStatement(node, undefined);
       case K.ForInStatement:
       case K.ForOfStatement: {
-        const initializer = this.visit(node.initializer);
+        const decl =
+          node.initializer.kind === K.VariableDeclarationList
+            ? (node.initializer.declarations[0] as Node | undefined)
+            : undefined;
+        const temp =
+          decl && this.hoistedVars.has(decl) ? this.newTemp() : undefined;
+        const initializer = temp
+          ? gen(Prec.Primary, ['var ', tempRef(temp)])
+          : this.visit(node.initializer);
         const expression = this.fullExpression(node.expression, Ctx.AtOnce);
+        let body = this.visitLoopBody(node.statement, node);
+        if (temp)
+          body = this.replaceBody(node.statement, body, [
+            exprStatement(this.replaceLocal(decl!.name, tempRef(temp), false)),
+            ...(this.blockStatements(body, node.statement) ?? [body]),
+          ]);
         return this.update(node, [
           [node.initializer, initializer],
           [node.expression, expression],
-          [node.statement, this.visitLoopBody(node.statement, node)],
+          [node.statement, body],
         ]);
       }
       case K.LabeledStatement: {
@@ -591,6 +633,28 @@ class Lowering {
         if (loop && this.r.isQuiescentLoop(loop))
           return statements([this.quiescent(), this.visitEachChild(node)]);
         break;
+      }
+      case K.VariableStatement: {
+        const decls = node.declarationList.declarations as Node[];
+        if (!decls.some(d => this.captureQueues.has(d))) break;
+        // Finish each binding before the next initializer (which may call a
+        // closure capturing it), even in a multi-declaration statement.
+        const keyword =
+          node.declarationList.flags & NodeFlags.Const
+            ? 'const'
+            : node.declarationList.flags & NodeFlags.Let
+              ? 'let'
+              : 'var';
+        return statements(
+          decls.flatMap(decl => [
+            gen(Prec.Primary, [
+              `\n${keyword} `,
+              this.visitVariableDeclaration(decl),
+              ';',
+            ]),
+            ...this.finishCapture(decl),
+          ]),
+        );
       }
       case K.VariableDeclarationList:
         return this.visitVariableDeclarationList(node);
@@ -668,7 +732,10 @@ class Lowering {
         const scoped =
           isFunctionLikeDeclaration(node) ||
           node.kind === K.ClassStaticBlockDeclaration;
-        if (scoped) this.pushScope();
+        if (scoped) {
+          this.pushScope();
+          this.prepareParameters(node);
+        }
         const result = this.visitEachChild(node);
         if (scoped) this.popScope();
         this.popFrame();
@@ -757,7 +824,14 @@ class Lowering {
           return this.visit(node.arguments[0], ctx);
         }
     }
-    const count = this.r.rawCount(node);
+    let count = this.r.rawCount(node);
+    // The loop's outer owner releases its count; a return retains it.
+    if (
+      node.kind === K.Identifier &&
+      this.loopOwner(node) &&
+      count === Count.OwnedLocal
+    )
+      count = Count.Stable;
     switch (node.kind) {
       case K.ConditionalExpression:
         return this.visitConditional(node, count, ctx);
@@ -988,14 +1062,23 @@ class Lowering {
       local === Local.Module
         ? Ctx.Take
         : Ctx.AtOnce;
-    const initializer = this.fullExpression(node.initializer, ctx);
+    let initializer = this.fullExpression(node.initializer, ctx);
+    if (initializer && this.hoistedVars.has(node))
+      initializer = this.replaceLocal(node.name, initializer, true);
+    const owner = this.loopOwner(node.name);
+    if (initializer && owner)
+      initializer = paren(this.assign(tempRef(owner), initializer));
     const name = this.visit(node.name);
     const edits: Edit[] = [];
     if (!isIdentity(name, node.name)) edits.push(this.editOf(node.name, name));
     if (initializer) {
       if (!isIdentity(initializer, node.initializer))
         edits.push(this.editOf(node.initializer, initializer));
-    } else if (local !== Local.None && !inForInOrOf) {
+    } else if (
+      local !== Local.None &&
+      !inForInOrOf &&
+      !this.hoistedVars.has(node)
+    ) {
       edits.push({start: node.end, end: node.end, ir: raw(' = 0')});
     }
     return this.src(node, edits);
@@ -1004,6 +1087,23 @@ class Lowering {
   // `const` becomes `let` when a return moves an owned local's count out.
   private visitVariableDeclarationList(node: Node): Ir {
     const result = this.visitEachChild(node) as Src;
+    if (node.parent?.kind === K.ForStatement) {
+      for (const decl of node.declarations as Node[]) {
+        const queue = this.captureQueues.get(decl);
+        if (!queue) continue;
+        const fn = this.freshName('__closure');
+        const done = this.freshName('__held');
+        result.edits.push({
+          start: decl.end,
+          end: decl.end,
+          ir: gen(Prec.Primary, [
+            `, ${done} = (${queue}?.forEach(${fn} => `,
+            this.call('__capture', raw(fn), this.name(decl.name)),
+            `), ${queue} = null)`,
+          ]),
+        });
+      }
+    }
     if (!(node.flags & NodeFlags.Const)) return result;
     for (const decl of node.declarations as Node[]) {
       if (this.r.local(decl) === Local.OwnedMoved) {
@@ -1183,10 +1283,18 @@ class Lowering {
   // parameters' names, which the body releases.
   private functionPrologue(fn: Node): PrologueEntry[] {
     const entries: PrologueEntry[] = [];
+    for (const param of this.parameterQueues.get(fn) ?? [])
+      entries.push({ir: this.queueDeclaration(param), mayThrow: false});
     const prologue = {
       push: (ir: Ir, mayThrow = true) => entries.push({ir, mayThrow}),
     };
-    for (const param of fn.parameters as Node[]) {
+    for (const [index, param] of (fn.parameters as Node[]).entries()) {
+      // Delay the preceding parameter's flush until its prologue entry has
+      // acquired a count and guarded() can release it if a later default throws.
+      const previous = index - 1;
+      if (previous >= 0)
+        for (const ir of this.finishCapture(fn.parameters[previous]))
+          prologue.push(ir);
       const name = param.name as Node;
       const moved = this.movedPatterns.get(param);
       if (moved) {
@@ -1255,6 +1363,8 @@ class Lowering {
             );
       }
     }
+    const last = (fn.parameters as Node[]).at(-1);
+    if (last) for (const ir of this.finishCapture(last)) prologue.push(ir);
     return entries;
   }
 
@@ -1290,6 +1400,15 @@ class Lowering {
         parent.kind === K.ClassStaticBlockDeclaration) &&
       parent.body === node;
     const moving = isBody && this.movingDefaults.has(parent!);
+    const vars = isBody ? this.prepareVars(node) : [];
+    const queues: Node[] = [];
+    for (const statement of list) {
+      if (statement.kind !== K.VariableStatement) continue;
+      for (const decl of statement.declarationList.declarations as Node[])
+        if (!this.hoistedVars.has(decl) && this.prepareQueue(decl))
+          queues.push(decl);
+    }
+    for (const decl of vars) if (this.prepareQueue(decl)) queues.push(decl);
     if (isBody && isFunctionLikeDeclaration(parent))
       prologue = this.functionPrologue(parent!);
     if (moving) this.renameShadowingVars(parent!, node);
@@ -1305,6 +1424,13 @@ class Lowering {
     // own, so that its declarations neither shadow what they read nor put
     // it in their temporal dead zone
     if (moving && this.bodyShadows(parent!, list)) result = [block(result)];
+    if (vars.length > 0)
+      result = [
+        this.tryFinally(
+          result,
+          vars.map(d => d.name),
+        ),
+      ];
     // the whole body is in the try, its function declarations in place
     // (the fork moves them ahead of it)
     result = this.guarded(prologue, result);
@@ -1314,6 +1440,15 @@ class Lowering {
       const scope = this.scopes[this.scopes.length - 1]!;
       head.push(varsStatement(scope));
     }
+    head.push(...queues.map(d => this.queueDeclaration(d)));
+    if (vars.length > 0)
+      head.push(
+        gen(Prec.Primary, [
+          '\nvar ',
+          ...vars.flatMap((d, i) => [i ? ', ' : '', this.name(d.name), ' = 0']),
+          ';',
+        ]),
+      );
     result = [...head, ...result];
     return this.withStatements(node, node.statements, result, []);
   }
@@ -1461,6 +1596,7 @@ class Lowering {
                 ';',
               ]),
             );
+          statements.push(...this.finishCapture(decl));
         }
       }
       statements.push(...(holds.get(i) ?? []));
@@ -1483,7 +1619,10 @@ class Lowering {
     const owned: Node[] = [];
     for (const decl of list.declarations as Node[]) {
       const local = this.r.local(decl);
-      if (local === Local.Owned || local === Local.OwnedMoved)
+      if (
+        (local === Local.Owned || local === Local.OwnedMoved) &&
+        !this.hoistedVars.has(decl)
+      )
         owned.push(decl.name);
     }
     return owned;
@@ -1495,6 +1634,13 @@ class Lowering {
   // among the statements.
   private holdStatements(list: Node[]): Map<number, Ir[]> {
     const holds = new Map<number, Ir[]>();
+    const initialized = new Set<Node>(
+      list.flatMap(s =>
+        s.kind === K.VariableStatement
+          ? (s.declarationList.declarations as Node[])
+          : [],
+      ),
+    );
     for (const statement of list) {
       if (statement.kind !== K.FunctionDeclaration || !statement.name) continue;
       const captures = this.r.captures(statement);
@@ -1505,13 +1651,126 @@ class Lowering {
         for (const decl of s.declarationList.declarations as Node[])
           if (captures.includes(decl)) after = Math.max(after, i);
       });
-      const args: Ir[] = [this.name(statement.name)];
-      for (const decl of captures) args.push(this.name(decl.name));
       const held = holds.get(after) ?? [];
-      held.push(exprStatement(this.call('__capture', ...args)));
+      held.push(
+        exprStatement(
+          this.holdClosure(this.name(statement.name), captures, initialized),
+        ),
+      );
       holds.set(after, held);
     }
     return holds;
+  }
+
+  private freshName(base: string): string {
+    let name = base;
+    for (let i = 1; this.fileIdentifiers.has(name); i++) name = `${base}_${i}`;
+    this.fileIdentifiers.add(name);
+    return name;
+  }
+
+  private prepareQueue(decl: Node): boolean {
+    if (!this.forwardCaptures.has(decl) || this.captureQueues.has(decl))
+      return false;
+    this.captureQueues.set(decl, this.freshName('__holds'));
+    return true;
+  }
+
+  private prepareParameters(fn: Node): void {
+    const queued =
+      (fn.parameters as Node[] | undefined)?.filter(p =>
+        this.prepareQueue(p),
+      ) ?? [];
+    if (queued.length) this.parameterQueues.set(fn, queued);
+  }
+
+  private queueDeclaration(decl: Node): Ir {
+    return raw(`\nlet ${this.captureQueues.get(decl)!} = [];`);
+  }
+
+  private finishCapture(decl: Node): Ir[] {
+    const queue = this.captureQueues.get(decl);
+    if (!queue) return [];
+    const fn = this.freshName('__closure');
+    return [
+      gen(Prec.Primary, [
+        `\nif (${queue} !== null) for (const ${fn} of ${queue}) `,
+        exprStatement(this.call('__capture', raw(fn), this.name(decl.name))),
+        `\n${queue} = null;`,
+      ]),
+    ];
+  }
+
+  private holdClosure(
+    fn: Ir,
+    captures: Node[],
+    initialized = new Set<Node>(),
+  ): Ir {
+    const pending = captures.filter(
+      d => this.captureQueues.has(d) && !initialized.has(d),
+    );
+    const ready = captures.filter(d => !pending.includes(d));
+    const result = ready.length
+      ? this.call('__capture', fn, ...ready.map(d => this.name(d.name)))
+      : fn;
+    if (!pending.length) return result;
+    const temp = tempRef(this.newTemp());
+    const parts = [this.assign(temp, result)];
+    for (const decl of pending) {
+      const queue = this.captureQueues.get(decl)!;
+      parts.push(
+        cond(
+          binary(raw(queue), '===', raw('null')),
+          this.call('__capture', temp, this.name(decl.name)),
+          call(raw(`${queue}.push`, Prec.Member), [temp]),
+        ),
+      );
+    }
+    parts.push(temp);
+    return paren(comma(parts));
+  }
+
+  private symbolId(name: Node): number {
+    const host = this.r.c.host;
+    const symbol = isDeclarationName(name)
+      ? host.symbolOfDeclaration(name.parent as Node)
+      : host.resolvedSymbol(name);
+    return symbol ? host.symbolId(symbol) : -1;
+  }
+
+  private loopOwner(name: Node): Temp | undefined {
+    if (name.kind !== K.Identifier) return undefined;
+    const owner = this.loopOwners.get(this.symbolId(name));
+    return owner?.fn === getContainingFunction(name) ? owner?.temp : undefined;
+  }
+
+  private prepareVars(body: Node): Node[] {
+    const cached = this.functionVars.get(body);
+    if (cached) return cached;
+    const vars: Node[] = [];
+    const symbols = new Set<number>();
+    const visit = (node: Node): void => {
+      if (isErased(node) || isFunctionLike(node) || isClassLike(node)) return;
+      if (
+        node.kind === K.VariableDeclarationList &&
+        !(node.flags & (NodeFlags.Let | NodeFlags.Const))
+      ) {
+        for (const decl of node.declarations as Node[]) {
+          const local = this.r.local(decl);
+          if (local !== Local.Owned && local !== Local.OwnedMoved) continue;
+          this.hoistedVars.add(decl);
+          const id = this.symbolId(decl.name);
+          if (!symbols.has(id)) {
+            symbols.add(id);
+            vars.push(decl);
+          }
+        }
+      }
+      forEachChild(node, visit);
+    };
+    forEachChild(body, visit);
+    this.functionVars.set(body, vars);
+    return vars;
   }
 
   private releases(owned: Node[]): Ir[] {
@@ -1538,11 +1797,22 @@ class Lowering {
     return this.ownedLocalsOfList(init);
   }
 
-  // `for (init; cond; update) body`. Owned locals declared in the head move
-  // out of the loop, which is wrapped in `try { ... } finally { ... }`.
-  // label: the outermost of the loop's labels.
+  // Keep the original for head so JavaScript creates per-iteration let
+  // environments. Owners outside it track counts, including on abrupt exits.
   private visitForStatement(node: Node, label: Node | undefined): Ir {
+    const queues: Node[] = [];
+    if (node.initializer?.kind === K.VariableDeclarationList)
+      for (const decl of node.initializer.declarations as Node[])
+        if (this.prepareQueue(decl)) queues.push(decl);
     const owned = this.ownedLocalsOfFor(node);
+    const owners = owned.map(name => {
+      const temp = this.newTemp();
+      this.loopOwners.set(this.symbolId(name), {
+        temp,
+        fn: getContainingFunction(node),
+      });
+      return temp;
+    });
     const init = node.initializer as Node | undefined;
     const initializer =
       init && init.kind === K.VariableDeclarationList
@@ -1551,33 +1821,31 @@ class Lowering {
     const condition = this.fullExpression(node.condition, Ctx.AtOnce);
     const incrementor = this.fullExpression(node.incrementor, Ctx.Discard);
     const body = this.visitLoopBody(node.statement, node);
-    if (owned.length === 0)
-      return this.update(node, [
-        [init, initializer],
-        [node.condition, condition],
-        [node.incrementor, incrementor],
-        [node.statement, body],
-      ]);
-    // the loop without its initializer
-    const loopEdits: Edit[] = [
-      {start: this.startOf(init!), end: init!.end, ir: raw('')},
-    ];
-    for (const [child, ir] of [
+    for (const name of owned) this.loopOwners.delete(this.symbolId(name));
+    let loop = this.update(node, [
+      [init, initializer],
       [node.condition, condition],
       [node.incrementor, incrementor],
       [node.statement, body],
-    ] as [Node | undefined, Ir | undefined][]) {
-      if (child && ir && !isIdentity(ir, child))
-        loopEdits.push(this.editOf(child, ir));
-    }
-    let loop: Ir = this.src(node, loopEdits);
-    if (label)
-      loop = this.src(label, [
-        {start: this.startOf(node), end: node.end, ir: loop},
-      ]);
-    // the declarations, copied ahead of the loop
-    const declarations = gen(Prec.Primary, ['\n', copyOf(initializer!), ';']);
-    return block([declarations, this.tryFinally([loop], owned)]);
+    ]);
+    if (label) loop = this.src(label, [this.editOf(node, loop)]);
+    if (owners.length === 0)
+      return queues.length
+        ? block([...queues.map(d => this.queueDeclaration(d)), loop])
+        : loop;
+    return block([
+      ...queues.map(d => this.queueDeclaration(d)),
+      ...owners.map(t => exprStatement(this.assign(tempRef(t), num(0)))),
+      gen(Prec.Primary, [
+        '\ntry {',
+        loop,
+        '\n} finally {',
+        ...[...owners]
+          .reverse()
+          .map(t => exprStatement(this.call('__release', tempRef(t)))),
+        '\n}',
+      ]),
+    ]);
   }
 
   // A loop's body. A for-of variable that owns each value (received from a
@@ -1647,6 +1915,7 @@ class Lowering {
   private visitClosure(node: Node): Ir {
     this.pushFrame(null);
     const scope = this.pushScope();
+    this.prepareParameters(node);
     let result = this.visitEachChild(node) as Src;
     this.popScope();
     this.popFrame();
@@ -1657,9 +1926,7 @@ class Lowering {
     }
     const captures = this.r.captures(node);
     if (captures.length === 0) return result;
-    const args: Ir[] = [result];
-    for (const decl of captures) args.push(this.name(decl.name));
-    return this.call('__capture', ...args);
+    return this.holdClosure(result, captures);
   }
 
   // An arrow function whose concise body becomes `{ var _a; return E; }`
@@ -1936,16 +2203,8 @@ class Lowering {
   // released, `_t = x, x = E', __release(_t)`. `x ||= E` is `x || (x = E')`.
   private lowerLocalAssignment(node: Node, x: Node, ctx: Ctx): Ir | undefined {
     const operator = node.operatorToken.kind;
-    const replace = (value: Ir, keepValue: boolean): Ir => {
-      const old = this.newTemp();
-      const list = [
-        this.assign(tempRef(old), this.name(x)),
-        this.assign(this.name(x), value),
-        this.call('__release', tempRef(old)),
-      ];
-      if (keepValue) list.push(this.name(x));
-      return comma(list);
-    };
+    const replace = (value: Ir, keepValue: boolean): Ir =>
+      this.replaceLocal(x, value, keepValue);
     switch (operator) {
       case K.EqualsToken: {
         let result = replace(
@@ -1960,10 +2219,16 @@ class Lowering {
         this.conditional++;
         const value = this.visitIn(node.right, Ctx.Take)!;
         this.conditional--;
+        const owner = this.loopOwner(x);
         return binary(
           this.name(x),
           '||',
-          paren(this.assign(this.name(x), value)),
+          paren(
+            this.assign(
+              this.name(x),
+              owner ? this.assign(tempRef(owner), value) : value,
+            ),
+          ),
         );
       }
       case K.AmpersandAmpersandEqualsToken: {
@@ -1974,6 +2239,19 @@ class Lowering {
       }
     }
     return undefined;
+  }
+
+  private replaceLocal(x: Node, value: Ir, keepValue: boolean): Ir {
+    const old = this.newTemp();
+    const owner = this.loopOwner(x);
+    const next = owner ? this.assign(tempRef(owner), value) : value;
+    const list = [
+      this.assign(tempRef(old), this.name(x)),
+      this.assign(this.name(x), next),
+      this.call('__release', tempRef(old)),
+    ];
+    if (keepValue) list.push(this.name(x));
+    return comma(list);
   }
 
   // An assignment to a string field or element, or a channel field, whose
@@ -2143,7 +2421,11 @@ class Lowering {
       if (cell.kind === CellKind.Struct) {
         const k = cell.fields.indexOf(name);
         if (k < 0) return undefined;
-        let object = this.visitIn(node.expression, objectContext)!;
+        let object = this.receiver(
+          node.expression,
+          objectContext,
+          value ? [value] : [],
+        );
         if (isGen(object) && object.tag?.t === 'binary') object = paren(object);
         const word = () =>
           binary(paren(binary(object, '>>', num(2))), '+', num(2 + 2 * k));
@@ -2205,13 +2487,20 @@ class Lowering {
     const {view, at} = access;
     const read = isRead ? access.read : (e: Ir) => e;
     if (this.r.isElementAccessInBounds(node)) {
-      const a = this.visitIn(node.expression, objectContext)!;
+      const a = this.receiver(
+        node.expression,
+        objectContext,
+        value ? [value] : [],
+      );
       const i = this.visit(node.argumentExpression);
       return read(view(at(a, i)));
     }
     const temps: Ir[] = [];
     const a = this.copiable(
-      this.receiver(node.expression, objectContext, [node.argumentExpression]),
+      this.receiver(node.expression, objectContext, [
+        node.argumentExpression,
+        ...(value ? [value] : []),
+      ]),
       temps,
     );
     const i = this.copiable(this.visit(node.argumentExpression), temps);
@@ -2295,12 +2584,8 @@ class Lowering {
   // after the index).
   private receiver(object: Node, ctx: Ctx, after: Node[]): Ir {
     const ir = this.visitIn(object, ctx)!;
-    const id = skipParentheses(object);
-    if (
-      id.kind !== K.Identifier ||
-      !isSimpleCopiable(ir) ||
-      !after.some(n => this.r.assignsIn(n, id))
-    )
+    const id = skipOuterExpressions(object, OEK.All);
+    if (id.kind !== K.Identifier || !after.some(n => this.r.assignsIn(n, id)))
       return ir;
     // no full expression around to release it after: a plain copy
     if (!this.frames[this.frames.length - 1]) {

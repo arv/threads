@@ -200,6 +200,35 @@ describe('compile, where the fork does not', () => {
     expect(fixes).toContain('__newSharedArray((calls++, Number, 8), n)');
   });
 
+  // The fork comparison harness was removed in #62. Keep its new known
+  // differences here, with executable counterparts in test/run/moved.ts.
+  it('releases a nested var at function exit', () => {
+    expect(fixes).toMatch(
+      /function functionVar\(\) \{\n\tvar [^\n]+;\n\tvar p = 0;\n\ttry \{/,
+    );
+    expect(fixes).toMatch(/finally \{\n\t\t__release\(p\);\n\t\}\n\}/);
+  });
+
+  it('holds forward captures only after initialization, in locals and defaults', () => {
+    expect(fixes).toContain('const get = (_a = () => __F64[(p >> 3) + 1]');
+    expect(fixes).toMatch(
+      /for \(const __closure[^ ]* of __holds[^)]*\) __capture\(__closure[^,]*, p\)/,
+    );
+    expect(fixes).toContain('export function forwardParameter(get, p)');
+  });
+
+  it('holds an assignment receiver while the right side replaces it', () => {
+    expect(fixes).toContain('__F64[((_a = __retain(p)) >> 3) + 1] =');
+    expect(fixes).toContain('__release(_a);');
+  });
+
+  it('keeps owned let declarations in the loop head', () => {
+    expect(fixes).toContain(
+      'for (let p = _a = __newStruct(Node), i = 0; i < 2; i++)',
+    );
+    expect(fixes).toContain('finally {\n\t\t\t__release(_a);');
+  });
+
   it('puts the import on a line of its own after a directive', () => {
     for (const eol of ['\n', '\r\n']) {
       const dir = project({'app.ts': `"use client"${eol}${APP}`});
@@ -278,7 +307,7 @@ describe('compile, where the fork does not', () => {
 });
 
 describe('what the lowering moves, as it runs', () => {
-  it('runs defaults in order, reads what they read, keeps functions and closures with their bindings, frees field initializers, and releases what a throwing default leaves', () => {
+  it('preserves defaults, scopes, captures, assignment receivers and loop bindings, and releases their owners', () => {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-moved-'));
     dirs.push(out);
     const compiled = spawnSync(
@@ -310,7 +339,7 @@ describe('what the lowering moves, as it runs', () => {
       {encoding: 'utf8', timeout: 60_000},
     );
     expect(r.stdout.trim(), r.stderr).toBe(
-      '[0,true,2,1,6,6,10,"object",1,4,10,"Error",1,1,7,2,1] blocks left 0',
+      '[0,true,2,1,6,6,10,"object",11,13,17,19,29,41,[20,21],[0,1],1,4,10,"Error",1,1,7,2,1,7,0,2,31,37,0,6,0,23] blocks left 0',
     );
   }, 60_000);
 
