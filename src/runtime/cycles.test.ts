@@ -235,3 +235,28 @@ describe('a collection', () => {
     own.release(p);
   });
 });
+
+describe('a pool reset', () => {
+  // runs last: the reset leaves this thread on a pool that was stopped
+  it('forgets a waiter of the pool before it, which may wake late', async () => {
+    const I32 = runtime.I32,
+      NEXT_TID = 4,
+      WAKING_2 = 2048 + 2 * 8 + 3; // thread 2's entry: [alive][free][awake][waking]
+    // thread 2, a worker of the old pool, waits for a collection to end
+    if (I32[NEXT_TID] <= 2) I32[NEXT_TID] = 3;
+    I32[WAKING_2] = 1;
+    const before = live();
+    own.release(ring(3));
+    // a collection lets it wake first: it never does, and this one gives up
+    expect(own.collectCycles(50)).toBe(0);
+    // the pool stops and starts again: thread 2 is the old pool's
+    expect(await runtime.resetPool(globalThis.__escapeSab!)).toBe(true);
+    expect(I32[WAKING_2]).toBe(0);
+    expect(own.collectCycles()).toBe(3);
+    // thread 2 wakes late, and clears its own mark: nothing else changes
+    I32[WAKING_2] = 0;
+    own.release(ring(2));
+    expect(own.collectCycles()).toBe(2);
+    expect(live()).toBe(before);
+  });
+});

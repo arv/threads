@@ -29,10 +29,7 @@ const C_PEND = 19,
 // the thread table entry of the thread that collects cycles, 0 when none does
 // (see $collectCycles)
 const C_GC = 23;
-// threads waiting for a collection to end, so that they may wake: the next
-// collection lets them first (see wake). words 23 and 24 were free (a select
-// waits on its own channels: chan.ts)
-const C_WAKING = 24;
+// word 24 is free (a select waits on its own channels: chan.ts)
 const C_AQ_LOCK = 25,
   C_AQ_HEAD = 26,
   C_AQ_TAIL = 27,
@@ -60,6 +57,7 @@ const C_THREADS = 2048,
 const T_ALIVE = 0,
   T_FREE = 1, // given back by a worker that left (see freeTid)
   T_AWAKE = 2, // the worker may change counts (see wake)
+  T_WAKING = 3, // the worker waits for a collection to end, to wake
   T_QS = 5,
   T_HOST = 6,
   T_BELL = 7;
@@ -751,9 +749,11 @@ let awakeAt = 0; // the entry this worker is awake on, 0 when asleep
 // a pool worker stays awake between threads (see poolLoop): what it does there
 // changes counts too
 let pooled = false;
-// one that waits for a collection to end is counted in C_WAKING meanwhile: a
-// collector that collects again at once would else take C_GC back before the
-// thread sees it free, and the thread would never wake
+// one that waits for a collection to end marks its entry waking meanwhile
+// (T_WAKING): a collector that collects again at once would else take C_GC back
+// before the thread sees it free, and the thread would never wake. a mark of
+// its own entry, not a count: a worker of a pool that was reset (resetPool
+// clears the marks) that wakes late clears its own, and changes no other's
 function wake(e: number) {
   if (awakeAt === e) return;
   let waiting = false;
@@ -761,7 +761,7 @@ function wake(e: number) {
     for (let g; (g = Atomics.load(I32, C_GC)) !== 0 && g !== e;) {
       if (!waiting) {
         waiting = true;
-        Atomics.add(I32, C_WAKING, 1);
+        Atomics.store(I32, e + T_WAKING, 1);
         continue; // C_GC again: the collection may have ended meanwhile
       }
       if (CAN_BLOCK) Atomics.wait(I32, C_GC, g);
@@ -772,8 +772,18 @@ function wake(e: number) {
     Atomics.store(I32, e + T_AWAKE, 0);
   }
   awakeAt = e;
-  if (waiting && Atomics.sub(I32, C_WAKING, 1) === 1)
-    Atomics.notify(I32, C_WAKING);
+  if (waiting) {
+    Atomics.store(I32, e + T_WAKING, 0);
+    Atomics.notify(I32, e + T_WAKING);
+  }
+}
+// an entry other than this thread's marked waking, else 0
+function waking() {
+  for (let t = 1, n = Atomics.load(I32, C_NEXT_TID); t < n; t++) {
+    const e = C_THREADS + t * T_ENTRY;
+    if (e !== ME && Atomics.load(I32, e + T_WAKING) === 1) return e;
+  }
+  return 0;
 }
 function asleep() {
   const e = awakeAt;
@@ -823,11 +833,11 @@ export function $collectCycles(scan: () => number, timeout = 1000) {
   // again does not stop the others for good. this one waits asleep, as
   // another collection may start meanwhile, and wait for it
   const until = performance.now() + timeout;
-  while (Atomics.load(I32, C_WAKING) !== 0) {
+  while (waking() !== 0) {
     $waitBegin();
-    for (let n; (n = Atomics.load(I32, C_WAKING)) !== 0;) {
+    for (let e; (e = waking()) !== 0;) {
       if (performance.now() > until) break;
-      if (CAN_BLOCK) Atomics.wait(I32, C_WAKING, n, 1);
+      if (CAN_BLOCK) Atomics.wait(I32, e + T_WAKING, 1, 1);
     }
     $waitEnd();
     if (performance.now() > until) return 0;
@@ -2074,9 +2084,8 @@ export async function resetPool(sab: SharedArrayBuffer) {
     C_HOSTS,
     C_DRAFTS,
     // a collection by a worker that was terminated in it: the page, which
-    // wakes next, would spin for good. and the threads that waited for one
+    // wakes next, would spin for good
     C_GC,
-    C_WAKING,
   ])
     Atomics.store(i32, c, 0);
   Atomics.notify(i32, C_GC);
@@ -2092,6 +2101,9 @@ export async function resetPool(sab: SharedArrayBuffer) {
     // asleep, for a collection: a worker that was terminated awake never
     // marks itself asleep, and one that runs on leaves
     Atomics.store(i32, e + T_AWAKE, 0);
+    // and not waiting to wake: one that does so after the reset clears its
+    // own mark (see wake), and one terminated waiting never would
+    Atomics.store(i32, e + T_WAKING, 0);
     if (late) Atomics.store(i32, e + T_ALIVE, 0);
   }
   // a worker of the old pool that still waits for work (see stale) leaves now
