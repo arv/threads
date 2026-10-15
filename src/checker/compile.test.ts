@@ -366,6 +366,148 @@ describe('what the lowering moves, as it runs', () => {
   });
 });
 
+describe('counting lowering review regressions', () => {
+  const cases = [
+    {
+      name: 'moves a returned const after splitting a queued declaration',
+      source: `function f(): P {
+        const get = () => p.x, p = new P(), q = new P();
+        q.x = 43;
+        get();
+        return q;
+      }
+      export function main() { log(f().x); }`,
+      expected: '43',
+    },
+    {
+      name: 'declares local capture queues when a default is lowered again',
+      source: `function f(make = () => {
+        const get = () => p.x;
+        const p = new P();
+        p.x = 47;
+        return get;
+      }, q: P = new P()) {
+        q.x = 1;
+        return make();
+      }
+      export function main() { log(f()()); }`,
+      expected: '47',
+    },
+    {
+      name: 'declares parameter capture queues when a default is lowered again',
+      source: `function f(make = (get = () => p.x, p: P = new P()) => {
+        p.x = 53;
+        return get;
+      }, q: P = new P()) {
+        q.x = 1;
+        return make();
+      }
+      export function main() { log(f()()); }`,
+      expected: '53',
+    },
+    {
+      name: 'declares loop capture queues when a default is lowered again',
+      source: `function f(make = () => {
+        for (let get = () => p.x, p = new P();;) {
+          p.x = 59;
+          return get;
+        }
+      }, q: P = new P()) {
+        q.x = 1;
+        return make();
+      }
+      export function main() { log(f()()); }`,
+      expected: '59',
+    },
+    {
+      name: 'reuses an owned parameter for var redeclarations',
+      source: `function f(p: P): number {
+        const x = p.x;
+        var p = new P();
+        p.x = 99;
+        return x;
+      }
+      export function main() {
+        const p = new P();
+        p.x = 61;
+        const before = heapStats();
+        const result = f(p);
+        const after = heapStats();
+        log(JSON.stringify([result, p.x,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[61,61,0]',
+    },
+    {
+      name: 'reuses a default parameter owner when a var moves out',
+      source: `function f(p: P = new P()): P {
+        p.x = 67;
+        const x = p.x;
+        var p = new P();
+        p.x = x;
+        return p;
+      }
+      export function main() {
+        const before = heapStats();
+        const result = f().x;
+        const after = heapStats();
+        log(JSON.stringify([result,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[67,0]',
+    },
+    {
+      name: 'keeps nested labels on a borrowed for head with a capture queue',
+      source: `function f(source: P): number {
+        let n = 0;
+        outer: inner: for (let get = () => p.x, p = source, i = 0; i < 2; i++) {
+          n += get();
+          continue outer;
+        }
+        return n;
+      }
+      export function main() {
+        const p = new P();
+        p.x = 31;
+        log(f(p));
+      }`,
+      expected: '62',
+    },
+  ];
+  it.each(cases)(
+    '$name',
+    ({source, expected}) => {
+      const dir = project(
+        {
+          'app.ts': `import {f64, heapStats, log, struct, type Struct} from '@arv/threads';
+        const P = struct({x: f64});
+        type P = Struct<typeof P>;
+        ${source}`,
+        },
+        {paths: {'@arv/threads': [runtimeTypes]}},
+      );
+      const result = compile(path.join(dir, 'tsconfig.json'), {
+        runtime: '@arv/threads',
+        api,
+        check: true,
+        types: true,
+      });
+      expect(result.diagnostics).toEqual([]);
+      expect(result.typeDiagnostics).toEqual([]);
+      const file = path.join(dir, 'app.js');
+      fs.writeFileSync(file, toJavaScript(result.files[0]!).code);
+      const r = spawnSync(
+        process.execPath,
+        [path.join(checker, '../run.ts'), file, '--threads=1', '--pool=0'],
+        {encoding: 'utf8', timeout: 60_000},
+      );
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout.trim(), r.stderr).toBe(expected);
+    },
+    60_000,
+  );
+});
+
 describe('threads-check compile', () => {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-compile-'));
   afterAll(() => fs.rmSync(out, {recursive: true, force: true}));

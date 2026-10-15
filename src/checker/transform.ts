@@ -621,10 +621,8 @@ class Lowering {
         // on it
         let loop = node.statement as Node;
         while (loop.kind === K.LabeledStatement) loop = loop.statement;
-        if (
-          loop.kind === K.ForStatement &&
-          this.ownedLocalsOfFor(loop).length > 0
-        )
+        // Borrowed heads can also gain a wrapper for forward captures.
+        if (loop.kind === K.ForStatement)
           return this.visitForStatement(loop, node);
         break;
       }
@@ -648,7 +646,7 @@ class Lowering {
         return statements(
           decls.flatMap(decl => [
             gen(Prec.Primary, [
-              `\n${keyword} `,
+              `\n${keyword === 'const' && this.r.local(decl) === Local.OwnedMoved ? 'let' : keyword} `,
               this.visitVariableDeclaration(decl),
               ';',
             ]),
@@ -1670,9 +1668,11 @@ class Lowering {
   }
 
   private prepareQueue(decl: Node): boolean {
-    if (!this.forwardCaptures.has(decl) || this.captureQueues.has(decl))
-      return false;
-    this.captureQueues.set(decl, this.freshName('__holds'));
+    if (!this.forwardCaptures.has(decl)) return false;
+    // A parameter default may be visited again after its first lowering is
+    // discarded. Reuse the name, but emit its declaration on every visit.
+    if (!this.captureQueues.has(decl))
+      this.captureQueues.set(decl, this.freshName('__holds'));
     return true;
   }
 
@@ -1748,7 +1748,16 @@ class Lowering {
     const cached = this.functionVars.get(body);
     if (cached) return cached;
     const vars: Node[] = [];
-    const symbols = new Set<number>();
+    // A var redeclaration of a parameter replaces the parameter's value,
+    // using the count acquired and released by the parameter prologue.
+    const symbols = new Set<number>(
+      (((body.parent as Node).parameters as Node[] | undefined) ?? [])
+        .filter(param => {
+          const local = this.r.local(param);
+          return local === Local.Owned || local === Local.OwnedMoved;
+        })
+        .map(param => this.symbolId(param.name)),
+    );
     const visit = (node: Node): void => {
       if (isErased(node) || isFunctionLike(node) || isClassLike(node)) return;
       if (
