@@ -62,6 +62,14 @@ jobs:
           if [ -n "$NPM_TOKEN" ]; then
             echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > "$HOME/.npmrc"
           fi
+          # a version npm has already is skipped, so a rerun after one package
+          # published and the other failed publishes the other
           for t in "$RUNNER_TEMP"/packages/*.tgz; do
+            spec=$(tar -xOzf "$t" package/package.json |
+              node -p "const p = JSON.parse(require('fs').readFileSync(0)); p.name + '@' + p.version")
+            if npm view "$spec" version >/dev/null 2>&1; then
+              echo "$spec is on npm already: skipped"
+              continue
+            fi
             npm publish "$t" --access public --provenance
           done
