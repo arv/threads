@@ -73,7 +73,7 @@ describe('threads-check', () => {
         ...Array.from(
           {length: depth},
           () =>
-            'try { use(1); const local = [[]]; const deep = { a: [1], b: { c: [2] } }; } finally {',
+            'try { use(1); const local = [[]]; const deep = { a: [1], b: { c: [2] } }; const alias = [xs]; } finally {',
         ),
         'ch.send(xs); use(xs);',
         ...Array.from({length: depth}, () => '}'),
@@ -299,6 +299,8 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(350,46): error TS96002: 'row' cannot be used here: it may have been sent to 'send' on line 350.",
         "try-exits.ts(357,87): error TS96006: 'xs' may have been consumed by 'consume' on line 357.",
         "try-exits.ts(369,80): error TS96006: 'xs' may have been consumed by 'consume' on line 369.",
+        "try-exits.ts(374,87): error TS96005: 'xs' was consumed by 'consume' on line 374.",
+        "try-exits.ts(378,104): error TS96006: 'xs' may have been consumed by 'consume' on line 378.",
       ].sort(),
     );
   });
@@ -364,6 +366,7 @@ describe('threads-check, where it differs from the fork', () => {
         'spreads.ts(77,12): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
         'spreads.ts(83,11): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
         'spreads.ts(88,40): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(93,13): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
       ].sort(),
     );
   });

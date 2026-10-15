@@ -253,16 +253,32 @@ class State {
   // outside the state): their links and infos, which nothing can reach. The
   // regions that are held keep their numbers.
   collect(kept: readonly Region[]): void {
-    const live = new Set<Region>();
-    for (const r of kept) live.add(this.find(r));
+    // the regions held, each of which keeps its number
+    const held = new Set<Region>(kept);
     for (const v of this.vars.values()) {
-      if (v.kind === ValueKind.InRegion) live.add(this.find(v.region));
-      for (const o of v.origins ?? []) live.add(this.find(o.region));
+      if (v.kind === ValueKind.InRegion) held.add(v.region);
+      for (const o of v.origins ?? []) held.add(o.region);
     }
-    // all found before any link goes: a chain is walked through its links
-    const dead = [...this.parent.keys()].filter(k => !live.has(this.find(k)));
-    for (const k of dead) this.parent.delete(k);
-    for (const k of this.info.keys()) if (!live.has(k)) this.info.delete(k);
+    // their components, the regions no one holds left out (an alias that
+    // went out of scope with its binding), each rooted at its least region:
+    // the same components are written the same, whatever unions made them
+    const components = new Map<Region, Region[]>();
+    for (const r of held) {
+      const root = this.find(r);
+      const members = components.get(root);
+      if (members) members.push(r);
+      else components.set(root, [r]);
+    }
+    const parent = new Map<Region, Region>();
+    const info = new Map<Region, RegionInfo>();
+    for (const [root, members] of components) {
+      const least = Math.min(...members);
+      const inf = this.info.get(root);
+      if (inf) info.set(least, inf);
+      for (const r of members) if (r !== least) parent.set(r, least);
+    }
+    this.parent = parent;
+    this.info = info;
   }
 
   // Reports whether two states are the same: the same bindings, region links
@@ -510,31 +526,6 @@ function isUsingDeclaration(node: Node): boolean {
 function isUsingList(list: Node): boolean {
   const scoped = list.flags & NodeFlags.BlockScoped;
   return scoped === NodeFlags.Using || scoped === NodeFlags.AwaitUsing;
-}
-
-// Reports whether defining a class may throw: what it extends, its computed
-// keys, its decorators and its static members are evaluated as it is.
-function classDefinitionMayThrow(node: Node): boolean {
-  if (
-    (node.heritageClauses as Node[] | undefined)?.some(
-      h => h.token === K.ExtendsKeyword,
-    )
-  )
-    return true;
-  const decorated = (n: Node) =>
-    (n.modifiers as Node[] | undefined)?.some(m => m.kind === K.Decorator);
-  if (decorated(node)) return true;
-  return (node.members as Node[]).some(
-    m =>
-      m.kind === K.ClassStaticBlockDeclaration ||
-      m.name?.kind === K.ComputedPropertyName ||
-      decorated(m) ||
-      (m.kind === K.PropertyDeclaration &&
-        !!m.initializer &&
-        !!(m.modifiers as Node[] | undefined)?.some(
-          x => x.kind === K.StaticKeyword,
-        )),
-  );
 }
 
 // Reports whether an expression reads or writes a property or an element.
@@ -1396,7 +1387,7 @@ class FunctionAnalysis {
       case K.ClassDeclaration:
         // analyzed on its own, but defined here: its heritage, computed keys,
         // decorators and static members are evaluated as it is
-        if (classDefinitionMayThrow(node)) this.mayThrow(s);
+        this.evalClassDefinition(node, s);
         break;
       case K.EnumDeclaration:
         // its members' values are evaluated, in order, as it is defined
@@ -1966,7 +1957,7 @@ class FunctionAnalysis {
         return this.closureValue(node, s);
       case K.ClassExpression: {
         const v = this.closureValue(node, s);
-        if (classDefinitionMayThrow(node)) this.mayThrow(s);
+        this.evalClassDefinition(node, s);
         return v;
       }
       case K.CallExpression: {
@@ -2006,6 +1997,36 @@ class FunctionAnalysis {
       }
     }
     return this.evalChildren(node, s);
+  }
+
+  // Evaluates what defining a class evaluates, in its order: its decorators,
+  // what it extends (which may be no constructor), its computed keys (which
+  // are converted), then its static fields' initializers and static blocks.
+  // Its methods and its instance fields' initializers run later, as closures.
+  evalClassDefinition(node: Node, s: State): void {
+    const decorators = (n: Node) =>
+      ((n.modifiers ?? []) as Node[]).filter(m => m.kind === K.Decorator);
+    for (const d of decorators(node)) this.eval(d.expression, s);
+    for (const h of (node.heritageClauses ?? []) as Node[]) {
+      if (h.token !== K.ExtendsKeyword) continue;
+      for (const t of h.types as Node[]) this.eval(t.expression, s);
+      this.mayThrow(s);
+    }
+    const members = node.members as Node[];
+    for (const m of members) {
+      for (const d of decorators(m)) this.eval(d.expression, s);
+      if (m.name?.kind === K.ComputedPropertyName) {
+        this.eval(m.name.expression, s);
+        this.mayThrow(s);
+      }
+    }
+    const isStatic = (m: Node) =>
+      ((m.modifiers ?? []) as Node[]).some(x => x.kind === K.StaticKeyword);
+    for (const m of members) {
+      if (m.kind === K.ClassStaticBlockDeclaration) this.statement(m.body, s);
+      else if (m.kind === K.PropertyDeclaration && isStatic(m) && m.initializer)
+        this.eval(m.initializer, s);
+    }
   }
 
   // Fallback for expressions without a specific rule (JSX and the like): a

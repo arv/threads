@@ -87,3 +87,8 @@ declare function forward<A extends unknown[]>(...args: A): void;
 export function forwardedGenerically() {
   forward<Parameters<typeof longRest>>(...numbers);  // error: numbers for the i32 tail
 }
+// a rest typed a union of tuples takes the most places of theirs
+declare function unionRest(...args: [head?: number, ...tail: i32[]] | [head?: string, ...tail: i32[]]): void;
+export function spreadIntoUnionRest() {
+  unionRest(...numbers);           // error: numbers for the i32 tail
+}

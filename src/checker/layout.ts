@@ -649,9 +649,14 @@ function restPlaces(c: Own, signature: Signature, call: Node): number {
     if (!given) return argumentPlaces(c, call);
     t = host.checker.getTypeFromTypeNode(given as any);
   }
-  if (t && host.checker.isTupleType(t))
-    return Math.max(1, host.typeArguments(t).length);
-  return 1; // an array's: one type for every place past
+  // a tuple's elements, the most of a union's members'; an array's one type
+  // for every place past
+  const width = (u: Type): number =>
+    host.checker.isTupleType(u) ? host.typeArguments(u).length : 1;
+  if (!t) return 1;
+  const widths =
+    t.flags & TypeFlags.Union ? host.memberTypes(t).map(width) : [width(t)];
+  return Math.max(1, ...widths);
 }
 
 // The places a call's arguments fill, counting a spread of unknown length as

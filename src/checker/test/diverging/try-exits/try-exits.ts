@@ -368,3 +368,12 @@ export function nullishBeforeTarget() {
   let xs = [1];
   try { consume(xs); ({ a: (xs = [2], kept).value } = anyObj); } finally { use(xs); }  // error: anyObj may be null
 }
+// a class's static initializers run as it is defined, in the enclosing state
+export function staticInitializer() {
+  let xs = [1];
+  try { class C { static n = (consume(xs), getter.value); } xs = [2]; } finally { use(xs); }  // error: the getter may throw after the consume
+}
+export function staticInitializerOfExpression() {
+  let xs = [1];
+  try { const K = class { static n = (consume(xs), getter.value); }; xs = [2]; use(K); } finally { use(xs); }  // error
+}
