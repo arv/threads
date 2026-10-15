@@ -189,7 +189,7 @@ describe('compile, where the fork does not', () => {
     expect(fixes).toContain(
       'export class Derived extends (_d = (element = (_a = __retain(first),',
     );
-    expect(fixes).toContain('Base), __release(_a), _d) {}');
+    expect(fixes).toContain('Base), __release(_a), _a = 0, _d) {}');
   });
 
   it('keeps a parameter whose default moves optional, after an optional one', () => {
@@ -472,6 +472,124 @@ describe('counting lowering review regressions', () => {
         log(f(p));
       }`,
       expected: '62',
+    },
+    {
+      name: 'keeps queues for an IIFE default retried before an owned default',
+      source: `function f(get = (() => {
+        const p = new P(); p.x = 71;
+        function read() { return p.x; }
+        return read;
+      })(), q: P = new P()) { q.x = 1; return get(); }
+      export function main() { log(f()); }`,
+      expected: '71',
+    },
+    {
+      name: 'releases an assignment receiver when its right side throws',
+      source: `function fail(): never { throw new Error('fail'); }
+      function f() { let p = new P(); p.x = ((p = new P()), fail()); }
+      export function main() {
+        const before = heapStats();
+        try { f(); } catch {}
+        const after = heapStats();
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '0',
+    },
+    {
+      name: 'clears receiver holds before a local catch and on repeated throws',
+      source: `function fail(): never { throw new Error('fail'); }
+      export function main() {
+        let p = new P();
+        const before = heapStats();
+        for (let i = 0; i < 3; i++) {
+          try { const n = p.x = ((p = new P()), fail()); log(n); } catch {
+            const after = heapStats();
+            if (after.allocated - before.allocated !== after.freed - before.freed)
+              throw new Error('leaked receiver');
+          }
+        }
+        log(p.x);
+      }`,
+      expected: '0',
+    },
+    {
+      name: 'clears receiver holds before finally handles an exception',
+      source: `function fail(): never { throw new Error('fail'); }
+      export function main() {
+        let p = new P();
+        const before = heapStats();
+        try {
+          for (let i = 0; i < 3; i++) {
+            try { p.x = ((p = new P()), fail()); } finally {
+              const after = heapStats();
+              if (after.allocated - before.allocated !== after.freed - before.freed)
+                throw new Error('leaked receiver');
+              if (i < 2) continue;
+            }
+          }
+        } catch {}
+        const after = heapStats();
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '0',
+    },
+    {
+      name: 'releases receiver holds in concise arrow returns',
+      source: `function fail(): never { throw new Error('fail'); }
+      const f = (p: P) => p.x = ((p = new P()), fail());
+      export function main() {
+        const p = new P();
+        const before = heapStats();
+        try { f(p); } catch {}
+        const after = heapStats();
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '0',
+    },
+    {
+      name: 'releases a receiver after a rejected await without changing its order',
+      source: `async function f() {
+        let p = new P();
+        p.x = ((p = new P()), await Promise.reject(new Error('fail')));
+      }
+      export async function main() {
+        const before = heapStats();
+        try { await f(); } catch {}
+        const after = heapStats();
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '0',
+    },
+    {
+      name: 'releases a receiver when a generator is closed while yielding',
+      source: `function* f() {
+        let p = new P();
+        p.x = ((p = new P()), yield 0);
+      }
+      export function main() {
+        const before = heapStats();
+        const iterator = f();
+        iterator.next();
+        iterator.return(undefined);
+        const after = heapStats();
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '0',
+    },
+    {
+      name: 'discards receiver cleanup temps when parameter lowering retries',
+      source: `function fail(): never { throw new Error('fail'); }
+      function f(p: P, get = () => 1, n = p.x = ((p = new P()), fail())) {
+        return get() + n;
+      }
+      export function main() {
+        const p = new P();
+        const before = heapStats();
+        try { f(p); } catch {}
+        const after = heapStats();
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '0',
     },
   ];
   it.each(cases)(

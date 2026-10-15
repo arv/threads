@@ -111,6 +111,7 @@ interface Frame {
   released: Temp[];
   zeroed: Temp[]; // those assigned only conditionally: 0 before it
   conditional: number; // the enclosing frame's depth
+  receiverHold?: boolean; // retain acquired to keep an assignment receiver alive
 }
 
 // The runtime's helpers by their names in the emit, in the order the fork's
@@ -194,6 +195,9 @@ class Lowering {
   private readonly options: TransformOptions;
   private frames: (Frame | null)[] = [];
   private conditional = 0;
+  // Receiver holds survive abrupt evaluation until the next catch/finally
+  // boundary. Clear successful holds so these guards can run on either path.
+  private readonly exceptionTemps = new Map<Scope, Set<Temp>>();
   // default values of owned parameters, moved into the body
   private readonly paramInits = new Map<Node, Node>();
   // default values of other parameters that move into the body with them
@@ -294,7 +298,7 @@ class Lowering {
       temp: temp => temp.name ?? '_?',
       vars: scope =>
         scope.temps.length > 0
-          ? `\nvar ${scope.temps.map(t => t.name).join(', ')};`
+          ? `\nvar ${scope.temps.map(t => this.tempDeclaration(t)).join(', ')};`
           : '',
     };
     // temporaries are named per scope in the order they were declared
@@ -305,7 +309,7 @@ class Lowering {
     // the file's own temporaries
     const vars =
       fileScope.temps.length > 0
-        ? `var ${fileScope.temps.map(t => t.name).join(', ')};\n`
+        ? `var ${fileScope.temps.map(t => this.tempDeclaration(t)).join(', ')};\n`
         : '';
 
     const functions = this.importsRuntime() ? this.registeredFunctions() : [];
@@ -699,7 +703,10 @@ class Lowering {
               gen(Prec.Assignment, [
                 '() => {',
                 varsStatement(scope),
-                returnStatement(initializer),
+                ...this.guardReceiverTemps(
+                  [returnStatement(initializer)],
+                  scope,
+                ),
                 '\n}',
               ]),
             ),
@@ -938,11 +945,12 @@ class Lowering {
 
   // `(_a = E)`, released after the full expression. Without a full expression
   // around (a decorator, a computed property name), E is left uncounted.
-  private temporary(expr: Ir): Ir {
+  private temporary(expr: Ir, receiverHold = false): Ir {
     const frame = this.frames[this.frames.length - 1];
     if (!frame) return expr;
     const temp = this.newTemp();
     frame.released.push(temp);
+    frame.receiverHold ||= receiverHold;
     if (this.conditional > 0) frame.zeroed.push(temp);
     return paren(this.assign(tempRef(temp), expr));
   }
@@ -999,6 +1007,7 @@ class Lowering {
 
   private releaseAfter(expr: Ir, frame: Frame, keepValue: boolean): Ir {
     if (frame.released.length === 0) return expr;
+    this.protectReceiverFrame(frame);
     const expressions: Ir[] = [];
     for (const temp of frame.zeroed)
       expressions.push(this.assign(tempRef(temp), num(0)));
@@ -1009,10 +1018,49 @@ class Lowering {
     } else {
       expressions.push(expr);
     }
-    for (const temp of frame.released)
+    for (const temp of frame.released) {
       expressions.push(this.call('__release', tempRef(temp)));
+      if (frame.receiverHold)
+        expressions.push(this.assign(tempRef(temp), num(0)));
+    }
     if (result) expressions.push(tempRef(result));
     return paren(comma(expressions));
+  }
+
+  private protectReceiverFrame(frame: Frame): void {
+    if (!frame.receiverHold) return;
+    for (const temp of frame.released) {
+      let temps = this.exceptionTemps.get(temp.scope);
+      if (!temps) this.exceptionTemps.set(temp.scope, (temps = new Set()));
+      temps.add(temp);
+    }
+  }
+
+  private tempDeclaration(temp: Temp): string {
+    return `${temp.name}${this.exceptionTemps.get(temp.scope)?.has(temp) ? ' = 0' : ''}`;
+  }
+
+  private clearReceiverTemps(scope: Scope): Ir[] {
+    return [...(this.exceptionTemps.get(scope) ?? [])]
+      .reverse()
+      .flatMap(temp => [
+        exprStatement(this.call('__release', tempRef(temp))),
+        exprStatement(this.assign(tempRef(temp), num(0))),
+      ]);
+  }
+
+  private guardReceiverTemps(list: Ir[], scope: Scope): Ir[] {
+    const cleanup = this.clearReceiverTemps(scope);
+    if (!cleanup.length) return list;
+    return [
+      gen(Prec.Primary, [
+        '\ntry {',
+        ...list,
+        '\n} finally {',
+        ...cleanup,
+        '\n}',
+      ]),
+    ];
   }
 
   private pushFrame<F extends Frame | null>(frame: F): F {
@@ -1030,17 +1078,25 @@ class Lowering {
   // `E;`: an owned result is released; the temporaries are released by
   // statements that follow.
   private visitExpressionStatement(node: Node): Ir {
-    const frame = this.pushFrame({released: [], zeroed: [], conditional: 0});
+    const frame = this.pushFrame<Frame>({
+      released: [],
+      zeroed: [],
+      conditional: 0,
+    });
     const expression = this.visitIn(node.expression, Ctx.Discard);
     this.popFrame();
     const statement = this.update(node, [[node.expression, expression]]);
     if (frame.released.length === 0) return statement;
+    this.protectReceiverFrame(frame);
     const list: Ir[] = [];
     for (const temp of frame.zeroed)
       list.push(exprStatement(this.assign(tempRef(temp), num(0))));
     list.push(statement);
-    for (const temp of frame.released)
+    for (const temp of frame.released) {
       list.push(exprStatement(this.call('__release', tempRef(temp))));
+      if (frame.receiverHold)
+        list.push(exprStatement(this.assign(tempRef(temp), num(0))));
+    }
     return statements(list);
   }
 
@@ -1138,6 +1194,7 @@ class Lowering {
     const scope = this.scopes[this.scopes.length - 1]!;
     const temps = scope.temps.length,
       scopes = this.allScopes.length;
+    const exceptionTemps = new Set(this.exceptionTemps.get(scope));
     let irs = params.map(p => this.visitParameterOnce(p));
     const first = params.findIndex(
       p =>
@@ -1157,6 +1214,7 @@ class Lowering {
     ) {
       scope.temps.length = temps;
       this.allScopes.length = scopes;
+      this.exceptionTemps.set(scope, exceptionTemps);
       for (const p of params) {
         this.paramInits.delete(p);
         this.movedDefaults.delete(p);
@@ -1432,6 +1490,13 @@ class Lowering {
     // the whole body is in the try, its function declarations in place
     // (the fork moves them ahead of it)
     result = this.guarded(prologue, result);
+    const scope = this.scopes[this.scopes.length - 1]!;
+    if (isBody) result = this.guardReceiverTemps(result, scope);
+    else if (
+      parent?.kind === K.CatchClause ||
+      (parent?.kind === K.TryStatement && parent.finallyBlock === node)
+    )
+      result = [...this.clearReceiverTemps(scope), ...result];
     const head: Ir[] = directives.map(d => this.src(d));
     if (isBody) {
       // the function's temporaries, declared once it is visited
@@ -1948,8 +2013,15 @@ class Lowering {
     const visited = at >= 0 ? result.edits[at]!.ir : this.src(body);
     let replacement: Ir;
     if (isGen(visited) && visited.tag?.t === 'block')
-      replacement = block([varsStatement(scope), ...visited.tag.list]);
-    else replacement = block([varsStatement(scope), returnStatement(visited)]);
+      replacement = block([
+        varsStatement(scope),
+        ...this.guardReceiverTemps(visited.tag.list, scope),
+      ]);
+    else
+      replacement = block([
+        varsStatement(scope),
+        ...this.guardReceiverTemps([returnStatement(visited)], scope),
+      ]);
     const edits = result.edits.filter((_, i) => i !== at);
     edits.push({start: this.startOf(body), end: body.end, ir: replacement});
     return this.src(node, edits);
@@ -2601,7 +2673,7 @@ class Lowering {
       const temp = this.newTemp();
       return paren(this.assign(tempRef(temp), ir));
     }
-    return this.temporary(this.call('__retain', ir));
+    return this.temporary(this.call('__retain', ir), true);
   }
 
   // An expression that can be repeated: the expression itself if it is
