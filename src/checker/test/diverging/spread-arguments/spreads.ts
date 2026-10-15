@@ -76,3 +76,9 @@ export function forwarded() {
   sameRest(...optHead);            // fine
   longRest(...numbers);            // error: numbers for the i32 tail
 }
+// an element after a rest is past the rest's elements, which may be none
+declare const trailing: [...i32[], number];
+declare function headInt(...values: [head?: i32, ...tail: number[]]): void;
+export function afterEmptyRest() {
+  headInt(...trailing);            // error: the number may be the head
+}

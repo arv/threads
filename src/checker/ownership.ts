@@ -1301,6 +1301,9 @@ class FunctionAnalysis {
   readonly targets: Target[] = [];
   readonly tries: TryContext[] = [];
   readonly cleanups: Cleanup[] = [];
+  // the regions of what the for-of loops being analyzed iterate, which they
+  // hold outside any binding
+  readonly iterating: Region[] = [];
   // the consume()s of local variables, in the order they are analyzed: which
   // variable, holding what (see checkStillThere)
   readonly consumes: {id: number; region: Region; send: Send}[] = [];
@@ -1570,8 +1573,11 @@ class FunctionAnalysis {
     let headSignature = head.signature(a.idOf);
     let exit: State = State.unreachable();
     let breaks: State[] = [];
-    // a for-of loop left early closes its iterator (see exit)
+    // a for-of loop left early closes its iterator (see exit); what it
+    // iterates it holds till it ends
     const closes = node.kind === K.ForOfStatement;
+    const holds = iterated.kind === ValueKind.InRegion;
+    if (holds) this.iterating.push(iterated.region);
     if (closes)
       this.cleanups.push({
         targets: this.targets.length,
@@ -1644,6 +1650,7 @@ class FunctionAnalysis {
       headSignature = nextSignature;
     }
     if (closes) this.cleanups.pop();
+    if (holds) this.iterating.pop();
     s.assign(joinAllStates(exit, breaks));
   }
 
@@ -1765,8 +1772,13 @@ class FunctionAnalysis {
         const start = joinAllStates(early[0]!, early.slice(1));
         for (const symbol of start.vars.keys())
           if (local.has(this.a.idOf(symbol))) start.vars.delete(symbol);
-        // and the regions only they held go with them
-        start.collect(this.thisRegion === 0 ? [] : [this.thisRegion]);
+        // and the regions only they held go with them (not `this` , nor
+        // what a loop iterates)
+        start.collect(
+          this.thisRegion === 0
+            ? this.iterating
+            : [this.thisRegion, ...this.iterating],
+        );
         const done = runs.find(r => r.start.sameAs(start));
         if (done) return done.end.copy();
         const input = start.copy();
@@ -2252,8 +2264,12 @@ class FunctionAnalysis {
         // the assignments before it
         if ((target.properties as Node[]).length === 0) this.mayThrow(s);
         for (const property of target.properties as Node[]) {
-          if (property.name?.kind === K.ComputedPropertyName)
+          if (property.name?.kind === K.ComputedPropertyName) {
+            // converted to a key, which may throw, before the target is
+            // evaluated
             this.eval(property.name.expression, s);
+            this.mayThrow(s);
+          }
           switch (property.kind) {
             case K.PropertyAssignment: {
               const init = property.initializer as Node;

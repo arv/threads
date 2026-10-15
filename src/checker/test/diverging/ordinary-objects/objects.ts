@@ -69,3 +69,6 @@ export function spreadTupleRest() { headThenNodes(...plains); }      // error: o
 import type { Node as OtherNode } from "./other";
 declare function two(a?: OtherNode, b?: Node, ...rest: unknown[]): void;
 export function sameNames() { two(...plains); }                       // error: the Node
+declare const trailingPlain: [...Node[], { value: number; next: null }];
+declare function headNode(...values: [head?: Node, ...tail: unknown[]]): void;
+export function spreadAfterEmptyRest() { headNode(...trailingPlain); }   // error: the ordinary object may be the head

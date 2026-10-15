@@ -344,3 +344,15 @@ export function varAfterTry(ch: Channel<number[]>) {
   try { var ys: number[] | undefined = [1]; ch.send(ys); mayThrow(); } finally { use(1); }
   use(ys);                                                    // error: ys was sent
 }
+// a finally's run keeps what a loop iterates, which no binding may hold
+export function iteratorKeepsItsRegion(ch: Channel<number[]>) {
+  let rows = new Array<number[]>(2).fill([1]);
+  for (let row of rows) { rows = []; ch.send(row); row = []; try {} finally {} }  // error: the next row is one sent
+}
+// a computed key is converted before the target is evaluated
+declare const source: Record<string, unknown>;
+declare const anyKey: any;
+export function keyBeforeTarget() {
+  let xs = [1];
+  try { consume(xs); ({ [anyKey]: (xs = [2], kept).value } = source); } finally { use(xs); }  // error: the key's conversion may throw
+}

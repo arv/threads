@@ -591,10 +591,11 @@ export function spreadShape(c: Own, t: Type): SpreadShape {
       return;
     }
     // an element before any rest is at its own place, an optional one as
-    // well, when it is there; one after a rest is past its elements
+    // well, when it is there; one after a rest is past its elements, which
+    // may be none
     shape.values.push(
       shape.max === Infinity
-        ? {type, from: k, to: Infinity}
+        ? {type, from: shape.min, to: Infinity}
         : {type, from: k, to: k},
     );
     if (flag & ElementFlags.Required) shape.min++;
