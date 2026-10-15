@@ -186,6 +186,13 @@ describe('compile, where the fork does not', () => {
     );
   });
 
+  it("runs a class's heritage as a full expression, which releases what it holds", () => {
+    expect(fixes).toContain(
+      'export class Derived extends (_d = (element = (_a = __retain(first),',
+    );
+    expect(fixes).toContain('Base), __release(_a), _d) {}');
+  });
+
   it("runs a scalar element type's expression", () => {
     expect(fixes).toContain('__newSharedArray((calls++, Number, 8), n)');
   });
@@ -261,7 +268,7 @@ describe('what the lowering moves, as it runs', () => {
       {encoding: 'utf8', timeout: 60_000},
     );
     expect(r.stdout.trim(), r.stderr).toBe(
-      '[0,true,2,1,6,6,10,1,4,10,"Error",1,1] blocks left 0',
+      '[0,true,2,1,6,6,10,1,4,10,"Error",1,1,7,2,1] blocks left 0',
     );
   }, 60_000);
 

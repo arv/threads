@@ -201,6 +201,9 @@ class Lowering {
   private readonly movedDefaults = new Map<Node, Ir | undefined>();
   // the functions some of whose parameters' defaults move into the body
   private readonly movingDefaults = new Set<Node>();
+  // the parameters visited with the first of their list, until they are
+  // visited
+  private readonly paramIrs = new Map<Node, Ir>();
   // binding-pattern parameters from the first default that moves on: a
   // temporary parameter, destructured in the body in order (with the
   // default, visited already or to visit there)
@@ -570,13 +573,18 @@ class Lowering {
           [node.statement, this.visitLoopBody(node.statement, node)],
         ]);
       }
-      case K.LabeledStatement:
+      case K.LabeledStatement: {
+        // the loop under all its labels (`outer: inner: for`), which stay
+        // on it
+        let loop = node.statement as Node;
+        while (loop.kind === K.LabeledStatement) loop = loop.statement;
         if (
-          node.statement.kind === K.ForStatement &&
-          this.ownedLocalsOfFor(node.statement).length > 0
+          loop.kind === K.ForStatement &&
+          this.ownedLocalsOfFor(loop).length > 0
         )
-          return this.visitForStatement(node.statement, node);
+          return this.visitForStatement(loop, node);
         break;
+      }
       case K.ContinueStatement: {
         const loop = continueTarget(node);
         if (loop && this.r.isQuiescentLoop(loop))
@@ -589,6 +597,13 @@ class Lowering {
         return this.visitVariableDeclaration(node);
       case K.Parameter:
         return this.visitParameter(node);
+      case K.ExpressionWithTypeArguments:
+        // `extends E`: a full expression of its own, run as the class is
+        if ((node.parent as Node).kind === K.HeritageClause)
+          return this.update(node, [
+            [node.expression, this.fullExpression(node.expression, Ctx.AtOnce)],
+          ]);
+        break;
       case K.BindingElement: {
         // a default is a full expression of its own (its value is never an
         // address: destructuring one is an error)
@@ -762,6 +777,15 @@ class Lowering {
         }
     }
     return this.count(this.lower(node, ctx), count, ctx);
+  }
+
+  // An expression that runs only sometimes: the temporaries its cleanup
+  // releases are 0 until it does.
+  private visitConditionally(node: Node): Ir {
+    this.conditional++;
+    const ir = this.visit(node);
+    this.conditional--;
+    return ir;
   }
 
   private visitConditional(node: Node, count: Count, ctx: Ctx): Ir {
@@ -991,9 +1015,62 @@ class Lowering {
     return result;
   }
 
+  // A function's parameters, visited all at once at its first (by the
+  // others, the result for each). Once a default or pattern moves into the
+  // body, those after it move too, so that they run in order; if one before
+  // it has a default or a pattern, the list is visited again with all of
+  // them moving, so that they all run in the body's scope (a closure in an
+  // earlier default sees a pattern's bindings: TypeScript's ES5 lowering).
+  private visitParameter(node: Node): Ir {
+    const visited = this.paramIrs.get(node);
+    if (visited) {
+      this.paramIrs.delete(node);
+      return visited;
+    }
+    const fn = node.parent as Node;
+    const params = (fn.parameters as Node[]).filter(p => !isErased(p));
+    if (
+      !fn.body ||
+      !isFunctionLikeDeclaration(fn) ||
+      params[0] !== node ||
+      params.length < 2
+    )
+      return this.visitParameterOnce(node);
+    const scope = this.scopes[this.scopes.length - 1]!;
+    const temps = scope.temps.length,
+      scopes = this.allScopes.length;
+    let irs = params.map(p => this.visitParameterOnce(p));
+    const first = params.findIndex(
+      p =>
+        this.paramInits.has(p) ||
+        this.movedDefaults.has(p) ||
+        this.movedPatterns.has(p),
+    );
+    if (
+      first > 0 &&
+      params
+        .slice(0, first)
+        .some(p => p.initializer || p.name.kind !== K.Identifier)
+    ) {
+      scope.temps.length = temps;
+      this.allScopes.length = scopes;
+      for (const p of params) {
+        this.paramInits.delete(p);
+        this.movedDefaults.delete(p);
+        this.movedPatterns.delete(p);
+      }
+      this.movingDefaults.add(fn);
+      irs = params.map(p => this.visitParameterOnce(p));
+    }
+    params.forEach((p, i) => {
+      if (i > 0) this.paramIrs.set(p, irs[i]!);
+    });
+    return irs[0]!;
+  }
+
   // A parameter: the default value of an owned parameter moves into the
   // function's body.
-  private visitParameter(node: Node): Ir {
+  private visitParameterOnce(node: Node): Ir {
     const fn = node.parent as Node;
     const pattern = node.name.kind !== K.Identifier;
     const lowerable = !!fn.body && isFunctionLikeDeclaration(fn);
@@ -1442,6 +1519,7 @@ class Lowering {
 
   // `for (init; cond; update) body`. Owned locals declared in the head move
   // out of the loop, which is wrapped in `try { ... } finally { ... }`.
+  // label: the outermost of the loop's labels.
   private visitForStatement(node: Node, label: Node | undefined): Ir {
     const owned = this.ownedLocalsOfFor(node);
     const init = node.initializer as Node | undefined;
@@ -1618,6 +1696,14 @@ class Lowering {
         if (isAssignmentOperator(node.operatorToken.kind)) {
           const lowered = this.lowerAssignment(node, ctx);
           if (lowered) return lowered;
+        }
+        // `x ||= E`: E runs only sometimes
+        if (isLogicalAssignment(node.operatorToken.kind)) {
+          const left = this.visit(node.left);
+          return this.update(node, [
+            [node.left, left],
+            [node.right, this.visitConditionally(node.right)],
+          ]);
         }
         break;
       case K.PrefixUnaryExpression:
@@ -1806,7 +1892,9 @@ class Lowering {
     }
     const lowered = this.lowerAccess(left, true, node.right);
     if (lowered) {
-      const right = this.visit(node.right);
+      const right = isLogicalAssignment(operator)
+        ? this.visitConditionally(node.right)
+        : this.visit(node.right);
       return this.update(node, [
         [node.left, lowered],
         [node.right, right],
@@ -2193,11 +2281,12 @@ class Lowering {
       !after.some(n => this.r.assignsIn(n, id))
     )
       return ir;
-    const held = this.temporary(this.call('__retain', ir));
-    if (held !== ir) return held;
     // no full expression around to release it after: a plain copy
-    const temp = this.newTemp();
-    return paren(this.assign(tempRef(temp), ir));
+    if (!this.frames[this.frames.length - 1]) {
+      const temp = this.newTemp();
+      return paren(this.assign(tempRef(temp), ir));
+    }
+    return this.temporary(this.call('__retain', ir));
   }
 
   // An expression that can be repeated: the expression itself if it is
@@ -2589,6 +2678,14 @@ function isNameChain(node: Node): boolean {
   );
 }
 
+function isLogicalAssignment(operator: number): boolean {
+  return (
+    operator === K.BarBarEqualsToken ||
+    operator === K.AmpersandAmpersandEqualsToken ||
+    operator === K.QuestionQuestionEqualsToken
+  );
+}
+
 // The loop a `continue` statement continues.
 function continueTarget(node: Node): Node | undefined {
   const label = node.label as Node | undefined;
@@ -2710,6 +2807,14 @@ function isStatementLike(node: Node): boolean {
 // (interfaces, type aliases, ambient declarations, overloads), which the
 // lowering leaves to the type stripper.
 function isErased(node: Node): boolean {
+  // a class's `extends E` runs E
+  if (
+    node.kind === K.ExpressionWithTypeArguments &&
+    (node.parent as Node).kind === K.HeritageClause &&
+    (node.parent as Node).token === K.ExtendsKeyword &&
+    isClassLike((node.parent as Node).parent as Node)
+  )
+    return false;
   if (isTypeNode(node)) return true;
   switch (node.kind) {
     case K.InterfaceDeclaration:

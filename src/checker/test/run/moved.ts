@@ -2,9 +2,9 @@
 // body (an owned parameter's, or one with temporaries), the declarations of a
 // body around them, function declarations and closures next to an owned
 // local, a class field's initializer that constructs its class again, a
-// renamed var, a default that throws after an owned parameter, and
-// destructured defaults. main logs each result, and how many blocks are still
-// allocated.
+// renamed var, a default that throws after an owned parameter, destructured
+// defaults, a closure in a default, a labelled loop and a logical assignment.
+// main logs each result, and how many blocks are still allocated.
 import {f64, heapStats, log, struct, type Struct} from '@arv/threads';
 
 const P = struct({x: f64});
@@ -109,6 +109,33 @@ function destructuredLocal(o: {x?: number}): number {
   return x;
 }
 
+// a closure in an earlier default sees a pattern's binding after it (7)
+function patternSeen(
+  get = () => x,
+  a: P = new P(),
+  {x} = {x: 7 + a.x},
+): number {
+  return get();
+}
+
+// a loop under two labels, continued by the outer one (2)
+function labelled(): number {
+  let n = 0;
+  outer: for (const p = new P(); p.x < 2; p.x++) {
+    n++;
+    continue outer;
+  }
+  return n;
+}
+
+// a logical assignment's skipped right side releases nothing (1, nothing
+// left)
+function logical(): number {
+  let n = 0;
+  for (let i = 0; i < 3; i++) n ||= read(new P());
+  return n;
+}
+
 // a result, or the error it throws (the fork's emit throws for some)
 function attempt(f: () => unknown): unknown {
   try {
@@ -137,6 +164,9 @@ export function main() {
   results.push(attempt(throwsAfter));
   results.push(attempt(destructured));
   results.push(attempt(() => destructuredLocal({})));
+  results.push(attempt(patternSeen));
+  results.push(attempt(labelled));
+  results.push(attempt(logical));
   const after = heapStats();
   log(
     `${JSON.stringify(results)} blocks left ${after.allocated - before.allocated - (after.freed - before.freed)}`,

@@ -37,3 +37,11 @@ export function made(n: number): SharedArray<number> {
   return new SharedArray((calls++, Number), n);
 }
 export const madeCalls = () => calls;
+
+// a class's heritage is a full expression: the array it reads before the
+// index that assigns it is released
+let first = new SharedArray(Number, 1);
+const second = new SharedArray(Number, 1);
+export let element = 0;
+class Base {}
+export class Derived extends ((element = first[((first = second), 0)]), Base) {}

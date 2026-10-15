@@ -178,6 +178,21 @@ export default function threads(options: Options = {}): Plugin {
   let emittedProject = false;
   let compiles = 0;
 
+  // the entry module of the @arv/threads-check installed beside the plugin,
+  // or in the project
+  const installedThreadsCheck = (): string | null => {
+    // (by a name in a variable, which tsc does not resolve: the plugin does
+    // without it where tsgo compiles)
+    const name = '@arv/threads-check';
+    try {
+      return fileURLToPath(import.meta.resolve(name));
+    } catch {}
+    try {
+      return createRequire(path.join(root, 'package.json')).resolve(name);
+    } catch {}
+    return null;
+  };
+
   // threads-check, loaded once: the module `checker` names (node imports its
   // TypeScript sources directly, with their types stripped), or the package
   // installed beside the plugin, or in the project
@@ -185,18 +200,8 @@ export default function threads(options: Options = {}): Plugin {
   const loadThreadsCheck = () =>
     (threadsCheckModule ??= (async () => {
       if (checker) return import(pathToFileURL(checker).href);
-      // (by a name in a variable, which tsc does not resolve: the plugin
-      // does without it where tsgo compiles)
-      const name = '@arv/threads-check';
-      try {
-        return await import(name);
-      } catch {}
-      try {
-        const resolved = createRequire(path.join(root, 'package.json')).resolve(
-          name,
-        );
-        return await import(pathToFileURL(resolved).href);
-      } catch {}
+      const resolved = installedThreadsCheck();
+      if (resolved) return import(pathToFileURL(resolved).href);
       throw new Error(
         "threads: @arv/threads-check compiles the project, and it is not installed: npm install --save-dev @arv/threads-check (or name the tsgo fork's binary with the plugin's tsgo option)",
       );
@@ -257,13 +262,24 @@ export default function threads(options: Options = {}): Plugin {
     const hash = crypto
       .createHash('sha1')
       .update(fs.readFileSync(path.join(RUNTIME_DIR, 'threads.d.ts')));
-    const checkerDir = checker && path.dirname(checker);
+    // threads-check's modules: those beside the one `checker` names, or the
+    // installed package's (and its package.json, which has its version)
+    const entry =
+      tsgo && !checker ? null : (checker ?? installedThreadsCheck());
+    const checkerDir = entry && path.dirname(entry);
+    let packageDir = checkerDir;
+    while (packageDir && !fs.existsSync(path.join(packageDir, 'package.json')))
+      packageDir =
+        path.dirname(packageDir) === packageDir
+          ? null
+          : path.dirname(packageDir);
     for (const file of [
-      tsgo ?? 'threads-check',
+      ...(tsgo ? [tsgo] : []),
+      ...(packageDir ? [path.join(packageDir, 'package.json')] : []),
       ...(checkerDir
         ? fs
             .readdirSync(checkerDir)
-            .filter(name => name.endsWith('.ts'))
+            .filter(name => /\.(ts|js|json)$/.test(name))
             .map(name => path.join(checkerDir, name))
         : []),
     ]) {
