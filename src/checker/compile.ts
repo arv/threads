@@ -35,6 +35,9 @@ export interface CompileOptions {
   // also report the ownership diagnostics, as `check` does (the fork's
   // compile reports them too)
   check?: boolean;
+  // also report the files' type errors (TypeScript's syntactic and semantic
+  // diagnostics), as tsc and the fork's compile do
+  types?: boolean;
 }
 
 // A source map (version 3).
@@ -55,11 +58,16 @@ export interface CompiledFile {
   // from the original to code
   map: SourceMap;
   changed: boolean;
+  // the top-level functions it registers for threads to run, if any
+  registered: string[];
 }
 
 export interface CompileResult {
   files: CompiledFile[];
+  // the tsconfig's errors, or (with `check`) the ownership diagnostics
   diagnostics: Diagnostic[];
+  // (with `types`) the files' type errors
+  typeDiagnostics: Diagnostic[];
   // the project's compiler options, as the API reads them
   compilerOptions: Record<string, unknown>;
 }
@@ -91,6 +99,7 @@ export function compile(
         return {
           files: [],
           diagnostics: sortAndDeduplicate(configErrors.map(fromApi)),
+          typeDiagnostics: [],
           compilerOptions,
         };
       return compileProgram(host, tsconfig, options, compilerOptions);
@@ -108,7 +117,9 @@ function compileProgram(
   options: CompileOptions,
   compilerOptions: Record<string, unknown>,
 ): CompileResult {
-  const program = loadProgram(host, tsconfig, options.runtime);
+  const program = loadProgram(host, tsconfig, options.runtime, {
+    runtimeRequired: false,
+  });
   const c = program.own;
   for (const file of program.files) {
     if (options.check) checkOwnership(c, file);
@@ -131,11 +142,23 @@ function compileProgram(
       code: result.code,
       map: result.map as SourceMap,
       changed: result.changed,
+      registered: result.registered,
     });
+  }
+  let typeDiagnostics: Diagnostic[] = [];
+  if (options.types && program.files.length > 0) {
+    const names = program.files.map(f => f.fileName as string);
+    typeDiagnostics = sortAndDeduplicate(
+      [
+        ...host.program.getSyntacticDiagnostics(names),
+        ...host.program.getSemanticDiagnostics(names),
+      ].map(fromApi),
+    );
   }
   return {
     files,
     diagnostics: options.check ? finish(program) : [],
+    typeDiagnostics,
     compilerOptions,
   };
 }

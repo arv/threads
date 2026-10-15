@@ -139,6 +139,8 @@ export interface TransformResult {
   map: ReturnType<MagicString['generateMap']>;
   // whether anything changed
   changed: boolean;
+  // the functions it registers (`__register(import.meta.url, {...})`)
+  registered: string[];
 }
 
 export interface TransformOptions {
@@ -159,8 +161,9 @@ export function transformFile(
   const text = file.text;
   const ms = new MagicString(text);
   const lowering = new Lowering(r, file as unknown as Node, options);
-  lowering.run(ms);
+  const registered = lowering.run(ms);
   return {
+    registered,
     code: ms.toString(),
     map: ms.generateMap({
       hires: true,
@@ -191,9 +194,9 @@ class Lowering {
     this.options = options;
   }
 
-  run(ms: MagicString): void {
+  run(ms: MagicString): string[] {
     const file = this.file;
-    if (!this.usesRuntime()) return;
+    if (!this.usesRuntime()) return [];
     const fileScope: Scope = {temps: []};
     this.scopes.push(fileScope);
     // the source file's statements, each visited (as VisitEachChild does: no
@@ -250,7 +253,7 @@ class Lowering {
     }
     if (helpers.length === 0) {
       if (vars) ms.prependLeft(this.prologueEnd(), vars);
-      return;
+      return [];
     }
     const specifiers = helpers.map(h => {
       const local = names.helper(h);
@@ -266,6 +269,7 @@ class Lowering {
         `${newline}${register}(import.meta.url, { ${functions.join(', ')} });\n`,
       );
     }
+    return functions;
   }
 
   // UsesOwnRuntime: an ES module (by its emit), not a declaration file.

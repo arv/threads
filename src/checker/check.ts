@@ -98,6 +98,7 @@ export function loadProgram(
   host: Host,
   tsconfig: string,
   runtime: string,
+  {runtimeRequired = true}: {runtimeRequired?: boolean} = {},
 ): LoadedProgram {
   const {api, program} = host;
   const diagnostics: Diagnostic[] = [];
@@ -153,7 +154,7 @@ export function loadProgram(
   const checked = files.filter(f => !f.isDeclarationFile);
   // nothing imports the runtime by that name: the check would find nothing,
   // and pass. a mistyped --runtime, most likely, which must not pass
-  if (checked.length !== 0 && runtimeFiles.size === 0)
+  if (runtimeRequired && checked.length !== 0 && runtimeFiles.size === 0)
     throw new CheckError(
       `no file of the project imports the runtime as '${runtime}', so there is nothing to check: --runtime names the module the programs import it from (@arv/threads, say)`,
     );

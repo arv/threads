@@ -95,10 +95,17 @@ function main(args: string[]): number {
   let diagnostics: Diagnostic[];
   try {
     if (compiling) {
-      const result = compile(tsconfig, {runtime, check: true});
-      diagnostics = result.diagnostics;
-      if (!diagnostics.some(d => !codes.has(d.code)))
-        writeOutput(tsconfig, result, outDir, sourceMap);
+      const result = compile(tsconfig, {runtime, check: true, types: true});
+      // the tsconfig's errors stop it; type errors and ownership errors are
+      // reported, and the files written all the same, as tsc does
+      if (result.diagnostics.some(d => !codes.has(d.code))) {
+        for (const d of result.diagnostics) console.log(formatDiagnostic(d));
+        return 2;
+      }
+      writeOutput(tsconfig, result, outDir, sourceMap);
+      diagnostics = [...result.typeDiagnostics, ...result.diagnostics];
+      for (const d of diagnostics) console.log(formatDiagnostic(d));
+      return diagnostics.length > 0 ? 1 : 0;
     } else {
       diagnostics = check(tsconfig, {runtime});
     }
