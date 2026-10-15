@@ -446,3 +446,44 @@ export function unreachableConsume(flag: boolean) {
   let xs = [8];
   xs[0] = flag ? (use(class { static { consume(xs); throw 0; } }), 0) : 1;  // fine
 }
+// a derived class is what it extends, and its instances capture its base's
+export function derivedStatic(ch: Channel<number[]>) {
+  const xs = [1];
+  const Base = class { static held = xs; };
+  class Derived extends Base {}
+  ch.send(xs);
+  return Derived;                                             // error: Derived inherits held
+}
+export function derivedInstance(ch: Channel<number[]>) {
+  const xs = [1];
+  class Base { items = xs; }
+  const Derived = class extends Base {};
+  ch.send(xs);
+  return new Derived();                                       // error: its base's initializer captures xs
+}
+// a class's name is the class in its static members
+export function staticName(ch: Channel<number[]>) {
+  const xs = [1];
+  class C { static value: number[]; static { C.value = xs; } }
+  ch.send(xs);
+  return C;                                                   // error: C holds xs
+}
+export function staticInnerName(ch: Channel<number[]>) {
+  const xs = [1];
+  const K = class Inner { static value: number[]; static { Inner.value = xs; } };
+  ch.send(xs);
+  return K;                                                   // error
+}
+// each instance is its own
+export function separateInstances(ch: Channel<number[]>) {
+  class C { items = [1]; }
+  const a = new C(), b = new C();
+  ch.send(a.items);
+  use(b.items);                                               // fine
+}
+// a default replaces an optional part's undefined
+declare const optional: { a?: { b: string } };
+export function optionalWithDefault() {
+  let xs = [1];
+  try { const { a: { [(xs = [2], "b")]: y } = (consume(xs), { b: "" }) } = optional; use(y); } finally { use(xs); }  // fine
+}

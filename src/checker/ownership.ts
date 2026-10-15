@@ -297,6 +297,9 @@ class State {
     }
     this.parent = parent;
     this.info = info;
+    // what consume()s happened matters to the expression they are in only,
+    // and none is being evaluated where a state is collected
+    this.consumes = [];
   }
 
   // Reports whether two states are the same: the same bindings, region links
@@ -1366,6 +1369,10 @@ class FunctionAnalysis {
   readonly targets: Target[] = [];
   readonly tries: TryContext[] = [];
   readonly cleanups: Cleanup[] = [];
+  // the classes defined in the function, by the region of their values, and
+  // the values they extend
+  readonly classes: {region: Region; node: Node}[] = [];
+  readonly bases = new Map<Node, Value>();
   // the regions of what the for-of loops being analyzed iterate, which they
   // hold outside any binding
   readonly iterating: Region[] = [];
@@ -1439,9 +1446,11 @@ class FunctionAnalysis {
         // decorators and static members are evaluated as it is; its name
         // holds the class from here, with what its static fields hold
         const cls = this.closureValue(node, s);
-        this.evalClassDefinition(node, s, cls);
+        if (cls.kind === ValueKind.InRegion)
+          this.classes.push({region: cls.region, node});
         const symbol = this.a.c.host.symbolOfDeclaration(node);
         if (symbol) s.vars.set(symbol, cls);
+        this.evalClassDefinition(node, s, cls);
         break;
       }
       case K.EnumDeclaration:
@@ -2059,7 +2068,17 @@ class FunctionAnalysis {
         return this.closureValue(node, s);
       case K.ClassExpression: {
         const v = this.closureValue(node, s);
+        if (v.kind === ValueKind.InRegion)
+          this.classes.push({region: v.region, node});
+        // its own name, if it has one, is the class inside it
+        const symbol = node.name && this.a.c.host.symbolOfDeclaration(node);
+        const outside = symbol && s.vars.get(symbol);
+        if (symbol) s.vars.set(symbol, v);
         this.evalClassDefinition(node, s, v);
+        if (symbol) {
+          if (outside) s.vars.set(symbol, outside);
+          else s.vars.delete(symbol);
+        }
         return v;
       }
       case K.CallExpression: {
@@ -2120,7 +2139,18 @@ class FunctionAnalysis {
     for (const d of decorators(node)) this.eval(d.expression, s);
     for (const h of (node.heritageClauses ?? []) as Node[]) {
       if (h.token !== K.ExtendsKeyword) continue;
-      for (const t of h.types as Node[]) this.eval(t.expression, s);
+      for (const t of h.types as Node[]) {
+        // what it extends it is: its static state, and what its instances
+        // capture
+        const base = this.eval(t.expression, s);
+        this.bases.set(node, base);
+        if (
+          base.kind === ValueKind.InRegion &&
+          !s.isCounted(base) &&
+          cls.kind === ValueKind.InRegion
+        )
+          s.union(cls.region, base.region);
+      }
       this.mayThrow(s);
     }
     const members = node.members as Node[];
@@ -2593,11 +2623,19 @@ class FunctionAnalysis {
       const property = host.checker.getPropertyOfType(part.type as any, key);
       type = property && host.typeOfSymbol(property as any);
     }
-    const nullable =
-      !type ||
-      this.mayBeNullish(type) ||
-      (!!initializer && this.mayBeNullish(this.a.typeOf(initializer)));
-    return {type, nullable};
+    if (!type) return {nullable: true};
+    if (!initializer) return {type, nullable: this.mayBeNullish(type)};
+    // a default replaces undefined (not null): the part is what else it may
+    // be, or the default
+    const others = (
+      type.flags & TypeFlags.Union ? host.memberTypes(type) : [type]
+    ).filter(m => !(m.flags & (TypeFlags.Undefined | TypeFlags.Void)));
+    return {
+      type: others.length === 1 ? others[0] : type,
+      nullable:
+        others.some(m => this.mayBeNullish(m)) ||
+        this.mayBeNullish(this.a.typeOf(initializer)),
+    };
   }
 
   // Evaluates the object of a property or element, and its key: what it is
@@ -2944,7 +2982,12 @@ class FunctionAnalysis {
     }
     const regions: Region[] = [];
     const v = this.eval(node.expression, s);
-    if (v.kind === ValueKind.InRegion) regions.push(v.region);
+    // an instance of a class defined here holds what the class's code
+    // captures (its bases' too), not the class itself: its static state, and
+    // the other instances, are no part of it
+    const cls = this.classDefinedAs(node.expression, v, s);
+    if (cls) regions.push(...this.instanceCaptures(cls, s));
+    else if (v.kind === ValueKind.InRegion) regions.push(v.region);
     const decl = a.signatureDeclarationOf(node);
     const params = signatureParameters(decl);
     const name = calleeName(node.expression);
@@ -2979,6 +3022,60 @@ class FunctionAnalysis {
     const r = a.newRegion();
     for (const region of regions) s.union(r, region);
     return regionValue(s.find(r));
+  }
+
+  // The class a `new` 's callee is, if it is one defined in this function: by
+  // the declaration its name refers to, else by its value's region.
+  classDefinedAs(callee: Node, v: Value, s: State): Node | undefined {
+    const host = this.a.c.host;
+    const expr = skipOuterExpressions(callee, OEK.All);
+    if (expr.kind === K.Identifier) {
+      const symbol = this.a.symbolOfIdentifier(expr);
+      const decl = symbol && host.valueDeclaration(symbol);
+      const node =
+        decl?.kind === K.ClassDeclaration
+          ? decl
+          : decl?.kind === K.VariableDeclaration &&
+              decl.initializer &&
+              skipOuterExpressions(decl.initializer, OEK.All).kind ===
+                K.ClassExpression
+            ? skipOuterExpressions(decl.initializer, OEK.All)
+            : undefined;
+      if (node && this.classes.some(c => c.node === node)) return node;
+    }
+    if (v.kind !== ValueKind.InRegion) return undefined;
+    const root = s.find(v.region);
+    for (let k = this.classes.length - 1; k >= 0; k--)
+      if (s.find(this.classes[k]!.region) === root)
+        return this.classes[k]!.node;
+    return undefined;
+  }
+
+  // The regions a new instance of a class shares: what its code captures, a
+  // fresh region of them, and what its bases' does (or a base that is no
+  // class defined here, as a whole).
+  instanceCaptures(node: Node, s: State): Region[] {
+    const regions: Region[] = [];
+    const seen = new Set<Node>();
+    for (let n: Node | undefined = node; n && !seen.has(n);) {
+      seen.add(n);
+      const own = this.closureValue(n, s);
+      if (own.kind === ValueKind.InRegion) regions.push(own.region);
+      const base = this.bases.get(n);
+      if (!base) break;
+      const baseClass =
+        base.kind === ValueKind.InRegion
+          ? this.classes.find(c => s.find(c.region) === s.find(base.region))
+              ?.node
+          : undefined;
+      if (baseClass && baseClass !== n) n = baseClass;
+      else {
+        if (base.kind === ValueKind.InRegion && !s.isCounted(base))
+          regions.push(base.region);
+        break;
+      }
+    }
+    return regions;
   }
 
   // Merges regions and returns the root, or 0 if there are none.

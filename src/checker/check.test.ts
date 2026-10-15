@@ -66,14 +66,14 @@ describe('threads-check', () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'nested-finallies-')));
     try {
       const program = [
-        'import { Channel } from "threads";',
+        'import { Channel, consume } from "threads";',
         'declare function use(...values: unknown[]): void;',
         'export function nested(ch: Channel<number[]>) {',
         '  const xs = [1];',
         ...Array.from(
           {length: depth},
           () =>
-            'try { use(1); const local = [[]]; const deep = { a: [1], b: { c: [2] } }; const alias = [xs]; } finally {',
+            'try { use(1); const local = [[]]; const deep = { a: [1], b: { c: [2] } }; const alias = [xs]; const gone = [1]; consume(gone); } finally {',
         ),
         'ch.send(xs); use(xs);',
         ...Array.from({length: depth}, () => '}'),
@@ -309,6 +309,11 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(418,95): error TS96006: 'xs' may have been consumed by 'consume' on line 418.",
         "try-exits.ts(430,10): error TS96003: 'C' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 429.",
         "try-exits.ts(442,70): error TS96006: 'xs' may have been consumed by 'consume' on line 442.",
+        "try-exits.ts(455,10): error TS96003: 'Derived' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 454.",
+        "try-exits.ts(459,24): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 461.",
+        "try-exits.ts(462,14): error TS96003: 'Derived' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 461.",
+        "try-exits.ts(469,10): error TS96003: 'C' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 468.",
+        "try-exits.ts(475,10): error TS96003: 'K' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 474.",
       ].sort(),
     );
   });
