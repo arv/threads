@@ -369,6 +369,158 @@ describe('what the lowering moves, as it runs', () => {
 describe('counting lowering review regressions', () => {
   const cases = [
     {
+      name: 'evaluates a derived receiver exactly once before replacing its owner',
+      source: `export function main() {
+        let a = new SharedArray(P, 2), q = new SharedArray(P, 2);
+        let i = 0;
+        a[i++].x = ((a = new SharedArray(P, 2)), (q = new SharedArray(P, 2)), 7);
+        log(JSON.stringify([i, q[0].x, q[1].x]));
+      }`,
+      expected: '[1,0,0]',
+    },
+    {
+      name: 'evaluates a switch discriminant outside its owned bindings',
+      source: `function f() {
+        const p = 0;
+        switch (p) {
+          case 0:
+            const get = () => p.x;
+            const p = new P(); p.x = 103;
+            return get;
+        }
+        throw new Error('unreachable');
+      }
+      export function main() { log(f()()); }`,
+      expected: '103',
+    },
+    {
+      name: 'releases switch owners on a fallthrough break or a throwing initializer',
+      source: `function fail(): P { throw new Error('fail'); }
+      function f(n: number) {
+        switch (n) {
+          case 0:
+          case 1:
+            const p = new P(); p.x = 107;
+          default:
+            const q = n ? fail() : new P(); q.x = 1;
+            break;
+        }
+      }
+      export function main() {
+        const before = heapStats();
+        f(0);
+        try { f(1); } catch {}
+        const after = heapStats();
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '0',
+    },
+    {
+      name: 'holds a struct array element while its array owner is replaced',
+      source: `function f() {
+        let a = new SharedArray(P, 1), q = new SharedArray(P, 1);
+        a[0].x = ((a = new SharedArray(P, 1)), (q = new SharedArray(P, 1)), 7);
+        return q[0].x;
+      }
+      export function main() {
+        const before = heapStats();
+        const result = f();
+        const after = heapStats();
+        log(JSON.stringify([result,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[0,0]',
+    },
+    {
+      name: 'holds a referenced child while its parent is replaced',
+      source: `const Parent = struct({next: ref<P>()});
+      function f() {
+        let p = new Parent(); p.next = new P();
+        let q = new P();
+        p.next!.x = ((p = new Parent()), (q = new P()), 7);
+        return q.x;
+      }
+      export function main() {
+        const before = heapStats();
+        const result = f();
+        const after = heapStats();
+        log(JSON.stringify([result,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[0,0]',
+    },
+    {
+      name: 'holds a child while the reference field itself is replaced',
+      source: `const Parent = struct({next: ref<P>()});
+      function f() {
+        const p = new Parent(); p.next = new P();
+        let q = new P();
+        p.next!.x = ((p.next = new P()), (q = new P()), 7);
+        return q.x;
+      }
+      export function main() { log(f()); }`,
+      expected: '0',
+    },
+    {
+      name: 'releases a derived receiver when its right side throws',
+      source: `function fail(): never { throw new Error('fail'); }
+      function f() {
+        let a = new SharedArray(P, 1);
+        a[0].x = ((a = new SharedArray(P, 1)), fail());
+      }
+      export function main() {
+        const before = heapStats();
+        try { f(); } catch {}
+        const after = heapStats();
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '0',
+    },
+    {
+      name: 'prepares forward capture queues for a switch lexical scope',
+      source: `function f() {
+        switch (0) {
+          case 0:
+            const get = () => p.x;
+            const p = new P(); p.x = 89;
+            return get;
+        }
+        throw new Error('unreachable');
+      }
+      export function main() { log(f()()); }`,
+      expected: '89',
+    },
+    {
+      name: 'shares forward capture queues and bindings across switch clauses',
+      source: `function f(n: number) {
+        switch (n) {
+          case 0:
+            function get() { return p.x; }
+          case 1:
+            const p = new P(); p.x = 97;
+          default:
+            return get;
+        }
+      }
+      export function main() { log(f(0)()); }`,
+      expected: '97',
+    },
+    {
+      name: 'declares borrowed var capture queues at function scope',
+      source: `function f(source: P) {
+        { const early = () => p.x; var p = source; early(); }
+        return () => p.x;
+      }
+      export function main() {
+        const p = new P(); p.x = 101;
+        const before = heapStats();
+        log(f(p)());
+        const after = heapStats();
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '101\n0',
+    },
+    {
       name: 'moves a returned const after splitting a queued declaration',
       source: `function f(): P {
         const get = () => p.x, p = new P(), q = new P();
@@ -647,7 +799,7 @@ describe('counting lowering review regressions', () => {
     ({source, expected}) => {
       const dir = project(
         {
-          'app.ts': `import {f64, heapStats, log, struct, type Struct} from '@arv/threads';
+          'app.ts': `import {f64, heapStats, log, ref, SharedArray, struct, type Struct} from '@arv/threads';
         const P = struct({x: f64});
         type P = Struct<typeof P>;
         ${source}`,

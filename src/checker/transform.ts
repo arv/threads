@@ -233,6 +233,8 @@ class Lowering {
   // Owned var bindings belong to the function, including declarations in loops.
   private readonly functionVars = new Map<Node, Node[]>();
   private readonly hoistedVars = new Set<Node>();
+  private readonly functionScopedVars = new Set<Node>();
+  private readonly functionQueueVars = new Map<Node, Node[]>();
   // for-let bindings stay in the head. A separate owner tracks their current
   // count across iterations and is available to the enclosing finally.
   private readonly loopOwners = new Map<
@@ -561,14 +563,8 @@ class Lowering {
           [node.elseStatement, elseStatement],
         ]);
       }
-      case K.SwitchStatement: {
-        const expression = this.fullExpression(node.expression, Ctx.AtOnce);
-        const caseBlock = this.visitEachChild(node.caseBlock);
-        return this.update(node, [
-          [node.expression, expression],
-          [node.caseBlock, caseBlock],
-        ]);
-      }
+      case K.SwitchStatement:
+        return this.visitSwitchStatement(node);
       case K.ThrowStatement:
         return this.update(node, [
           [node.expression, this.fullExpression(node.expression, Ctx.AtOnce)],
@@ -1461,10 +1457,12 @@ class Lowering {
     for (const statement of list) {
       if (statement.kind !== K.VariableStatement) continue;
       for (const decl of statement.declarationList.declarations as Node[])
-        if (!this.hoistedVars.has(decl) && this.prepareQueue(decl))
+        if (!this.functionScopedVars.has(decl) && this.prepareQueue(decl))
           queues.push(decl);
     }
-    for (const decl of vars) if (this.prepareQueue(decl)) queues.push(decl);
+    if (isBody)
+      for (const decl of this.functionQueueVars.get(node) ?? [])
+        if (this.prepareQueue(decl)) queues.push(decl);
     if (isBody && isFunctionLikeDeclaration(parent))
       prologue = this.functionPrologue(parent!);
     if (moving) this.renameShadowingVars(parent!, node);
@@ -1629,8 +1627,12 @@ class Lowering {
   // visitStatements for a block whose trys would split its scope: one try
   // around all of it, the owned locals declared (as 0) ahead of it and
   // assigned where they were declared, function declarations in place.
-  private visitStatementsFlat(list: Node[], holds: Map<number, Ir[]>): Ir[] {
-    const owned: Node[] = [];
+  private visitStatementsFlat(
+    list: Node[],
+    holds: Map<number, Ir[]>,
+    switchOwned?: Node[],
+  ): Ir[] {
+    const owned: Node[] = switchOwned ?? [];
     const statements: Ir[] = [...(holds.get(-1) ?? [])];
     list.forEach((statement, i) => {
       const names = this.ownedLocalsOf(statement);
@@ -1664,12 +1666,68 @@ class Lowering {
       }
       statements.push(...(holds.get(i) ?? []));
     });
-    const declarations = gen(Prec.Primary, [
+    if (switchOwned) return statements;
+    return [this.ownedDeclarations(owned), this.tryFinally(statements, owned)];
+  }
+
+  private ownedDeclarations(owned: Node[]): Ir {
+    return gen(Prec.Primary, [
       '\nlet ',
       ...owned.flatMap((n, i) => [i > 0 ? ', ' : '', this.name(n), ' = 0']),
       ';',
     ]);
-    return [declarations, this.tryFinally(statements, owned)];
+  }
+
+  // All clauses share one lexical scope. Keep their bindings and queues
+  // together, and release initialized owners on every exit from the switch.
+  private visitSwitchStatement(node: Node): Ir {
+    const expression = this.fullExpression(node.expression, Ctx.AtOnce);
+    const clauses = node.caseBlock.clauses as Node[];
+    const queues: Node[] = [];
+    for (const clause of clauses)
+      for (const statement of clause.statements as Node[]) {
+        if (statement.kind !== K.VariableStatement) continue;
+        for (const decl of statement.declarationList.declarations as Node[])
+          if (!this.functionScopedVars.has(decl) && this.prepareQueue(decl))
+            queues.push(decl);
+      }
+    const owned: Node[] = [];
+    const caseBlock = this.update(
+      node.caseBlock,
+      clauses.map(clause => {
+        const value = this.fullExpression(clause.expression, Ctx.AtOnce);
+        const list = clause.statements as Node[];
+        return [
+          clause,
+          this.withStatements(
+            clause,
+            clause.statements,
+            this.visitStatementsFlat(list, this.holdStatements(list), owned),
+            value ? [[clause.expression, value]] : [],
+          ),
+        ];
+      }),
+    );
+    // The discriminant runs outside the switch's lexical environment.
+    // Stage it before entering the block that declares its owned bindings.
+    const discriminant = owned.length ? this.newTemp() : undefined;
+    const result = this.update(node, [
+      [node.expression, discriminant ? tempRef(discriminant) : expression],
+      [node.caseBlock, caseBlock],
+    ]);
+    if (!owned.length && !queues.length) return result;
+    const scope = block([
+      ...queues.map(d => this.queueDeclaration(d)),
+      ...(owned.length
+        ? [this.ownedDeclarations(owned), this.tryFinally([result], owned)]
+        : [result]),
+    ]);
+    return discriminant
+      ? block([
+          exprStatement(this.assign(tempRef(discriminant), expression!)),
+          scope,
+        ])
+      : scope;
   }
 
   // The names of the owned locals a statement declares.
@@ -1813,6 +1871,7 @@ class Lowering {
     const cached = this.functionVars.get(body);
     if (cached) return cached;
     const vars: Node[] = [];
+    const queues: Node[] = [];
     // A var redeclaration of a parameter replaces the parameter's value,
     // using the count acquired and released by the parameter prologue.
     const symbols = new Set<number>(
@@ -1830,6 +1889,8 @@ class Lowering {
         !(node.flags & (NodeFlags.Let | NodeFlags.Const))
       ) {
         for (const decl of node.declarations as Node[]) {
+          this.functionScopedVars.add(decl);
+          if (this.forwardCaptures.has(decl)) queues.push(decl);
           const local = this.r.local(decl);
           if (local !== Local.Owned && local !== Local.OwnedMoved) continue;
           this.hoistedVars.add(decl);
@@ -1844,6 +1905,7 @@ class Lowering {
     };
     forEachChild(body, visit);
     this.functionVars.set(body, vars);
+    this.functionQueueVars.set(body, queues);
     return vars;
   }
 
@@ -1878,7 +1940,7 @@ class Lowering {
     if (node.initializer?.kind === K.VariableDeclarationList)
       for (const decl of node.initializer.declarations as Node[])
         // Hoisted vars already have their queue in the function body.
-        if (!this.hoistedVars.has(decl) && this.prepareQueue(decl))
+        if (!this.functionScopedVars.has(decl) && this.prepareQueue(decl))
           queues.push(decl);
     const owned = this.ownedLocalsOfFor(node);
     const owners = owned.map(name => {
@@ -2667,16 +2729,24 @@ class Lowering {
     return found;
   }
 
-  // The array an element access (or an atomic operation) reads, visited. A
-  // variable that what comes after it assigns (`a[(a = b, 0)]`) is read
-  // before, into a temporary that holds a count until the full expression
-  // ends, as JavaScript reads the array first (the fork reads it again,
-  // after the index).
+  // A receiver can be derived from an owner (`a[i]`, `p.next`) that
+  // later evaluation replaces. Hold the evaluated address through writes
+  // to counted bindings or fields, including cleanup when evaluation throws.
   private receiver(object: Node, ctx: Ctx, after: Node[]): Ir {
-    const ir = this.visitIn(object, ctx)!;
-    const id = skipOuterExpressions(object, OEK.All);
-    if (id.kind !== K.Identifier || !after.some(n => this.r.assignsIn(n, id)))
-      return ir;
+    const replacesOwner = (node: Node): boolean => {
+      if (isErased(node) || isFunctionLike(node) || isClassLike(node))
+        return false;
+      if (
+        node.kind === K.BinaryExpression &&
+        isAssignmentOperator(node.operatorToken.kind) &&
+        this.r.cellType(node.left).kind !== CellKind.None
+      )
+        return true;
+      return !!forEachChild(node, replacesOwner);
+    };
+    const hold = after.some(replacesOwner);
+    const ir = this.visitIn(object, hold ? Ctx.AtOnce : ctx)!;
+    if (!hold) return ir;
     // no full expression around to release it after: a plain copy
     if (!this.frames[this.frames.length - 1]) {
       const temp = this.newTemp();
