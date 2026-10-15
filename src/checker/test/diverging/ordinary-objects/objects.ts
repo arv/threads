@@ -63,3 +63,5 @@ declare const plains: { value: number; next: null }[];
 export function spreadRest() { many(...plains); }                     // error
 declare const plainIterable: Iterable<{ value: number; next: null }>;
 export function spreadIterable() { many(...plainIterable); }          // error
+declare function headThenNodes(...args: [head?: unknown, ...tail: Node[]]): void;
+export function spreadTupleRest() { headThenNodes(...plains); }      // error: ordinary objects for the Node tail

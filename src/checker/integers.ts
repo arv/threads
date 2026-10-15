@@ -78,10 +78,12 @@ export function checkIntegerTypeTarget(
   target: Type,
 ): void {
   const kind = getIntegerTargetKind(c, target);
+  // an optional element's undefined is no value that is stored
+  const values = nonNullishMembers(c, source);
   if (
     kind === '' ||
     !maybeTypeOfKind(c, source, TypeFlags.NumberLike | TypeFlags.Any) ||
-    isIntegerType(c, source)
+    values.every(v => isIntegerType(c, v))
   )
     return;
   c.error(at, Messages.NotAnInteger, kind === 'u' ? 'a u8' : 'an i32');

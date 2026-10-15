@@ -42,3 +42,24 @@ export function sentPastEmptySpread() {
   sendFirst(...none, xs);
   use(xs);                         // error: xs was sent
 }
+// an optional element is at its own place, when it is there, and its
+// undefined is no value stored
+declare const sparse: [undefined?, number?];
+declare function firstInt(first?: i32, second?: number): void;
+declare const someInts: [i32?];
+declare function maybeTake(k?: i32): void;
+export function optionals() {
+  firstInt(...sparse);             // fine: the number goes to second
+  maybeTake(...someInts);          // fine: an i32, if anything
+}
+// a rest typed a tuple: its elements' places, then its tail's
+declare function headThenInts(...args: [head?: number, ...tail: i32[]]): void;
+export function tupleRest() {
+  headThenInts(...numbers);        // error: numbers for the i32 tail
+}
+// a spread of nothing sends nothing, whatever came before it
+declare function sink(...values: Sending<number[]>[]): void;
+export function emptyAfterUnknown() {
+  const lists = [[1]];
+  sink(...lists, ...none);         // fine: none passes nothing
+}

@@ -578,7 +578,13 @@ export function spreadShape(c: Own, t: Type): SpreadShape {
       shape.max = Infinity;
       return;
     }
-    shape.values.push({type, from: shape.min, to: shape.max});
+    // an element before any rest is at its own place, an optional one as
+    // well, when it is there; one after a rest is past its elements
+    shape.values.push(
+      shape.max === Infinity
+        ? {type, from: shape.min, to: Infinity}
+        : {type, from: k, to: k},
+    );
     if (flag & ElementFlags.Required) shape.min++;
     shape.max++;
   });
@@ -586,19 +592,23 @@ export function spreadShape(c: Own, t: Type): SpreadShape {
 }
 
 // The parameter types of the places from..to of a signature (the rest's for
-// the places past it), each once.
+// the places past it, each of a tuple rest's own), each once.
 export function parameterTypesAt(
   c: Own,
   signature: Signature,
   from: number,
   to: number,
 ): Type[] {
-  const last = Math.min(to, Math.max(from, signature.parameters.length - 1));
+  // past the last parameter, a rest's places: a rest typed a tuple has one for
+  // each of its elements, and its tail's after them (probed so far)
+  const places =
+    signature.parameters.length + (signature.hasRestParameter ? 32 : 0);
+  const last = Math.min(to, Math.max(from, places - 1));
   const types: Type[] = [];
   const seen = new Set<string>();
   for (let p = from; p <= last; p++) {
     const t = c.host.parameterTypeAt(signature, p);
-    if (!t) continue;
+    if (!t) break;
     const key = c.host.typeToString(t);
     if (seen.has(key)) continue;
     seen.add(key);

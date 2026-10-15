@@ -332,3 +332,7 @@ export function iteratorBeforeTarget() {
   let xs = [1];
   try { consume(xs); [(xs = [2], kept).value] = items; } finally { use(xs); }  // error: getting the iterator may throw
 }
+export function enumInitializers() {
+  let xs = [1];
+  try { enum E { A = (consume(xs), 1), B = getter.value } xs = [2]; } finally { use(xs); }  // error: B's getter may throw after A consumed xs
+}

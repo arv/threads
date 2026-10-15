@@ -539,6 +539,7 @@ class Analyzer {
   readonly captures = new Map<Node, Captures>();
   readonly loopFresh = new Map<Node, Set<TsSymbol>>();
   readonly primitiveOrShared = new Map<Type, boolean>();
+  readonly blockScoped = new Map<Node, Set<number>>();
   readonly idOf: (symbol: TsSymbol) => number;
 
   constructor(c: Own) {
@@ -564,6 +565,54 @@ class Analyzer {
 
   typeOf(node: Node): Type {
     return this.c.host.typeOf(node);
+  }
+
+  // The variables a try statement's block and catch declare with `let` ,
+  // `const` , `class` or as the catch's, by symbol id: none is in scope in its
+  // finally (not inside the functions they hold, analyzed on their own).
+  blockScopedIn(node: Node): Set<number> {
+    let ids = this.blockScoped.get(node);
+    if (ids) return ids;
+    const found = new Set<number>();
+    ids = found;
+    const add = (decl: Node) => {
+      const symbol = this.c.host.symbolOfDeclaration(decl);
+      if (symbol) found.add(this.idOf(symbol));
+    };
+    const names = (name: Node | undefined): void => {
+      if (!name) return;
+      if (name.kind === K.Identifier) return;
+      if (isBindingPattern(name))
+        for (const element of name.elements as Node[])
+          if (element.kind === K.BindingElement) {
+            add(element);
+            names(element.name);
+          }
+    };
+    const visit = (n: Node): boolean => {
+      if (isFunctionLike(n)) return false;
+      if (
+        n.kind === K.VariableDeclaration &&
+        (n.parent as Node).flags & NodeFlags.BlockScoped
+      ) {
+        add(n);
+        names(n.name);
+      } else if (n.kind === K.ClassDeclaration) add(n);
+      forEachChild(n, visit);
+      return false;
+    };
+    visit(node.tryBlock);
+    const clause = node.catchClause as Node | undefined;
+    if (clause) {
+      const decl = clause.variableDeclaration as Node | undefined;
+      if (decl) {
+        add(decl);
+        names(decl.name);
+      }
+      visit(clause.block);
+    }
+    this.blockScoped.set(node, ids);
+    return ids;
   }
 
   analyzeFunction(node: Node): FunctionResult {
@@ -1310,16 +1359,9 @@ class FunctionAnalysis {
         if (classDefinitionMayThrow(node)) this.mayThrow(s);
         break;
       case K.EnumDeclaration:
-        // its computed members are evaluated as it is defined
-        if (
-          (node.members as Node[]).some(
-            m =>
-              m.initializer &&
-              m.initializer.kind !== K.NumericLiteral &&
-              m.initializer.kind !== K.StringLiteral,
-          )
-        )
-          this.mayThrow(s);
+        // its members' values are evaluated, in order, as it is defined
+        for (const member of node.members as Node[])
+          if (member.initializer) this.eval(member.initializer, s);
         break;
       case K.VariableStatement: {
         this.variableDeclarationList(node.declarationList, s);
@@ -1700,8 +1742,13 @@ class FunctionAnalysis {
       // finally is analyzed once for both, so finallies nested in finallies
       // are not analyzed exponentially often
       const runs: {start: State; end: State}[] = [];
+      // what the try's blocks declare is out of scope in the finally, and
+      // after: no run keeps it, and none differs from another by it
+      const local = this.a.blockScopedIn(node);
       const run = (early: State[]) => {
         const start = joinAllStates(early[0]!, early.slice(1));
+        for (const symbol of start.vars.keys())
+          if (local.has(this.a.idOf(symbol))) start.vars.delete(symbol);
         const done = runs.find(r => r.start.sameAs(start));
         if (done) return done.end.copy();
         const input = start.copy();
@@ -2534,7 +2581,9 @@ class FunctionAnalysis {
     return args.map(arg => {
       if (arg.kind !== K.SpreadElement) return {from: from++, to: to++};
       const shape = spreadShape(this.a.c, this.a.typeOf(arg.expression));
-      const place = {from, to: to + shape.max - 1};
+      // an empty one fills no place, wherever it comes
+      const place =
+        shape.max === 0 ? {from: 1, to: 0} : {from, to: to + shape.max - 1};
       from += shape.min;
       to += shape.max;
       return place;

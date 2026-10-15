@@ -59,8 +59,8 @@ describe('threads-check', () => {
 
   it('analyzes a finally once for each way in, however deep it is nested', () => {
     // a finally runs for each state it may be reached with, and runs that
-    // start alike are one: 20 finallies nested in each other's are not 2 ** 20
-    // runs of the innermost
+    // start alike are one, what the try's block declares aside: 20 finallies
+    // nested in each other's are not 2 ** 20 runs of the innermost
     const depth = 20;
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'nested-finallies-')));
     try {
@@ -69,7 +69,10 @@ describe('threads-check', () => {
         'declare function use(...values: unknown[]): void;',
         'export function nested(ch: Channel<number[]>) {',
         '  const xs = [1];',
-        ...Array.from({length: depth}, () => 'try { use(1); } finally {'),
+        ...Array.from(
+          {length: depth},
+          () => 'try { use(1); const local = 0; } finally {',
+        ),
         'ch.send(xs); use(xs);',
         ...Array.from({length: depth}, () => '}'),
         '}',
@@ -288,6 +291,7 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(324,3): error TS96006: 'xs' may have been consumed by 'consume' on line 324.",
         "try-exits.ts(328,3): error TS96006: 'box' may have been consumed by 'consume' on line 328.",
         "try-exits.ts(333,72): error TS96006: 'xs' may have been consumed by 'consume' on line 333.",
+        "try-exits.ts(337,85): error TS96005: 'xs' was consumed by 'consume' on line 337.",
       ].sort(),
     );
   });
@@ -349,6 +353,7 @@ describe('threads-check, where it differs from the fork', () => {
         'spreads.ts(33,17): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
         'spreads.ts(34,35): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
         "spreads.ts(43,7): error TS96001: 'xs' cannot be used here: it was sent to 'sendFirst' on line 42.",
+        'spreads.ts(58,16): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
       ].sort(),
     );
   });
@@ -399,6 +404,7 @@ describe('threads-check, where it differs from the fork', () => {
         "objects.ts(60,46): error TS96035: A value of type '{ readonly value: 1; readonly next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
         "objects.ts(63,37): error TS96035: A value of type '{ value: number; next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
         "objects.ts(65,41): error TS96035: A value of type '{ value: number; next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
+        "objects.ts(67,51): error TS96035: A value of type '{ value: number; next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
       ].sort(),
     );
   });
