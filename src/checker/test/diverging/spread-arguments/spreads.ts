@@ -82,3 +82,8 @@ declare function headInt(...values: [head?: i32, ...tail: number[]]): void;
 export function afterEmptyRest() {
   headInt(...trailing);            // error: the number may be the head
 }
+// a generic rest's places are its instantiation's
+declare function forward<A extends unknown[]>(...args: A): void;
+export function forwardedGenerically() {
+  forward<Parameters<typeof longRest>>(...numbers);  // error: numbers for the i32 tail
+}

@@ -266,7 +266,7 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(181,72): error TS96006: 'xs' may have been consumed by 'consume' on line 181.",
         "try-exits.ts(185,71): error TS96006: 'xs' may have been consumed by 'consume' on line 185.",
         "try-exits.ts(189,68): error TS96006: 'xs' may have been consumed by 'consume' on line 189.",
-        "try-exits.ts(193,65): error TS96006: 'xs' may have been consumed by 'consume' on line 193.",
+        "try-exits.ts(193,65): error TS96005: 'xs' was consumed by 'consume' on line 193.",
         "try-exits.ts(197,69): error TS96006: 'xs' may have been consumed by 'consume' on line 197.",
         "try-exits.ts(201,73): error TS96006: 'xs' may have been consumed by 'consume' on line 201.",
         "try-exits.ts(205,66): error TS96006: 'xs' may have been consumed by 'consume' on line 205.",
@@ -298,6 +298,7 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(345,7): error TS96001: 'ys' cannot be used here: it was sent to 'send' on line 344.",
         "try-exits.ts(350,46): error TS96002: 'row' cannot be used here: it may have been sent to 'send' on line 350.",
         "try-exits.ts(357,87): error TS96006: 'xs' may have been consumed by 'consume' on line 357.",
+        "try-exits.ts(369,80): error TS96006: 'xs' may have been consumed by 'consume' on line 369.",
       ].sort(),
     );
   });
@@ -362,6 +363,7 @@ describe('threads-check, where it differs from the fork', () => {
         'spreads.ts(58,16): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
         'spreads.ts(77,12): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
         'spreads.ts(83,11): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(88,40): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
       ].sort(),
     );
   });

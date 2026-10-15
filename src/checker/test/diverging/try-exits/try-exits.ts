@@ -356,3 +356,15 @@ export function keyBeforeTarget() {
   let xs = [1];
   try { consume(xs); ({ [anyKey]: (xs = [2], kept).value } = source); } finally { use(xs); }  // error: the key's conversion may throw
 }
+// an operator on plain primitives converts them with no error
+export function plainPrimitives() {
+  let xs = [1];
+  let n = 1;
+  try { consume(xs); const m = 1 + 1; +1; n++; `${1}`; xs = [2]; use(m, n); } finally { use(xs); }  // fine
+}
+// an object pattern refuses a null or undefined source before any target
+declare const anyObj: any;
+export function nullishBeforeTarget() {
+  let xs = [1];
+  try { consume(xs); ({ a: (xs = [2], kept).value } = anyObj); } finally { use(xs); }  // error: anyObj may be null
+}

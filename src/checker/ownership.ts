@@ -583,6 +583,27 @@ class Analyzer {
     return this.c.host.typeOf(node);
   }
 
+  // Reports whether an operator converts a value of type t with no code of
+  // its own and no error: a number, a string, a boolean, null or undefined
+  // (an i32's brand aside), not a bigint, which mixes with nothing else, a
+  // symbol, an object or what may be any of them.
+  isPlainPrimitive(t: Type): boolean {
+    const plain =
+      TypeFlags.NumberLike |
+      TypeFlags.StringLike |
+      TypeFlags.BooleanLike |
+      TypeFlags.Null |
+      TypeFlags.Undefined |
+      TypeFlags.Void;
+    if (t.flags & TypeFlags.Union)
+      return this.c.host.memberTypes(t).every(m => this.isPlainPrimitive(m));
+    if (t.flags & TypeFlags.Intersection)
+      return this.c.host
+        .memberTypes(t)
+        .some(m => !!(m.flags & (TypeFlags.NumberLike | TypeFlags.StringLike)));
+    return !!(t.flags & plain);
+  }
+
   // The variables a try statement's block and catch declare with `let` ,
   // `const` , `class` or as the catch's, by symbol id: none is in scope in its
   // finally (not inside the functions they hold, analyzed on their own).
@@ -1872,7 +1893,11 @@ class FunctionAnalysis {
       case K.TemplateExpression:
         for (const span of node.templateSpans as Node[]) {
           this.eval(span.expression, s);
-          this.mayThrow(s); // converted to a string before the next is made
+          // converted to a string before the next is made: an object's, or a
+          // symbol's, may throw
+          const t = a.typeOf(span.expression);
+          if (!a.isPlainPrimitive(t) && !(t.flags & TypeFlags.BigIntLike))
+            this.mayThrow(s);
         }
         return sharedValue;
       case K.TypeOfExpression:
@@ -1890,12 +1915,18 @@ class FunctionAnalysis {
         )
           this.evalWriteTarget(node.operand, s);
         else this.eval(node.operand, s);
-        // all but `!` convert their operand to a number
-        if (node.operator !== K.ExclamationToken) this.mayThrow(s);
+        // all but `!` convert their operand to a number, which a plain
+        // primitive's name does with no error (a property's may, as it is
+        // read and written)
+        if (
+          node.operator !== K.ExclamationToken &&
+          !this.convertsSafely(node.operand)
+        )
+          this.mayThrow(s);
         return sharedValue;
       case K.PostfixUnaryExpression:
         this.evalWriteTarget(node.operand, s);
-        this.mayThrow(s);
+        if (!this.convertsSafely(node.operand)) this.mayThrow(s);
         return sharedValue;
       case K.YieldExpression: {
         this.eval(node.expression, s);
@@ -2124,7 +2155,7 @@ class FunctionAnalysis {
         return v;
       }
       const v = this.eval(node.right, s);
-      this.assign(node.left, v, s);
+      this.assign(node.left, v, s, this.a.typeOf(node.right));
       return v;
     }
     if (
@@ -2166,7 +2197,8 @@ class FunctionAnalysis {
       }
       this.evalWriteTarget(node.left, s);
       this.eval(node.right, s);
-      this.mayThrow(s);
+      if (!this.convertsSafely(node.left) || !this.convertsSafely(node.right))
+        this.mayThrow(s);
       return sharedValue;
     }
     if (
@@ -2186,11 +2218,16 @@ class FunctionAnalysis {
     }
     this.eval(node.left, s);
     this.eval(node.right, s);
-    // an operator that converts its operands (arithmetic, a comparison), `in`
-    // and `instanceof` may throw; `===` and `!==` do not
+    // an operator that converts its operands (arithmetic, a comparison) may
+    // throw, but for plain primitives; `in` and `instanceof` may; `===` and
+    // `!==` do not
     if (
       op !== K.EqualsEqualsEqualsToken &&
-      op !== K.ExclamationEqualsEqualsToken
+      op !== K.ExclamationEqualsEqualsToken &&
+      (op === K.InKeyword ||
+        op === K.InstanceOfKeyword ||
+        !this.convertsSafely(node.left) ||
+        !this.convertsSafely(node.right))
     )
       this.mayThrow(s);
     if (
@@ -2199,6 +2236,30 @@ class FunctionAnalysis {
     )
       return regionValue(this.a.newRegion());
     return sharedValue;
+  }
+
+  // Reports whether a value of type t may be null or undefined: of a type
+  // that says so, or that does not tell (any, unknown).
+  mayBeNullish(t: Type): boolean {
+    const nullish =
+      TypeFlags.Null |
+      TypeFlags.Undefined |
+      TypeFlags.Void |
+      TypeFlags.Any |
+      TypeFlags.Unknown;
+    if (t.flags & nullish) return true;
+    return (
+      !!(t.flags & TypeFlags.Union) &&
+      this.a.c.host.memberTypes(t).some(m => !!(m.flags & nullish))
+    );
+  }
+
+  // Reports whether an operand converts with no error and no code of its own:
+  // a plain primitive (see isPlainPrimitive) that is no property or element,
+  // which a getter or setter reads or writes.
+  convertsSafely(operand: Node): boolean {
+    const n = skipOuterExpressions(operand, OEK.Assertions | OEK.Parentheses);
+    return !isMemberAccess(n) && this.a.isPlainPrimitive(this.a.typeOf(n));
   }
 
   // Evaluates the target of `x++` , `delete a.b` , `a.b += 1` and the like,
@@ -2221,7 +2282,9 @@ class FunctionAnalysis {
   // Assigns a value to an assignment target: rebinds a local variable, merges
   // into the OUTER region of a captured one, or links the value to the object
   // whose property is written.
-  assign(target: Node, v: Value, s: State): void {
+  // source: the type of what is assigned, where it is known (an object
+  // pattern rejects null and undefined before its first target)
+  assign(target: Node, v: Value, s: State, source?: Type): void {
     target = skipOuterExpressions(target, OEK.Assertions | OEK.Parentheses);
     const a = this.a;
     switch (target.kind) {
@@ -2260,9 +2323,14 @@ class FunctionAnalysis {
         this.mayThrow(s);
         return;
       case K.ObjectLiteralExpression:
-        // each property read (a getter's) may throw, after the defaults and
-        // the assignments before it
-        if ((target.properties as Node[]).length === 0) this.mayThrow(s);
+        // a source that may be null or undefined throws before any target is
+        // evaluated; each property read (a getter's) may, after the defaults
+        // and the assignments before it
+        if (
+          (target.properties as Node[]).length === 0 ||
+          (source && this.mayBeNullish(source))
+        )
+          this.mayThrow(s);
         for (const property of target.properties as Node[]) {
           if (property.name?.kind === K.ComputedPropertyName) {
             // converted to a key, which may throw, before the target is

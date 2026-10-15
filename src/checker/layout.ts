@@ -609,10 +609,12 @@ export function spreadShape(c: Own, t: Type): SpreadShape {
 export function parameterTypesAt(
   c: Own,
   signature: Signature,
+  call: Node,
   from: number,
   to: number,
 ): Type[] {
-  const places = signature.parameters.length - 1 + restPlaces(c, signature);
+  const places =
+    signature.parameters.length - 1 + restPlaces(c, signature, call);
   const last = Math.min(to, Math.max(from, places - 1));
   const types: Type[] = [];
   const seen = new Set<number>();
@@ -630,14 +632,41 @@ export function parameterTypesAt(
 // one for each of its elements (a rest element's for its own and those past
 // it); for a rest whose type the declaration does not tell (a type
 // parameter's), a generous number of them, probed.
-function restPlaces(c: Own, signature: Signature): number {
+function restPlaces(c: Own, signature: Signature, call: Node): number {
   if (!signature.hasRestParameter) return 1;
-  const decl = c.host.declarationOf(signature.declaration);
+  const host = c.host;
+  const decl = host.declarationOf(signature.declaration);
   const rest = (decl?.parameters as Node[] | undefined)?.at(-1);
-  const t = rest?.type && c.host.checker.getTypeFromTypeNode(rest.type);
-  if (t && c.host.checker.isTupleType(t))
-    return Math.max(1, c.host.typeArguments(t).length);
-  return 33;
+  let t = rest?.type && host.checker.getTypeFromTypeNode(rest.type);
+  if (t && t.flags & TypeFlags.TypeParameter) {
+    // one of the declaration's type parameters: what the call gives it, or,
+    // inferred from the call's arguments, as many places as they fill
+    const name = host.typeToString(t);
+    const k = ((decl!.typeParameters ?? []) as Node[]).findIndex(
+      p => p.name.text === name,
+    );
+    const given = (call.typeArguments as Node[] | undefined)?.[k];
+    if (!given) return argumentPlaces(c, call);
+    t = host.checker.getTypeFromTypeNode(given as any);
+  }
+  if (t && host.checker.isTupleType(t))
+    return Math.max(1, host.typeArguments(t).length);
+  return 1; // an array's: one type for every place past
+}
+
+// The places a call's arguments fill, counting a spread of unknown length as
+// its values' and one more.
+function argumentPlaces(c: Own, call: Node): number {
+  let places = 1;
+  for (const arg of (call.arguments ?? []) as Node[]) {
+    if (arg.kind !== K.SpreadElement) {
+      places++;
+      continue;
+    }
+    const shape = spreadShape(c, c.host.typeOf(arg.expression));
+    places += shape.max === Infinity ? shape.values.length + 1 : shape.max;
+  }
+  return places;
 }
 
 // Reports whether a value of type t is an ordinary object: of an object type
@@ -963,6 +992,7 @@ function computeConversion(c: Own, node: Node): void {
               for (const parameter of parameterTypesAt(
                 c,
                 signature,
+                node,
                 from + value.from,
                 to + value.to,
               )) {
@@ -980,7 +1010,7 @@ function computeConversion(c: Own, node: Node): void {
         else {
           // past a spread of unknown length: checked against each parameter
           // it may go to
-          const parameters = parameterTypesAt(c, signature, from, to);
+          const parameters = parameterTypesAt(c, signature, node, from, to);
           for (const parameter of parameters) {
             checkIntegerTarget(c, arg, parameter);
             checkLayoutTarget(c, arg, parameter, false, false);
