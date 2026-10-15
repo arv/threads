@@ -96,6 +96,13 @@ const projects: Project[] = [
     rootDir: join(repo, 'playground'),
   },
 ];
+// corners of the lowering the others reach little
+projects.push({
+  name: 'emit',
+  tsconfig: join(checkerDir, 'test/emit/tsconfig.json'),
+  runtime: 'threads',
+  rootDir: join(checkerDir, 'test/emit'),
+});
 for (const name of readdirSync(join(checkerDir, 'test/cases')).sort()) {
   const dir = join(checkerDir, 'test/cases', name);
   projects.push({
