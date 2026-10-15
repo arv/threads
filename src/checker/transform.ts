@@ -79,8 +79,8 @@ import {
   write,
 } from './ir.ts';
 import type {Edit, Ir, Names, Part, Scope, Src, Temp} from './ir.ts';
-import {getStructOfType, isCellType, nonNullishMembers} from './layout.ts';
-import {isStructConstructor, structMethods, structReceiver} from './markers.ts';
+import {isCellType, nonNullishMembers, spreadShape} from './layout.ts';
+import {isStructConstructor, structReceiver} from './markers.ts';
 import {Count, Local} from './resolver.ts';
 import type {AtomicCall, Resolver, StructCall} from './resolver.ts';
 import {
@@ -1785,11 +1785,15 @@ class Lowering {
     for (let i = 0; i < parameters.length; i++) {
       const parameter = parameters[i]!;
       const decl = host.declarationOf(parameter.valueDeclaration);
-      let type = host.typeOfSymbol(parameter);
-      if (decl?.dotDotDotToken) type = host.typeArguments(type)[0]!;
-      if (type && isCellType(this.r.c, type)) {
-        if (decl?.dotDotDotToken) rest = i;
-        else cells.push(i);
+      const type = host.typeOfSymbol(parameter);
+      if (decl?.dotDotDotToken) {
+        for (const value of spreadShape(this.r.c, type).values) {
+          if (!isCellType(this.r.c, value.type)) continue;
+          if (value.from === value.to) cells.push(i + value.from);
+          else rest = i + value.from;
+        }
+      } else if (isCellType(this.r.c, type)) {
+        cells.push(i);
       }
     }
     const result = host.checker.getReturnTypeOfSignature(signature);
@@ -1923,6 +1927,46 @@ class Lowering {
           );
         }
         break;
+      }
+      case K.TaggedTemplateExpression: {
+        const method = this.r.structMethodAccess(skipParentheses(node.tag));
+        if (!method) break;
+        const spans =
+          node.template.kind === K.TemplateExpression
+            ? (node.template.templateSpans as Node[])
+            : [];
+        const temps: Ir[] = [];
+        let receiver = this.receiver(method.receiver, Ctx.Argument, [
+          ...(method.key ? [method.key] : []),
+          ...spans.map(s => s.expression),
+        ]);
+        if (method.key && this.frames[this.frames.length - 1])
+          receiver = this.temporary(this.call('__retain', receiver));
+        const self = this.copiable(receiver, temps);
+        const signature = this.methodSignature(this.r.c.host.typeOf(node.tag));
+        const fn = this.call(
+          '__structMethod',
+          self,
+          method.key ? this.visit(method.key) : str(method.name),
+          ...(signature ? [signature] : []),
+        );
+        const bound = call(elem(fn, str('bind')), [raw('void 0'), self]);
+        const template = this.update(
+          node.template,
+          spans.map(s => [
+            s,
+            this.update(s, [
+              [s.expression, this.visitIn(s.expression, Ctx.Argument)],
+            ]),
+          ]),
+        );
+        return this.sequence(
+          temps,
+          this.update(node, [
+            [node.tag, bound],
+            [node.template, template],
+          ]),
+        );
       }
       case K.BinaryExpression:
         if (
@@ -2380,15 +2424,10 @@ class Lowering {
   private lowerNew(node: Node): Ir | undefined {
     const cell = this.r.cellType(node);
     if (cell.kind === CellKind.Struct) {
-      const decl = getStructOfType(this.r.c, this.r.c.host.typeOf(node))?.decl;
-      const constructor =
-        decl && structMethods(decl).find(m => isStructConstructor(this.r.c, m));
-      const signature =
-        constructor &&
-        this.structSignature(
-          this.r.c.host.checker.getSignatureFromDeclaration(constructor),
-          true,
-        );
+      const signature = this.structSignature(
+        this.r.c.host.signatureOf(node),
+        true,
+      );
       if (signature && (signature.cells.length || signature.rest !== undefined))
         return call(
           this.call(
@@ -2620,7 +2659,8 @@ class Lowering {
   }
 
   // Reports whether evaluating an expression may call a function (and so
-  // reach a quiescent point). Allocating a struct or a SharedArray does not.
+  // reach a quiescent point). Struct construction runs user constructors;
+  // allocating a SharedArray does not.
   private containsCall(node: Node | undefined): boolean {
     if (!node) return false;
     let found = false;
@@ -2633,7 +2673,9 @@ class Lowering {
           found = true;
           break;
         case K.NewExpression:
-          found = this.r.cellType(n).kind === CellKind.None;
+          found =
+            this.r.cellType(n).kind === CellKind.None ||
+            this.r.cellType(n).kind === CellKind.Struct;
           break;
         case K.ArrowFunction:
         case K.FunctionExpression:

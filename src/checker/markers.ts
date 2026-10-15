@@ -17,10 +17,17 @@
 
 import {CellKind} from './context.ts';
 import type {FieldKind, Own, StructInfo} from './context.ts';
-import {IndexKind, ObjectFlags, SymbolFlags, TypeFlags} from './host.ts';
+import {
+  ElementFlags,
+  IndexKind,
+  ObjectFlags,
+  SymbolFlags,
+  TypeFlags,
+} from './host.ts';
 import type {Signature, TsSymbol, Type} from './host.ts';
 import {
   checkStructMethodType,
+  checkStructConstructorType,
   getCellType,
   getFieldKind,
   isFieldType,
@@ -934,11 +941,21 @@ export function checkStructCall(c: Own, call: Node): void {
       )
         c.error(property, Messages.StructMethod);
       if (knownKey && key !== undefined) memberNames.add(key);
+      for (const parameter of property.parameters as Node[]) {
+        if (!parameter.dotDotDotToken) continue;
+        const type = c.host.typeOf(parameter);
+        if (!c.host.checker.isTupleType(type)) continue;
+        const flags = (c.host.typeTarget(type) as any)?.elementFlags as
+          | number[]
+          | undefined;
+        if (flags?.slice(0, -1).some(f => f & ElementFlags.Variable))
+          c.error(parameter, Messages.StructRestTuple);
+      }
       if (key !== 'constructor') {
         const exposed = structMethodType(c, t, property);
         if (exposed)
           checkStructMethodType(c, property, c.host.typeOf(property), exposed);
-      }
+      } else checkStructConstructorType(c, property, c.host.typeOf(call));
       const checkSuper = (child: Node): void => {
         if (
           child.kind === K.SuperKeyword &&

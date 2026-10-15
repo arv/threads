@@ -1129,14 +1129,17 @@ export function structConstructor(
 // Destructuring reads fields through the handle, and methods through the raw
 // extraction adapter used by an ordinary compiled property access.
 export function structDestructure(
-  self: number,
+  self: number | MaybeCell,
   signatures: Record<string | symbol, StructMethodSignature>,
 ) {
-  const handle = box(self)!;
+  const address = typeof self === 'number' ? self : unbox(self);
+  if (!address)
+    throw new TypeError('own: a struct binding pattern needs a receiver');
+  const handle = box(address)!;
   return new Proxy(handle, {
     get(target, key, receiver) {
       if (Object.hasOwn(signatures, key))
-        return structMethodValue(self, key, signatures[key]);
+        return structMethodValue(address, key, signatures[key]);
       return Reflect.get(target, key, receiver);
     },
   });

@@ -157,6 +157,14 @@ export const Messages = {
     code: 96042,
     text: 'A shared struct constructor must be declared with constructor(...) { ... }.',
   },
+  StructMethodAssignment: {
+    code: 96043,
+    text: 'Extract shared struct methods with a declaration binding pattern or a property access; destructuring assignments of methods are not supported.',
+  },
+  StructRestTuple: {
+    code: 96044,
+    text: 'A shared struct rest tuple must have fixed positions followed by a variadic tail; fixed elements after a variadic element are not supported.',
+  },
 } as const;
 
 export type Message = (typeof Messages)[keyof typeof Messages];

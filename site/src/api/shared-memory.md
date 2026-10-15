@@ -72,6 +72,12 @@ bodies do not support `arguments`; use named parameters or rest parameters
 instead. Initializers use `constructor(...) { ... }` syntax; computed methods
 cannot declare a constructor.
 
+Methods can also be template tags. Declaration patterns such as
+`const {method} = instance` preserve method calling conventions; destructuring
+assignments such as `({method} = instance)` are rejected. Tuple rest parameters
+support fixed positions followed by a variadic tail; fixed elements after a
+variadic element are not supported.
+
 Declare a struct with a constructor or methods in a top-level `const`. Methods
 are fixed after declaration: they cannot be replaced or shadowed on an instance.
 Getters, setters, generators, `super`, and private members are not supported.

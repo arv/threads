@@ -185,6 +185,8 @@ export class Resolver {
           return inner !== Count.None ? inner : Count.Unstable;
         }
         return this.isCountedCall(expr) ? Count.Owned : Count.Unstable;
+      case K.TaggedTemplateExpression:
+        return this.isCountedCall(expr) ? Count.Owned : Count.Unstable;
       case K.ElementAccessExpression: {
         const object = expr.expression as Node;
         if (this.cellType(object).kind === CellKind.ArrayOfStruct) {
@@ -235,7 +237,7 @@ export class Resolver {
   // The declaration of the signature a call resolves to, unless it has none
   // (an unknown or `any` signature).
   private signatureDeclaration(call: Node) {
-    const callee = skipParentheses(call.expression);
+    const callee = skipParentheses(call.expression ?? call.tag);
     if (
       callee.kind === K.PropertyAccessExpression &&
       (callee.name.text === 'call' || callee.name.text === 'apply')
@@ -293,7 +295,11 @@ export class Resolver {
   private isCountedAwait(expr: Node): boolean {
     const c = this.c;
     const call = skipParentheses(expr.expression);
-    if (call.kind !== K.CallExpression) return false;
+    if (
+      call.kind !== K.CallExpression &&
+      call.kind !== K.TaggedTemplateExpression
+    )
+      return false;
     let signature = this.signatureDeclaration(call);
     if (!signature) return false;
     const decl = c.host.declarationOf(signature.declaration);

@@ -115,6 +115,63 @@ export function checkStructMethodType(
     );
 }
 
+function signatureParameterCount(c: Own, signature: Signature): number {
+  const parameters = signature.getParameters();
+  const last = parameters.at(-1);
+  if (!last || !signature.hasRestParameter) return parameters.length;
+  const shape = spreadShape(c, c.host.typeOfSymbol(last));
+  return (
+    parameters.length -
+    1 +
+    (shape.max === Infinity
+      ? Math.max(1, ...shape.values.map(v => v.from + 1))
+      : shape.max)
+  );
+}
+
+function parameterMismatch(
+  c: Own,
+  from: Signature,
+  to: Signature,
+  cast: boolean,
+  seen: Seen,
+  method: boolean,
+): string | undefined {
+  const count = Math.max(
+    signatureParameterCount(c, from),
+    signatureParameterCount(c, to),
+  );
+  for (let i = 0; i < count; i++) {
+    const passed = c.host.parameterTypeAt(to, i),
+      taken = c.host.parameterTypeAt(from, i);
+    if (!passed || !taken) continue;
+    if (method && isCellType(c, passed) !== isCellType(c, taken))
+      return `parameter ${i + 1} uses different shared-reference representations`;
+    const why = layoutMismatch(c, passed, taken, cast, seen);
+    if (why) return `what it is called with, parameter ${i + 1}: ${why}`;
+  }
+  return undefined;
+}
+
+export function checkStructConstructorType(
+  c: Own,
+  method: Node,
+  target: Type,
+): void {
+  const from = c.host.checker.getSignatureFromDeclaration(method);
+  const to = c.host.callSignatures(target, true)[0];
+  if (!to) return;
+  const why = parameterMismatch(c, from, to, false, newSeen(), true);
+  if (why)
+    c.error(
+      method,
+      Messages.LayoutMismatch,
+      c.host.typeToString(c.host.typeOf(method)),
+      c.host.typeToString(target),
+      why,
+    );
+}
+
 function checkStructMethodAccess(c: Own, access: Node): void {
   const info = getStructMethodAccess(c, access);
   if (!info) return;
@@ -1123,15 +1180,8 @@ function callableMismatch(
         );
         if (result)
           return `${construct ? 'what it constructs' : 'what it returns'}: ${result}`;
-        for (let i = 0; i < to.parameters.length; i++) {
-          const passed = host.parameterTypeAt(to, i),
-            taken = host.parameterTypeAt(from, i);
-          if (!passed || !taken) break;
-          if (method && isCellType(c, passed) !== isCellType(c, taken))
-            return `parameter ${i + 1} uses different shared-reference representations`;
-          const why = layoutMismatch(c, passed, taken, cast, seen);
-          if (why) return `what it is called with, parameter ${i + 1}: ${why}`;
-        }
+        const parameter = parameterMismatch(c, from, to, cast, seen, method);
+        if (parameter) return parameter;
       }
     }
     return undefined;
@@ -1345,8 +1395,23 @@ function computeConversion(c: Own, node: Node): void {
       if (!isAssignmentTarget(node.parent))
         setTargetType(c, node.name, host.checker.getContextualType(node.name));
       return;
+    case K.TemplateSpan: {
+      const template = node.parent as Node;
+      const tag = template.parent as Node;
+      if (
+        tag.kind === K.TaggedTemplateExpression &&
+        getStructMethodAccess(c, skipParentheses(tag.tag))
+      ) {
+        const index = (template.templateSpans as Node[]).indexOf(node) + 1;
+        setTargetType(
+          c,
+          node.expression,
+          host.parameterTypeAt(host.signatureOf(tag), index),
+        );
+      } else setTarget(c, node.expression, false);
+      return;
+    }
     case K.SpreadAssignment:
-    case K.TemplateSpan:
     case K.TypeOfExpression:
       setTarget(c, node.expression, false);
       return;
@@ -1458,6 +1523,20 @@ function computeBinaryConversion(c: Own, node: Node): void {
         left.kind === K.ArrayLiteralExpression ||
         left.kind === K.ObjectLiteralExpression
       ) {
+        if (
+          left.kind === K.ObjectLiteralExpression &&
+          getCellType(c, host.typeOf(right)).kind === CellKind.Struct &&
+          (left.properties as Node[]).some(p => {
+            const value =
+              p.kind === K.ShorthandPropertyAssignment ? p.name : p.initializer;
+            const source = structMethodType(c, host.typeOf(right), p);
+            return (
+              (source && host.callSignatures(source).length > 0) ||
+              (value && host.callSignatures(host.typeOf(value)).length > 0)
+            );
+          })
+        )
+          c.error(left, Messages.StructMethodAssignment);
         setTarget(c, right, false); // destructured through the handle
         return;
       }

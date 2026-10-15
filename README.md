@@ -405,6 +405,12 @@ storage. SharedVector implements snapshot iteration this way. Compiled method
 bodies do not support `arguments`; use named parameters or rest parameters
 instead.
 
+Methods can also be template tags. Declaration patterns such as
+`const {method} = instance` preserve method calling conventions; destructuring
+assignments such as `({method} = instance)` are rejected. Tuple rest parameters
+support fixed positions followed by a variadic tail; fixed elements after a
+variadic element are not supported.
+
 `new S(...args)` zeroes all fields before running its synchronous constructor.
 Constructor arguments are inferred, return values are discarded, and a thrown
 constructor releases its ownership while preserving references it published.

@@ -92,6 +92,130 @@ function run(
 }
 
 describe('struct methods', () => {
+  it('protects borrowed field receivers across struct constructors', () => {
+    const {output} = run({
+      'main.ts': `import {struct, f64, ref, log, collectCycles, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64, constructor(value: number) { this.value = value; }}); type Leaf = Struct<typeof Leaf>;
+const Holder = struct({child: ref<Leaf>(), replacement: ref<Leaf>()});
+const holder = new Holder();
+const Reset = struct({value: f64, constructor() {
+  holder.child = null; collectCycles(); holder.replacement = new Leaf(99); this.value = 7;
+}});
+export function main() {
+  holder.child = new Leaf(1);
+  holder.child!.value = new Reset().value;
+  log(holder.replacement!.value);
+}
+`,
+    });
+    expect(output.trim()).toBe('99');
+  });
+
+  it.each([false, true])(
+    'adapts tuple rest parameters in boxed methods and constructors when erased=%s',
+    erased => {
+      const {output} = run(
+        {
+          'main.ts': `import {struct, f64, log, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64, constructor(value = 7) { this.value = value; }}, 'tuples/Leaf'); type Leaf = Struct<typeof Leaf>;
+const C = struct({value: f64,
+  constructor(...args: [number, Leaf]) { this.value = args[0] + args[1].value; },
+  first(...args: [Leaf, number]) { return args[0].value + args[1]; },
+  last(...args: [number, Leaf]) { return args[0] + args[1].value; },
+  tail(n: number, ...args: [Leaf, ...Leaf[]]) { return n + args[0].value + args[1].value; },
+}, 'tuples/C');
+function boxed(type: unknown, value: unknown) {
+  const K = type as new (n: number, leaf: unknown) => {value: number; first(leaf: unknown, n: number): number; last(n: number, leaf: unknown): number; tail(n: number, ...leaves: unknown[]): number};
+  const c = new K(2, value);
+  log(c.value, c.first(value, 3), c.last(4, value), c.tail(1, value, value));
+}
+export function main() { boxed(C, new Leaf()); }
+`,
+        },
+        erased,
+      );
+      expect(output.trim()).toBe('9 10 11 15');
+    },
+  );
+
+  it('uses the actual constructor signature for erased structs sharing an instance interface', () => {
+    const {output} = run(
+      {
+        'leaf.ts': `import {struct, f64} from '@arv/threads'; export const Leaf = struct({value: f64}, 'signatures/Leaf');`,
+        'erased.ts': `import {struct, f64, type Struct} from '@arv/threads'; import {Leaf} from './leaf.ts'; type Leaf = Struct<typeof Leaf>;
+interface Item { value: number; }
+export const A = struct<Item, [Leaf]>({value: f64, constructor(leaf: Leaf) { this.value = leaf.value; }}, 'signatures/A');
+export const B = struct<Item, [number]>({value: f64, constructor(value: number) { this.value = value; }}, 'signatures/B');`,
+        'main.ts': `import {log} from '@arv/threads'; import {Leaf} from './leaf.ts'; import {A, B} from './erased.ts';
+export function main() { const leaf = new Leaf(); leaf.value = 7; log(new A(leaf).value, new B(9).value); }`,
+      },
+      new Set(['erased.ts']),
+    );
+    expect(output.trim()).toBe('7 9');
+  });
+
+  it('unboxes narrowed receivers before destructuring methods', () => {
+    const {output} = run({
+      'main.ts': `import {struct, f64, log} from '@arv/threads';
+const C = struct({value: f64, constructor() { this.value = 7; }, read() { return this.value; }});
+function read(value: unknown) { if (value instanceof C) { const {read} = value; return read.call(value); } return -1; }
+export function main() { log(read(new C())); }
+`,
+    });
+    expect(output.trim()).toBe('7');
+  });
+
+  it.each(["Factory['make']", 'unknown'])(
+    'diagnoses unsupported method destructuring assignments into %s',
+    target => {
+      const {result} = program({
+        'main.ts': `import {struct, f64, log, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64, constructor() { this.value = 7; }}); type Leaf = Struct<typeof Leaf>;
+const Factory = struct({make(): Leaf { return new Leaf(); }}); type Factory = Struct<typeof Factory>;
+export function main() { const factory = new Factory(); let make!: ${target}; ({make} = factory); }
+`,
+      });
+      expect(result.typeDiagnostics).toEqual([]);
+      expect(result.diagnostics.some(d => d.code === 96043)).toBe(true);
+    },
+  );
+
+  it('diagnoses rest tuples with fixed elements after a variadic element', () => {
+    const {result} = program({
+      'main.ts': `import {struct, f64, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64}); type Leaf = Struct<typeof Leaf>;
+const C = struct({read(...args: [...Leaf[], number]): number { return args.length; }});
+`,
+    });
+    expect(result.typeDiagnostics).toEqual([]);
+    expect(result.diagnostics.some(d => d.code === 96044)).toBe(true);
+  });
+
+  it('checks constructor implementations against explicit argument tuple conventions', () => {
+    const {result} = program({
+      'main.ts': `import {struct, f64, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64}); type Leaf = Struct<typeof Leaf>;
+interface Item { value: number; }
+const Item = struct<Item, [Leaf]>({value: f64, constructor(value: unknown) { this.value = typeof value === 'object' ? 1 : 0; }});
+`,
+    });
+    expect(result.typeDiagnostics).toEqual([]);
+    expect(result.diagnostics.some(d => d.code === 96033)).toBe(true);
+  });
+
+  it('preserves struct receivers for template tags with shared arguments and results', () => {
+    const {output} = run({
+      'main.ts': [
+        "import {struct, f64, heapStats, log, type Struct} from '@arv/threads';",
+        'const Leaf = struct({value: f64}); type Leaf = Struct<typeof Leaf>;',
+        'const C = struct({value: f64, tag(strings: TemplateStringsArray, leaf: Leaf): Leaf { leaf.value += this.value + strings[0].length; return leaf; }});',
+        'function tagged() { const c = new C(), leaf = new Leaf(); c.value = 3; leaf.value = 7; log((c.tag`x${leaf}`).value); }',
+        'export function main() { const before = heapStats(); tagged(); const after = heapStats(); log(after.allocated - before.allocated, after.freed - before.freed); }',
+      ].join('\n'),
+    });
+    expect(output.trim()).toBe('11\n2 2');
+  });
+
   it('adapts compiled calls to type-erased constructors and methods', () => {
     const {output} = run(
       {

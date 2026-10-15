@@ -151,7 +151,12 @@ export type Struct<S> = S extends StructType<infer T, any[]> ? T & Cell : never;
  * Extracted methods have unbound this and require a receiver from the same
  * struct declaration. Struct inheritance is not supported.
  * Methods may use computed string, numeric, or symbol keys, including
- * Symbol.iterator. Name expressions and key coercions run once, in source order.
+ * Symbol.iterator. Name values must be primitive strings, numbers, or symbols;
+ * name expressions and key coercions run once, in source order.
+ * Methods can be template tags. Extract methods with property access or a
+ * declaration binding pattern; method destructuring assignments are unsupported.
+ * Rest tuples support fixed positions followed by a variadic tail.
+ * Compiled method bodies do not support arguments; use named or rest parameters.
  * A synchronous constructor may initialize the zeroed instance. Its arguments
  * are inferred and its return value is discarded. For an explicit T, specify
  * the constructor argument tuple with struct<T, Args>(...).
