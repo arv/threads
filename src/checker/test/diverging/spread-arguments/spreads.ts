@@ -63,3 +63,16 @@ export function emptyAfterUnknown() {
   const lists = [[1]];
   sink(...lists, ...none);         // fine: none passes nothing
 }
+// a union of tuples, each by its own places
+declare const unionArgs: [number, i32] | [number, i32, i32];
+declare function numThenInts(...args: [number, i32] | [number, i32, i32]): void;
+// an optional element before a rest is there when the rest has elements
+declare const optHead: [head?: i32, ...tail: number[]];
+declare function sameRest(...args: [head?: i32, ...tail: number[]]): void;
+// a rest tuple's tail however far past its elements
+declare function longRest(...args: [n0?: number, n1?: number, n2?: number, n3?: number, n4?: number, n5?: number, n6?: number, n7?: number, n8?: number, n9?: number, n10?: number, n11?: number, n12?: number, n13?: number, n14?: number, n15?: number, n16?: number, n17?: number, n18?: number, n19?: number, n20?: number, n21?: number, n22?: number, n23?: number, n24?: number, n25?: number, n26?: number, n27?: number, n28?: number, n29?: number, n30?: number, n31?: number, n32?: number, n33?: number, ...tail: i32[]]): void;
+export function forwarded() {
+  numThenInts(...unionArgs);       // fine
+  sameRest(...optHead);            // fine
+  longRest(...numbers);            // error: numbers for the i32 tail
+}

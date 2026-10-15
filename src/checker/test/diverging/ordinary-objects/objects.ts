@@ -65,3 +65,7 @@ declare const plainIterable: Iterable<{ value: number; next: null }>;
 export function spreadIterable() { many(...plainIterable); }          // error
 declare function headThenNodes(...args: [head?: unknown, ...tail: Node[]]): void;
 export function spreadTupleRest() { headThenNodes(...plains); }      // error: ordinary objects for the Node tail
+// two types of one name, one of them a struct
+import type { Node as OtherNode } from "./other";
+declare function two(a?: OtherNode, b?: Node, ...rest: unknown[]): void;
+export function sameNames() { two(...plains); }                       // error: the Node

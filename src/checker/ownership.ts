@@ -249,6 +249,22 @@ class State {
     return out;
   }
 
+  // Forgets the regions no binding holds (nor any of kept, a value held
+  // outside the state): their links and infos, which nothing can reach. The
+  // regions that are held keep their numbers.
+  collect(kept: readonly Region[]): void {
+    const live = new Set<Region>();
+    for (const r of kept) live.add(this.find(r));
+    for (const v of this.vars.values()) {
+      if (v.kind === ValueKind.InRegion) live.add(this.find(v.region));
+      for (const o of v.origins ?? []) live.add(this.find(o.region));
+    }
+    // all found before any link goes: a chain is walked through its links
+    const dead = [...this.parent.keys()].filter(k => !live.has(this.find(k)));
+    for (const k of dead) this.parent.delete(k);
+    for (const k of this.info.keys()) if (!live.has(k)) this.info.delete(k);
+  }
+
   // Reports whether two states are the same: the same bindings, region links
   // and region infos, region by region (not alike only up to renaming regions,
   // as their signatures may be).
@@ -1749,6 +1765,8 @@ class FunctionAnalysis {
         const start = joinAllStates(early[0]!, early.slice(1));
         for (const symbol of start.vars.keys())
           if (local.has(this.a.idOf(symbol))) start.vars.delete(symbol);
+        // and the regions only they held go with them
+        start.collect(this.thisRegion === 0 ? [] : [this.thisRegion]);
         const done = runs.find(r => r.start.sameAs(start));
         if (done) return done.end.copy();
         const input = start.copy();

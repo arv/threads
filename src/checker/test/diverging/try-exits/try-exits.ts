@@ -338,9 +338,9 @@ export function enumInitializers() {
 }
 // a `var` the try's block declares is in scope in the finally, and after
 export function varInFinally(ch: Channel<number[]>) {
-  try { var ys = [1]; ch.send(ys); mayThrow(); } finally { use(ys); }  // error: ys was sent
+  try { var ys: number[] | undefined = [1]; ch.send(ys); mayThrow(); } finally { use(ys); }  // error: ys was sent
 }
 export function varAfterTry(ch: Channel<number[]>) {
-  try { var ys = [1]; ch.send(ys); mayThrow(); } finally { use(1); }
+  try { var ys: number[] | undefined = [1]; ch.send(ys); mayThrow(); } finally { use(1); }
   use(ys);                                                    // error: ys was sent
 }

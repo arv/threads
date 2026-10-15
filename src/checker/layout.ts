@@ -559,6 +559,16 @@ export interface SpreadShape {
 
 export function spreadShape(c: Own, t: Type): SpreadShape {
   const host = c.host;
+  // a union's members each by their own shape, filling places between the
+  // fewest and the most of theirs
+  if (t.flags & TypeFlags.Union) {
+    const shapes = host.memberTypes(t).map(m => spreadShape(c, m));
+    return {
+      values: shapes.flatMap(shape => shape.values),
+      min: Math.min(...shapes.map(shape => shape.min)),
+      max: Math.max(...shapes.map(shape => shape.max)),
+    };
+  }
   if (!host.checker.isTupleType(t)) {
     const values = host
       .iteratedTypes(t)
@@ -573,8 +583,10 @@ export function spreadShape(c: Own, t: Type): SpreadShape {
       // a rest element's type is its elements'; a variadic one's is iterated
       const types =
         flag & ElementFlags.Rest ? [type] : host.iteratedTypes(type);
+      // from its own place on: the elements before it, optional ones too,
+      // are all there when it has any
       for (const each of types)
-        shape.values.push({type: each, from: shape.min, to: Infinity});
+        shape.values.push({type: each, from: k, to: Infinity});
       shape.max = Infinity;
       return;
     }
@@ -582,7 +594,7 @@ export function spreadShape(c: Own, t: Type): SpreadShape {
     // well, when it is there; one after a rest is past its elements
     shape.values.push(
       shape.max === Infinity
-        ? {type, from: shape.min, to: Infinity}
+        ? {type, from: k, to: Infinity}
         : {type, from: k, to: k},
     );
     if (flag & ElementFlags.Required) shape.min++;
@@ -599,22 +611,32 @@ export function parameterTypesAt(
   from: number,
   to: number,
 ): Type[] {
-  // past the last parameter, a rest's places: a rest typed a tuple has one for
-  // each of its elements, and its tail's after them (probed so far)
-  const places =
-    signature.parameters.length + (signature.hasRestParameter ? 32 : 0);
+  const places = signature.parameters.length - 1 + restPlaces(c, signature);
   const last = Math.min(to, Math.max(from, places - 1));
   const types: Type[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<number>();
   for (let p = from; p <= last; p++) {
     const t = c.host.parameterTypeAt(signature, p);
     if (!t) break;
-    const key = c.host.typeToString(t);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
     types.push(t);
   }
   return types;
+}
+
+// The places a signature's last parameter takes: one, or a rest typed a tuple
+// one for each of its elements (a rest element's for its own and those past
+// it); for a rest whose type the declaration does not tell (a type
+// parameter's), a generous number of them, probed.
+function restPlaces(c: Own, signature: Signature): number {
+  if (!signature.hasRestParameter) return 1;
+  const decl = c.host.declarationOf(signature.declaration);
+  const rest = (decl?.parameters as Node[] | undefined)?.at(-1);
+  const t = rest?.type && c.host.checker.getTypeFromTypeNode(rest.type);
+  if (t && c.host.checker.isTupleType(t))
+    return Math.max(1, c.host.typeArguments(t).length);
+  return 33;
 }
 
 // Reports whether a value of type t is an ordinary object: of an object type
