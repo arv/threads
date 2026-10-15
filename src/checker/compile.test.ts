@@ -193,6 +193,10 @@ describe('compile, where the fork does not', () => {
     expect(fixes).toContain('Base), __release(_a), _d) {}');
   });
 
+  it('keeps a parameter whose default moves optional, after an optional one', () => {
+    expect(fixes).toContain('export function afterOptional(o, p, q) {');
+  });
+
   it("runs a scalar element type's expression", () => {
     expect(fixes).toContain('__newSharedArray((calls++, Number, 8), n)');
   });

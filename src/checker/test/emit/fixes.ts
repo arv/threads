@@ -45,3 +45,9 @@ const second = new SharedArray(Number, 1);
 export let element = 0;
 class Base {}
 export class Derived extends ((element = first[((first = second), 0)]), Base) {}
+
+// a default that moves after an optional parameter: the parameter stays
+// optional, so the types still strip
+export function afterOptional(o?: Node, p: Node = new Node(), q: Node = p) {
+  return q === p && o === undefined;
+}

@@ -1050,7 +1050,11 @@ class Lowering {
       first > 0 &&
       params
         .slice(0, first)
-        .some(p => p.initializer || p.name.kind !== K.Identifier)
+        .some(
+          p =>
+            (p.initializer && !isConstant(p.initializer)) ||
+            p.name.kind !== K.Identifier,
+        )
     ) {
       scope.temps.length = temps;
       this.allScopes.length = scopes;
@@ -1096,22 +1100,34 @@ class Lowering {
       return this.lowerPattern(node, name, undefined);
     }
     if (node.initializer) {
-      // ` = init` goes
+      // ` = init` goes, and the parameter is optional (`p?: T`, stripped
+      // with the types), so that one after it with no default may still
+      // follow an optional one
       const before = node.type ?? node.questionToken ?? node.name;
+      const optional = node.questionToken || node.type ? '' : '?';
       const remove = {
         start: before.end,
         end: node.initializer.end,
-        ir: raw(''),
+        ir: raw(optional),
+      };
+      const drop = () => {
+        if (node.type && !node.questionToken)
+          edits.push({start: node.name.end, end: node.name.end, ir: raw('?')});
+        edits.push(remove);
       };
       const local = this.r.local(node);
       if (local === Local.Owned || local === Local.OwnedMoved) {
         this.paramInits.set(node, node.initializer);
         this.movingDefaults.add(fn);
-        edits.push(remove);
-      } else if (lowerable && this.movingDefaults.has(fn)) {
+        drop();
+      } else if (
+        lowerable &&
+        this.movingDefaults.has(fn) &&
+        !isConstant(node.initializer)
+      ) {
         // after a default that moved: visited in the body, in order
         this.movedDefaults.set(node, undefined);
-        edits.push(remove);
+        drop();
       } else {
         const initializer = this.fullExpression(node.initializer, Ctx.AtOnce)!;
         if (lowerable && scope.temps.length > temps) {
@@ -1120,7 +1136,7 @@ class Lowering {
           this.movingDefaults.add(fn);
           if (pattern) return this.lowerPattern(node, name, initializer);
           this.movedDefaults.set(node, initializer);
-          edits.push(remove);
+          drop();
         } else if (!isIdentity(initializer, node.initializer))
           edits.push(this.editOf(node.initializer, initializer));
       }
@@ -1133,8 +1149,12 @@ class Lowering {
   private lowerPattern(node: Node, pattern: Ir, init: Ir | undefined): Ir {
     const temp = this.newTemp();
     this.movedPatterns.set(node, {temp, pattern, init});
+    // `_a?`, as a parameter after it may have no default
+    const ir = node.dotDotDotToken
+      ? tempRef(temp)
+      : gen(Prec.Primary, [tempRef(temp), '?']);
     return this.src(node, [
-      {start: this.startOf(node.name), end: node.end, ir: tempRef(temp)},
+      {start: this.startOf(node.name), end: node.end, ir},
     ]);
   }
 
@@ -1283,7 +1303,7 @@ class Lowering {
     // after defaults that moved into the body, the body in a block of its
     // own, so that its declarations neither shadow what they read nor put
     // it in their temporal dead zone
-    if (moving) result = [block(result)];
+    if (moving && this.bodyShadows(parent!, list)) result = [block(result)];
     // the whole body is in the try, its function declarations in place
     // (the fork moves them ahead of it)
     result = this.guarded(prologue, result);
@@ -2351,6 +2371,23 @@ class Lowering {
     return symbol ? this.renamed.get(host.symbolId(symbol)) : undefined;
   }
 
+  // Reports whether a function body's statements declare (with let, const,
+  // class or function) a name that its moved defaults read.
+  private bodyShadows(fn: Node, list: Node[]): boolean {
+    const declared = lexicalNames(list);
+    for (const s of list)
+      if (s.kind === K.FunctionDeclaration && s.name) declared.add(s.name.text);
+    if (declared.size === 0) return false;
+    return (fn.parameters as Node[]).some(
+      param =>
+        (this.paramInits.has(param) ||
+          this.movedDefaults.has(param) ||
+          this.movedPatterns.has(param)) &&
+        ((param.initializer && readsAny(param.initializer, declared)) ||
+          (param.name.kind !== K.Identifier && readsAny(param.name, declared))),
+    );
+  }
+
   // Renames the `var`s of a function's body (outside the functions in it)
   // that its moved defaults would see instead of what they read: the
   // defaults now run in the body, whose other declarations are in a block of
@@ -2676,6 +2713,31 @@ function isNameChain(node: Node): boolean {
   return (
     node.kind === K.PropertyAccessExpression && isNameChain(node.expression)
   );
+}
+
+// Reports whether a default is a literal (`0`, `-1`, `'x'`, `null`), which
+// reads nothing and does nothing, so it may run before the defaults that
+// move into the body, and stay in the parameter list.
+function isConstant(node: Node): boolean {
+  switch (node.kind) {
+    case K.NumericLiteral:
+    case K.BigIntLiteral:
+    case K.StringLiteral:
+    case K.NoSubstitutionTemplateLiteral:
+    case K.TrueKeyword:
+    case K.FalseKeyword:
+    case K.NullKeyword:
+      return true;
+    case K.PrefixUnaryExpression:
+      return (
+        (node.operator === K.MinusToken || node.operator === K.PlusToken) &&
+        (node.operand.kind === K.NumericLiteral ||
+          node.operand.kind === K.BigIntLiteral)
+      );
+    case K.ParenthesizedExpression:
+      return isConstant(node.expression);
+  }
+  return false;
 }
 
 function isLogicalAssignment(operator: number): boolean {

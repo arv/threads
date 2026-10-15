@@ -58,21 +58,22 @@ const computedImport =
   "a computed dynamic import, which tsc's rewriteRelativeImportExtensions rewrites at run time with a helper, and OXC leaves as it is (it rewrites literal specifiers only): the type strippers differ, in a file that does not use the runtime";
 const markedNotTyped =
   "a struct() field whose type is not its marker's (a number marked i32, a `boolean | undefined` marked bool), an error: the fork lays the field out as its type says (an f64 where the type is no field type), threads-check as its marker says";
+const fieldTemporaries =
+  "a class field's initializer with temporaries: threads-check gives it temporaries of its own, `(() => { var _a, _b; return ...; })()`, so a construction inside it can't overwrite them; the fork declares them in the module";
+const commonJS =
+  "module commonjs, an error (the runtime's helpers are imported as an ES module): the fork emits CommonJS, threads-check's compile only ES modules";
+const elementAssigned =
+  'an inline struct element assigned, an error (96005): the fork prints `CHECK ? A + 16 + I * size : __outOfBounds[I] = g`, which parses as something else, and threads-check `(CHECK ? ... : ...) = g`, which does not parse';
 const knownDifferences: Record<string, string> = {
-  'emit/corners.ts':
-    "defaults() has an owned parameter's default, which moves into the body: threads-check puts the body in a block of its own after the defaults, so its declarations can't shadow what the defaults read (the fork leaves the body as it is)",
-  'cases/counting/counting.ts':
-    "a class field's initializer with temporaries: threads-check gives it temporaries of its own, `(() => { var _a, _b; return ...; })()`, so a construction inside it can't overwrite them; the fork declares them in the module",
+  'cases/counting/counting.ts': fieldTemporaries,
   'run/moved.ts':
     'the program compile.test.ts runs: the defaults, declarations and initializers the lowering moves, which the fork gets wrong (as it runs, its emit gives [0,false,2,1,"ReferenceError","TypeError","ReferenceError",1,"TypeError","ReferenceError","Error",1,1,7,2,1] and leaks 5 blocks; threads-check\'s [0,true,2,1,6,6,10,1,4,10,"Error",1,1,7,2,1], leaking none)',
   'emit/fixes.ts':
     "what the fork gets wrong (compile.test.ts tests each): an arrow whose concise body is a closure keeps its owned parameter's default (the fork drops it), defaults after one that moves into the body move too, so they still run left to right, an array that its index assigns is read (and held) before the index, a scalar element type's expression runs (the fork drops it), and a class's `extends` expression is lowered as a full expression (the fork leaves it as it is)",
   'playground/main.ts': computedImport,
   'playground/compiler.ts': computedImport,
-  'cases/commonjs/commonjs.ts':
-    "module commonjs, an error (the runtime's helpers are imported as an ES module): the fork emits CommonJS, threads-check's compile only ES modules",
-  'cases/layout/layout.ts':
-    'an inline struct element assigned, an error (96005): the fork prints `CHECK ? A + 16 + I * size : __outOfBounds[I] = g`, which parses as something else, and threads-check `(CHECK ? ... : ...) = g`, which does not parse',
+  'cases/commonjs/commonjs.ts': commonJS,
+  'cases/layout/layout.ts': elementAssigned,
   'cases/threads/threads.ts':
     '`everyone` declared twice (a function and a const), an error: OXC refuses to strip the types of a file that redeclares a name, tsc emits it',
   'fork/ownAsyncGoroutines/replica.mts': markedNotTyped,
@@ -80,6 +81,13 @@ const knownDifferences: Record<string, string> = {
   'fork/ownLayoutBooleansErrors/errors.mts': markedNotTyped,
   'fork/ownLayoutIntegersErrors/errors.mts': markedNotTyped,
   'fork/ownLayoutStringsErrors/errors.mts': markedNotTyped,
+  'fork/ownLayoutErrors/errors.mts': elementAssigned,
+  'fork/ownLayoutRefCountErrors/errors.mts': fieldTemporaries,
+  'fork/ownRuntimeCommonJS/main.ts': commonJS,
+  'fork/ownLayoutRefCount/list.mts':
+    'parameters() has a default after an owned parameter: threads-check runs it in a try that releases the owned parameter if it throws (the fork runs it before its try, and leaks)',
+  'fork/ownLayoutStructUnionsErrors/different.mts':
+    'a field at different places in the structs of a union, an error (96026): the fork reads and writes it through `__box(m).u`, threads-check at its place in the first struct',
 };
 
 if (!existsSync(tsgo)) {
