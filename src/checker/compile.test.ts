@@ -160,6 +160,26 @@ describe('compile', () => {
 });
 
 describe('compile, where the fork does not', () => {
+  it('compiles the playground channel examples with counted channel ownership', () => {
+    for (const name of ['async-goroutines', 'pipeline']) {
+      const source = fs
+        .readFileSync(
+          path.join(checker, '../../playground/programs', `${name}.ts`),
+          'utf8',
+        )
+        .replaceAll("'@arv/threads'", "'threads'");
+      const dir = project({'app.ts': source}, {lib: ['es2022', 'dom']});
+      const result = compile(path.join(dir, 'tsconfig.json'), {
+        runtime: 'threads',
+        api,
+        check: true,
+        types: true,
+      });
+      expect(result.diagnostics, name).toEqual([]);
+      expect(result.typeDiagnostics, name).toEqual([]);
+    }
+  });
+
   it("runs an owned parameter's default around a concise body that is a closure", () => {
     expect(fixes).toContain(
       'export const later = (p) => {\n\tp = p === void 0 ? __newStruct(Node) : __retain(p);',
