@@ -36,10 +36,20 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 12H3M17 18H3M21 6H3" /></svg>
       </button>
       <a href="/" class="logo" aria-label="Threads Docs, home">
+        {#- two threads twisted: the blue one over at the top crossing, the
+            other over at the bottom, each mask cutting the gap the strand
+            on top leaves in the one under it (as assets/icon.svg) #}
         <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true">
-          <path d="M3 9c6 0 7 4 13 4s7-4 13-4" />
-          <path class="logo-accent" d="M3 16c6 0 7 4 13 4s7-4 13-4" />
-          <path d="M3 23c6 0 7 4 13 4s7-4 13-4" />
+          <mask id="logo-under-blue" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32">
+            <rect width="32" height="32" fill="white" />
+            <path d="M23 4c0 6-14 6-14 12" stroke="black" stroke-width="6" />
+          </mask>
+          <mask id="logo-under-black" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32">
+            <rect width="32" height="32" fill="white" />
+            <path d="M23 16c0 6-14 6-14 12" stroke="black" stroke-width="6" />
+          </mask>
+          <path d="M9 4c0 6 14 6 14 12s-14 6-14 12" mask="url(#logo-under-blue)" />
+          <path class="logo-accent" d="M23 4c0 6-14 6-14 12s14 6 14 12" mask="url(#logo-under-black)" />
         </svg>
         <span class="logo-text">threads</span>
         <span class="logo-docs">docs</span>
