@@ -1,6 +1,6 @@
 // A send in a try block that leaves early (return, throw, break): its catch and
 // its finally see the value sent; the fork forgets it.
-import { Channel, consume } from "threads";
+import { Channel, consume, share } from "threads";
 
 declare function use(...values: unknown[]): void;
 
@@ -271,4 +271,35 @@ export function logicalPlaceOnce() {
 export function storedIntoWhatItConsumes() {
   const ys: { next: unknown } = { next: null };
   ys.next = consume(ys);                                      // error: ys is written after it is consumed
+}
+export function assertedReceiver() {
+  const ys: { next: unknown } = { next: null };
+  (ys as { next: unknown }).next = consume(ys);              // error: ys is written after it is consumed
+}
+export function assertedConsume() {
+  const zs = [1];
+  kept.value = consume(zs as number[]);
+  use(zs);                                                    // error: zs was consumed
+}
+// what is written to is the object the place held before the value was made
+export function sentThenReplaced(ch: Channel<{ n: number }>) {
+  let box = { n: 0 };
+  box.n = (ch.send(box), box = { n: 1 }, 2);                  // error: the first box, which was sent, is written
+}
+export function replacedThenConsumed() {
+  let xs = [8];
+  xs[0] = (xs = [2], consume(xs).length);                     // fine: the first xs, still owned, is written
+}
+// a block disposes of a `using` declaration's value only once it has run
+export function returnBeforeUsing(flag: boolean) {
+  let xs = [1];
+  try { consume(xs); if (flag) return; xs = [2]; using held = resource; } catch { use(xs); }  // fine
+}
+export function breakBeforeUsing(flag: boolean) {
+  let xs = [1];
+  outer: { try { consume(xs); if (flag) break outer; xs = [2]; using held = resource; } catch { use(xs); } }  // fine
+}
+export function assertedIncrement() {
+  const frozen = share({ n: 1 });
+  (frozen.n as number)++;                                     // error: a write through a shared value
 }

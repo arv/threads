@@ -62,6 +62,7 @@ interface Value {
   readonly region: Region;
   readonly consumed?: Send; // for Consumed
   readonly maybe: boolean; // for Consumed: consumed on some paths only
+  readonly of?: Region; // for Consumed: the region of the value it held
 }
 
 const sharedValue: Value = {kind: ValueKind.Shared, region: 0, maybe: false};
@@ -200,6 +201,7 @@ class State {
         region: 0,
         consumed: a.consumed,
         maybe: a.maybe || b.maybe,
+        of: a.of ?? b.of,
       };
     }
     if (a.kind === ValueKind.Consumed)
@@ -208,6 +210,7 @@ class State {
         region: 0,
         consumed: a.consumed,
         maybe: true,
+        of: a.of,
       };
     if (b.kind === ValueKind.Consumed)
       return {
@@ -215,6 +218,7 @@ class State {
         region: 0,
         consumed: b.consumed,
         maybe: true,
+        of: b.of,
       };
     return this.mergeValues(a, b);
   }
@@ -353,6 +357,11 @@ interface Cleanup {
   targets: number;
   loop: boolean;
   tries: number; // the try statements open as it was entered
+  // a block's: whether a `using` declaration in it has run, before the point
+  // being analyzed (its statements are analyzed in order), so that it holds
+  // something to dispose of; a for-of loop holds its iterator from its start
+  held: boolean;
+  node: Node;
 }
 
 // A try statement being analyzed: the states with which control leaves its
@@ -1200,6 +1209,8 @@ class FunctionAnalysis {
             targets: this.targets.length,
             loop: false,
             tries: this.tries.length,
+            held: false,
+            node,
           });
         this.statements(node.statements, s);
         if (disposes) {
@@ -1225,9 +1236,14 @@ class FunctionAnalysis {
         )
           this.mayThrow(s);
         break;
-      case K.VariableStatement:
+      case K.VariableStatement: {
         this.variableDeclarationList(node.declarationList, s);
+        // from here on, its block has something to dispose of
+        const scope = this.cleanups.at(-1);
+        if (scope?.node === node.parent && isUsingDeclaration(node))
+          scope.held = true;
         break;
+      }
       case K.ExpressionStatement:
         this.eval(node.expression, s);
         break;
@@ -1418,6 +1434,8 @@ class FunctionAnalysis {
         targets: this.targets.length,
         loop: true,
         tries: this.tries.length,
+        held: true,
+        node,
       });
     for (let iteration = 0; iteration < maxLoopIterations; iteration++) {
       let st = head.copy();
@@ -1536,7 +1554,7 @@ class FunctionAnalysis {
         at < c.targets ||
         (c.loop && at === c.targets && e.isBreak);
       if (!leaves || c.tries < this.tries.length) break;
-      this.mayThrow(e.st);
+      if (c.held) this.mayThrow(e.st);
     }
     if (to === undefined || this.tries.length > to.tries)
       this.tries.at(-1)?.exits.push(e);
@@ -1883,7 +1901,7 @@ class FunctionAnalysis {
   // lifetime: later uses of x are errors. The value itself is only sent if it
   // is then passed to a `Sending` parameter.
   evalConsume(node: Node, operand: Node, s: State): Value {
-    operand = skipParentheses(operand);
+    operand = skipOuterExpressions(operand, OEK.Assertions | OEK.Parentheses);
     const v = this.eval(operand, s);
     if (operand.kind === K.Identifier) {
       const symbol = this.a.symbolOfIdentifier(operand);
@@ -1902,6 +1920,7 @@ class FunctionAnalysis {
           region: 0,
           consumed: {site: node, callee, via: operand.text, consume: true},
           maybe: false,
+          of: v.kind === ValueKind.InRegion ? s.find(v.region) : undefined,
         });
       }
     }
@@ -2003,7 +2022,7 @@ class FunctionAnalysis {
   // Evaluates the target of `x++` , `delete a.b` , `a.b += 1` and the like,
   // reporting writes through shared values.
   evalWriteTarget(target: Node, s: State): void {
-    target = skipParentheses(target);
+    target = skipOuterExpressions(target, OEK.Assertions | OEK.Parentheses);
     if (
       target.kind === K.PropertyAccessExpression ||
       target.kind === K.ElementAccessExpression
@@ -2128,24 +2147,33 @@ class FunctionAnalysis {
   }
 
   // Reports an object written to after what was evaluated since it was read
-  // sent it or consumed it: by the variable it was read from, whose binding a
-  // consume() ends, else by its region.
+  // (obj, its value then) sent it, or consumed the variable it was read from
+  // while that still held it (a consume() ends the binding, and leaves the
+  // region as it was).
   checkStillThere(expr: Node, obj: Value, s: State): void {
-    let root = expr;
+    let root = skipOuterExpressions(expr, OEK.Assertions | OEK.Parentheses);
     while (
       root.kind === K.PropertyAccessExpression ||
-      root.kind === K.ElementAccessExpression ||
-      root.kind === K.NonNullExpression ||
-      root.kind === K.ParenthesizedExpression
+      root.kind === K.ElementAccessExpression
     )
-      root = root.expression;
-    if (root.kind === K.Identifier) {
-      const symbol = this.a.symbolOfIdentifier(root);
-      const bound = symbol && s.vars.get(symbol);
-      if (bound) this.checkUse(root, root.text, bound, s);
+      root = skipOuterExpressions(
+        root.expression,
+        OEK.Assertions | OEK.Parentheses,
+      );
+    if (root.kind !== K.Identifier) {
+      this.checkUse(expr, expressionName(expr), obj, s);
       return;
     }
-    this.checkUse(expr, expressionName(expr), obj, s);
+    const symbol = this.a.symbolOfIdentifier(root);
+    const bound = symbol && s.vars.get(symbol);
+    if (
+      bound?.kind === ValueKind.Consumed &&
+      bound.of !== undefined &&
+      obj.kind === ValueKind.InRegion &&
+      s.find(bound.of) === s.find(obj.region)
+    )
+      this.checkUse(root, root.text, bound, s);
+    else this.checkUse(root, root.text, obj, s);
   }
 
   // Reports a write to a property or element of a shared value. Fields of

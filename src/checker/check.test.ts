@@ -272,6 +272,10 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(265,73): error TS96005: 'xs' was consumed by 'consume' on line 265.",
         "try-exits.ts(269,75): error TS96006: 'xs' may have been consumed by 'consume' on line 269.",
         "try-exits.ts(273,3): error TS96005: 'ys' was consumed by 'consume' on line 273.",
+        "try-exits.ts(277,4): error TS96005: 'ys' was consumed by 'consume' on line 277.",
+        "try-exits.ts(282,7): error TS96005: 'zs' was consumed by 'consume' on line 281.",
+        "try-exits.ts(287,3): error TS96001: 'box' cannot be used here: it was sent to 'send' on line 287.",
+        "try-exits.ts(304,4): error TS96010: Cannot change 'frozen': it is a shared value, which is immutable.",
       ].sort(),
     );
   });
