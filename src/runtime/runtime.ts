@@ -29,7 +29,10 @@ const C_PEND = 19,
 // the thread table entry of the thread that collects cycles, 0 when none does
 // (see $collectCycles)
 const C_GC = 23;
-// word 24 is free (a select waits on its own channels: chan.ts)
+// threads waiting for a collection to end, so that they may wake: the next
+// collection lets them first (see wake). words 23 and 24 were free (a select
+// waits on its own channels: chan.ts)
+const C_WAKING = 24;
 const C_AQ_LOCK = 25,
   C_AQ_HEAD = 26,
   C_AQ_TAIL = 27,
@@ -748,17 +751,29 @@ let awakeAt = 0; // the entry this worker is awake on, 0 when asleep
 // a pool worker stays awake between threads (see poolLoop): what it does there
 // changes counts too
 let pooled = false;
+// one that waits for a collection to end is counted in C_WAKING meanwhile: a
+// collector that collects again at once would else take C_GC back before the
+// thread sees it free, and the thread would never wake
 function wake(e: number) {
   if (awakeAt === e) return;
+  let waiting = false;
   for (;;) {
-    for (let g; (g = Atomics.load(I32, C_GC)) !== 0 && g !== e;)
+    for (let g; (g = Atomics.load(I32, C_GC)) !== 0 && g !== e;) {
+      if (!waiting) {
+        waiting = true;
+        Atomics.add(I32, C_WAKING, 1);
+        continue; // C_GC again: the collection may have ended meanwhile
+      }
       if (CAN_BLOCK) Atomics.wait(I32, C_GC, g);
+    }
     Atomics.store(I32, e + T_AWAKE, 1);
     const g = Atomics.load(I32, C_GC);
     if (g === 0 || g === e) break;
     Atomics.store(I32, e + T_AWAKE, 0);
   }
   awakeAt = e;
+  if (waiting && Atomics.sub(I32, C_WAKING, 1) === 1)
+    Atomics.notify(I32, C_WAKING);
 }
 function asleep() {
   const e = awakeAt;
@@ -803,12 +818,26 @@ export function $eachTracked(f: (p: number) => void) {
 // way: this one waits for it, and does not collect again
 export function $collectCycles(scan: () => number, timeout = 1000) {
   if (ME === 0) return 0; // before the thread began: no other thread runs
+  // threads that waited for the last collection to end wake first, and each
+  // goes on to its next quiescent point: so a thread that collects again and
+  // again does not stop the others for good. this one waits asleep, as
+  // another collection may start meanwhile, and wait for it
+  const until = performance.now() + timeout;
+  while (Atomics.load(I32, C_WAKING) !== 0) {
+    $waitBegin();
+    for (let n; (n = Atomics.load(I32, C_WAKING)) !== 0;) {
+      if (performance.now() > until) break;
+      if (CAN_BLOCK) Atomics.wait(I32, C_WAKING, n, 1);
+    }
+    $waitEnd();
+    if (performance.now() > until) return 0;
+  }
   if (Atomics.compareExchange(I32, C_GC, 0, ME) !== 0) {
     park();
     return 0;
   }
   try {
-    if (!stopTheWorld(timeout)) return 0;
+    if (!stopTheWorld(until)) return 0;
     // every other thread is quiescent: whatever waits is safe
     for (let round = 0; round < 100; round++) {
       const before = pendingCount();
@@ -824,9 +853,8 @@ export function $collectCycles(scan: () => number, timeout = 1000) {
 }
 // waits until every other worker is asleep: a host's bell is rung, and the page
 // nudged, so that each passes a quiescent point (where it parks); the rest
-// reach one on their own. false after timeout ms
-function stopTheWorld(timeout: number) {
-  const until = performance.now() + timeout;
+// reach one on their own. false once it is until
+function stopTheWorld(until: number) {
   for (let t = 1; t < Atomics.load(I32, C_NEXT_TID); t++) {
     const e = C_THREADS + t * T_ENTRY;
     if (e === ME) continue;
@@ -1815,11 +1843,7 @@ let finalizeWait = FINALIZE;
 // registries. an idle worker with handles to finalize gives its event loop a
 // turn now and then
 export async function poolLoop() {
-  // awake on its entry from here (see wake), but in its waits for work: what a
-  // worker does between threads changes counts too, and a module a thread
-  // needs is loaded before the thread begins
-  pooled = true;
-  wake(C_THREADS + workerTid() * T_ENTRY);
+  $workerJoin();
   for (;;) {
     if (hosting) {
       // false: of a pool that was stopped
@@ -1933,6 +1957,21 @@ export async function poolLoop() {
     else runThread(t, true);
   }
 }
+// a pool worker, as it attaches: awake on its entry from here (see wake), but
+// in its waits for work, before it loads the program, whose modules may make
+// blocks as they load (a pool that grows does that while other threads run,
+// and may collect cycles). what a worker does between threads changes counts
+// too, and a module a thread needs is loaded before the thread begins
+export function $workerJoin() {
+  pooled = true;
+  wake(C_THREADS + workerTid() * T_ENTRY);
+}
+// a worker that failed (it crashed, or a module did not load): asleep, and its
+// entry given back, so that no collection waits for it
+export function $workerGone() {
+  asleep();
+  freeTid();
+}
 // a program's main, on the coordinator's main worker (src/worker.ts,
 // src/web-worker.ts), its thread begun: an async main is awaited, and meanwhile
 // the thread passes a quiescent point every WAKE ms, so that its waits hold up
@@ -2035,8 +2074,9 @@ export async function resetPool(sab: SharedArrayBuffer) {
     C_HOSTS,
     C_DRAFTS,
     // a collection by a worker that was terminated in it: the page, which
-    // wakes next, would spin for good
+    // wakes next, would spin for good. and the threads that waited for one
     C_GC,
+    C_WAKING,
   ])
     Atomics.store(i32, c, 0);
   Atomics.notify(i32, C_GC);

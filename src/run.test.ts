@@ -123,4 +123,12 @@ describe('programs on threads', () => {
       'stuck: a collection gave up, freeing 0; the parked thread went on: true; the next freed 3, blocks left 0',
     ]);
   }, 60_000);
+
+  it('a worker that starts while cycles are collected takes part in the collection before its modules make blocks', () => {
+    // 2 workers up front: the 25 threads grow the pool while a collector
+    // runs, and each new worker loads a module that makes blocks as it loads
+    expect(run('cycles-grow', '--pool=2', '--check').trim()).toBe(
+      "grow: bad reads 0, collections freed some, main's kept ring whole: true",
+    );
+  }, 60_000);
 });

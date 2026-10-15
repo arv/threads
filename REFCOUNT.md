@@ -289,8 +289,12 @@ from outside the heap. A collection goes like this:
    asleep already. If it wakes during the collection, it waits for the end
    before it changes anything. A pool worker between threads is asleep only
    while it waits for work, because a registry's finalizers change counts too.
-   Hosts get their bells rung and the page gets a nudge, so that each passes a
-   quiescent point. The page can't block, so it spins until the collection ends.
+   It takes part from the moment it attaches, before it loads the program's
+   modules, which may make blocks as they load. Hosts get their bells rung and
+   the page gets a nudge, so that each passes a quiescent point. The page can't
+   block, so it spins until the collection ends. Threads that waited for one
+   collection to end wake before the next one starts, so a thread that collects
+   again and again doesn't keep the others stopped.
 2. **Apply what waits.** Every other thread is quiescent, so every deferred
    decrement is safe, and the collector applies them all. One it can't apply (a
    queue that a full heap left on its thread) only keeps more blocks alive.
