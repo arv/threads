@@ -249,6 +249,50 @@ class State {
     return out;
   }
 
+  // Reports whether two states are the same: the same bindings, region links
+  // and region infos, region by region (not alike only up to renaming regions,
+  // as their signatures may be).
+  sameAs(o: State): boolean {
+    if (this.unreachable || o.unreachable)
+      return this.unreachable === o.unreachable;
+    const sameMap = <K, V>(
+      a: Map<K, V>,
+      b: Map<K, V>,
+      same: (x: V, y: V) => boolean,
+    ) => {
+      if (a.size !== b.size) return false;
+      for (const [k, x] of a) {
+        const y = b.get(k);
+        if (y === undefined || !same(x, y)) return false;
+      }
+      return true;
+    };
+    const sameOrigins = (x?: readonly Origin[], y?: readonly Origin[]) =>
+      (x?.length ?? 0) === (y?.length ?? 0) &&
+      (x ?? []).every(
+        (o, i) => o.region === y![i]!.region && o.maybe === y![i]!.maybe,
+      );
+    return (
+      sameMap(this.parent, o.parent, (x, y) => x === y) &&
+      sameMap(
+        this.info,
+        o.info,
+        (x, y) =>
+          x.flags === y.flags && x.sent === y.sent && x.maybe === y.maybe,
+      ) &&
+      sameMap(
+        this.vars,
+        o.vars,
+        (x, y) =>
+          x.kind === y.kind &&
+          x.region === y.region &&
+          x.consumed === y.consumed &&
+          x.maybe === y.maybe &&
+          sameOrigins(x.origins, y.origins),
+      )
+    );
+  }
+
   // A canonical description of the state, used to detect that a loop has
   // reached a fixpoint.
   signature(idOf: (symbol: TsSymbol) => number): string {
@@ -1192,6 +1236,9 @@ class FunctionAnalysis {
   readonly targets: Target[] = [];
   readonly tries: TryContext[] = [];
   readonly cleanups: Cleanup[] = [];
+  // the consume()s of local variables, in the order they are analyzed: which
+  // variable, holding what (see checkStillThere)
+  readonly consumes: {id: number; region: Region; send: Send}[] = [];
   readonly building = new Set<Node>(); // closures whose value is being computed
 
   constructor(a: Analyzer, node: Node, result: FunctionResult) {
@@ -1647,17 +1694,19 @@ class FunctionAnalysis {
       // throws and for each place the early exits go to, which do not: those
       // runs report what they reach, and what of them is still reachable (a
       // finally may return or throw instead) goes on to the next try out, or
-      // to its target. Runs that start from states alike (by signature) end
-      // alike and report alike, so the finally is analyzed once for them:
-      // finallies nested in finallies are not analyzed exponentially often
-      const runs = new Map<string, State>();
+      // to its target. A run that starts from the very state another did (the
+      // same bindings, regions and infos, not alike only up to renaming them)
+      // ends, reports and jumps as that one did, which went on already: the
+      // finally is analyzed once for both, so finallies nested in finallies
+      // are not analyzed exponentially often
+      const runs: {start: State; end: State}[] = [];
       const run = (early: State[]) => {
         const start = joinAllStates(early[0]!, early.slice(1));
-        const key = start.signature(this.a.idOf);
-        const end = runs.get(key);
-        if (end) return end.copy();
+        const done = runs.find(r => r.start.sameAs(start));
+        if (done) return done.end.copy();
+        const input = start.copy();
         this.statement(node.finallyBlock, start);
-        runs.set(key, start.copy());
+        runs.push({start: input, end: start.copy()});
         return start;
       };
       if (!after.unreachable) after = run([after]);
@@ -1953,10 +2002,22 @@ class FunctionAnalysis {
         ) {
           callee = calleeName(call.expression);
         }
+        const send: Send = {
+          site: node,
+          callee,
+          via: operand.text,
+          consume: true,
+        };
+        if (v.kind === ValueKind.InRegion)
+          this.consumes.push({
+            id: this.a.idOf(symbol),
+            region: v.region,
+            send,
+          });
         s.vars.set(symbol, {
           kind: ValueKind.Consumed,
           region: 0,
-          consumed: {site: node, callee, via: operand.text, consume: true},
+          consumed: send,
           maybe: false,
           origins:
             v.kind === ValueKind.InRegion
@@ -1979,9 +2040,10 @@ class FunctionAnalysis {
     const member = isAssignmentOperator(op) && isMemberAccess(place);
     if (op === K.EqualsToken) {
       if (member) {
+        const since = this.consumes.length;
         const obj = this.evalPlace(place, s);
         const v = this.eval(node.right, s);
-        this.writeMember(place, obj, v, s);
+        this.writeMember(place, obj, v, s, since);
         return v;
       }
       const v = this.eval(node.right, s);
@@ -1994,12 +2056,13 @@ class FunctionAnalysis {
       op === K.QuestionQuestionEqualsToken
     ) {
       if (member) {
+        const since = this.consumes.length;
         const obj = this.evalPlace(place, s);
         this.mayThrow(s); // its read, a getter's
         const old = this.readMember(place, place.expression, obj, s);
         const assigned = s.copy();
         const v = assigned.mergeValues(old, this.eval(node.right, assigned));
-        this.writeMember(place, obj, v, assigned);
+        this.writeMember(place, obj, v, assigned, since);
         s.assign(joinStates(s, assigned));
         return v;
       }
@@ -2015,11 +2078,12 @@ class FunctionAnalysis {
       // (a getter's) may throw before the right side is made, its conversion
       // and its write (a setter's) after
       if (member) {
+        const since = this.consumes.length;
         const obj = this.evalPlace(place, s);
         this.checkWrite(place, place.expression, obj);
         this.mayThrow(s);
         this.eval(node.right, s);
-        this.checkStillThere(place.expression, obj, s);
+        this.checkStillThere(place.expression, obj, s, since);
         this.mayThrow(s);
         return sharedValue;
       }
@@ -2095,30 +2159,25 @@ class FunctionAnalysis {
         return;
       }
       case K.PropertyAccessExpression:
-      case K.ElementAccessExpression:
-        this.writeMember(target, this.evalPlace(target, s), v, s);
+      case K.ElementAccessExpression: {
+        const since = this.consumes.length;
+        this.writeMember(target, this.evalPlace(target, s), v, s, since);
         return;
+      }
       case K.ArrayLiteralExpression:
         // each step of the iterator may throw, after the defaults and the
         // assignments before it; then the iterator is closed
         if ((target.elements as Node[]).length === 0) this.mayThrow(s);
         for (const element of target.elements as Node[]) {
-          this.mayThrow(s);
-          if (element.kind === K.OmittedExpression) continue;
-          if (element.kind === K.SpreadElement) {
-            this.assign(element.expression, v, s);
-          } else if (
+          if (element.kind === K.OmittedExpression) this.mayThrow(s);
+          else if (element.kind === K.SpreadElement)
+            this.assignRead(element.expression, undefined, v, s);
+          else if (
             element.kind === K.BinaryExpression &&
             element.operatorToken.kind === K.EqualsToken
-          ) {
-            this.assign(
-              element.left,
-              s.mergeValues(v, this.eval(element.right, s)),
-              s,
-            );
-          } else {
-            this.assign(element, v, s);
-          }
+          )
+            this.assignRead(element.left, element.right, v, s);
+          else this.assignRead(element, undefined, v, s);
         }
         this.mayThrow(s);
         return;
@@ -2129,42 +2188,55 @@ class FunctionAnalysis {
         for (const property of target.properties as Node[]) {
           if (property.name?.kind === K.ComputedPropertyName)
             this.eval(property.name.expression, s);
-          this.mayThrow(s);
           switch (property.kind) {
             case K.PropertyAssignment: {
               const init = property.initializer as Node;
               if (
                 init.kind === K.BinaryExpression &&
                 init.operatorToken.kind === K.EqualsToken
-              ) {
-                this.assign(
-                  init.left,
-                  s.mergeValues(v, this.eval(init.right, s)),
-                  s,
-                );
-              } else {
-                this.assign(init, v, s);
-              }
+              )
+                this.assignRead(init.left, init.right, v, s);
+              else this.assignRead(init, undefined, v, s);
               break;
             }
-            case K.ShorthandPropertyAssignment: {
-              let pv = v;
-              if (property.objectAssignmentInitializer)
-                pv = s.mergeValues(
-                  pv,
-                  this.eval(property.objectAssignmentInitializer, s),
-                );
-              this.assign(property.name, pv, s);
+            case K.ShorthandPropertyAssignment:
+              this.assignRead(
+                property.name,
+                property.objectAssignmentInitializer,
+                v,
+                s,
+              );
               break;
-            }
             case K.SpreadAssignment:
-              this.assign(property.expression, v, s);
+              this.assignRead(property.expression, undefined, v, s);
               break;
           }
         }
         return;
     }
     this.eval(target, s);
+  }
+
+  // Assigns to a destructuring's target what it reads, in JavaScript's order:
+  // a property or element target is evaluated first, then the value is read
+  // (a property, an iterator step), which may throw, then its default made
+  // if it has one, and then it is written.
+  assignRead(
+    target: Node,
+    initializer: Node | undefined,
+    v: Value,
+    s: State,
+  ): void {
+    const place = skipOuterExpressions(
+      target,
+      OEK.Assertions | OEK.Parentheses,
+    );
+    const since = this.consumes.length;
+    const obj = isMemberAccess(place) ? this.evalPlace(place, s) : undefined;
+    this.mayThrow(s);
+    const read = initializer ? s.mergeValues(v, this.eval(initializer, s)) : v;
+    if (obj) this.writeMember(place, obj, read, s, since);
+    else this.assign(target, read, s);
   }
 
   // Evaluates the object of a property or element, and its key: what it is
@@ -2179,8 +2251,14 @@ class FunctionAnalysis {
   // Writes a value into a property or element whose object (obj) was
   // evaluated before the value was: a setter may throw, and the object may
   // have been sent or consumed since.
-  writeMember(place: Node, obj: Value, v: Value, s: State): void {
-    this.checkStillThere(place.expression, obj, s);
+  writeMember(
+    place: Node,
+    obj: Value,
+    v: Value,
+    s: State,
+    since: number,
+  ): void {
+    this.checkStillThere(place.expression, obj, s, since);
     this.checkWrite(place, place.expression, obj);
     this.mayThrow(s); // a setter's, or of null
     if (obj.kind === ValueKind.InRegion && !s.isCounted(obj))
@@ -2191,7 +2269,7 @@ class FunctionAnalysis {
   // (obj, its value then) sent it, or consumed the variable it was read from
   // while that still held it, on some paths or all (a consume() ends the
   // binding, and leaves the region as it was).
-  checkStillThere(expr: Node, obj: Value, s: State): void {
+  checkStillThere(expr: Node, obj: Value, s: State, since: number): void {
     let root = skipOuterExpressions(expr, OEK.Assertions | OEK.Parentheses);
     while (
       root.kind === K.PropertyAccessExpression ||
@@ -2211,13 +2289,26 @@ class FunctionAnalysis {
       bound?.kind === ValueKind.Consumed && obj.kind === ValueKind.InRegion
         ? bound.origins?.find(o => s.find(o.region) === s.find(obj.region))
         : undefined;
-    if (origin)
+    if (origin) {
       this.checkUse(
         root,
         root.text,
         {...bound!, maybe: bound!.maybe || origin.maybe},
         s,
       );
+      return;
+    }
+    // consumed while it held the object, and given another value since, on
+    // some path at least
+    const id = symbol && this.a.idOf(symbol);
+    const consumed =
+      obj.kind === ValueKind.InRegion
+        ? this.consumes
+            .slice(since)
+            .find(e => e.id === id && s.find(e.region) === s.find(obj.region))
+        : undefined;
+    if (consumed)
+      this.a.reportUseAfterSend(root, root.text, consumed.send, true);
     else this.checkUse(root, root.text, obj, s);
   }
 

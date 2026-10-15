@@ -28,6 +28,7 @@ import type {Signature, Type} from './host.ts';
 import {
   checkIntegerCompoundAssignment,
   checkIntegerTarget,
+  checkIntegerTypeTarget,
 } from './integers.ts';
 import {
   getRuntimeExportName,
@@ -498,13 +499,30 @@ function checkLayoutTarget(
   }
   if (!isExpression(expr)) return;
   const value = c.host.typeOf(expr);
-  const source = awaited ? c.host.awaitedType(value) : value;
+  checkValueInto(
+    c,
+    expr,
+    awaited ? c.host.awaitedType(value) : value,
+    target,
+    cast,
+  );
+}
+
+// Checks a value of type source going into a place of type target, reported
+// at a node (the value's, or the spread it is one of).
+function checkValueInto(
+  c: Own,
+  at: Node,
+  source: Type,
+  target: Type,
+  cast: boolean,
+): void {
   // an ordinary object, which TypeScript takes for a struct by its members:
   // the place holds an address, which the runtime cannot unbox the object to
   const structs = structMembersOf(c, target);
   if (structs.length > 0 && ordinaryMemberOf(c, source)) {
     c.error(
-      expr,
+      at,
       Messages.NotAStruct,
       c.host.typeToString(source),
       c.host.typeToString(target),
@@ -515,12 +533,34 @@ function checkLayoutTarget(
   const why = layoutMismatch(c, source, target, cast);
   if (why)
     c.error(
-      expr,
+      at,
       Messages.LayoutMismatch,
       c.host.typeToString(source),
       c.host.typeToString(target),
       why,
     );
+}
+
+// A spread argument's values go into the parameters from its place on: a
+// tuple's each into its own, an array's into the rest. Each is checked as an
+// argument of its type would be, for its layout and as an integer.
+function checkSpreadArgument(
+  c: Own,
+  spread: Node,
+  signature: Signature,
+  i: number,
+): void {
+  const host = c.host;
+  const t = host.typeOf(spread.expression);
+  const values = host.checker.isTupleType(t)
+    ? host.typeArguments(t)
+    : [host.checker.getIndexTypeOfType(t, IndexKind.Number)];
+  values.forEach((value, j) => {
+    const parameter = host.parameterTypeAt(signature, i + j);
+    if (!value || !parameter) return;
+    checkIntegerTypeTarget(c, spread, value, parameter);
+    checkValueInto(c, spread, value, parameter, false);
+  });
 }
 
 // Reports whether a value of type t is an ordinary object: of an object type
@@ -835,6 +875,7 @@ function computeConversion(c: Own, node: Node): void {
       args.forEach((arg, i) => {
         if (arg.kind === K.SpreadElement) {
           setTarget(c, arg.expression, false);
+          if (!unresolved) checkSpreadArgument(c, arg, signature, i);
           return;
         }
         if (unresolved) {

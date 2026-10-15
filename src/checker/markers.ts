@@ -77,6 +77,59 @@ function referencedSymbol(c: Own, expr: Node): TsSymbol | undefined {
   ) as TsSymbol | undefined;
 }
 
+// The runtime's export an expression is, by the name it exports it by: the
+// export itself (through an import alias, or a namespace's member read by its
+// property or a literal key), a const that holds one, or a const destructured
+// from the namespace (`const { f64: double } = threads` ); "" for another.
+function runtimeExportOf(c: Own, expr: Node, seen = new Set<Node>()): string {
+  while (
+    expr.kind === K.ParenthesizedExpression ||
+    expr.kind === K.AsExpression ||
+    expr.kind === K.SatisfiesExpression ||
+    expr.kind === K.NonNullExpression ||
+    expr.kind === K.TypeAssertionExpression
+  )
+    expr = expr.expression;
+  if (seen.has(expr)) return '';
+  seen.add(expr);
+  let symbol = referencedSymbol(c, expr);
+  const name = getRuntimeExportName(c, symbol);
+  if (name !== '') return name;
+  if (symbol && symbol.flags & SymbolFlags.Alias)
+    symbol = c.host.resolveAlias(symbol);
+  const decl = symbol && c.host.valueDeclaration(symbol);
+  if (!decl) return '';
+  if (
+    decl.kind === K.VariableDeclaration &&
+    decl.initializer &&
+    (decl.parent as Node).flags & NodeFlags.Const
+  )
+    return runtimeExportOf(c, decl.initializer, seen);
+  // the member a const's object pattern selects from what it destructures
+  const variable = (decl.parent as Node | undefined)?.parent as
+    | Node
+    | undefined;
+  if (
+    decl.kind === K.BindingElement &&
+    !decl.dotDotDotToken &&
+    decl.parent.kind === K.ObjectBindingPattern &&
+    variable?.kind === K.VariableDeclaration &&
+    variable.initializer &&
+    (variable.parent as Node).flags & NodeFlags.Const
+  ) {
+    const key = (decl.propertyName ?? decl.name) as Node;
+    if (key.kind !== K.Identifier && key.kind !== K.StringLiteral) return '';
+    return getRuntimeExportName(
+      c,
+      c.host.checker.getPropertyOfType(
+        c.host.typeOf(variable.initializer) as any,
+        key.text,
+      ) as TsSymbol | undefined,
+    );
+  }
+  return '';
+}
+
 // The marker a type node refers to: "Sending" or "Shared" for `Sending<T>` and
 // `Shared<T>` , or "".
 export function getTypeMarker(c: Own, t: Node | undefined): string {
@@ -149,10 +202,7 @@ function getAtomicOperation(c: Own, call: Node): string {
   const callee = skipParentheses(call.expression);
   const op = memberName(callee);
   if (!atomicOperations.has(op)) return '';
-  const object = skipParentheses(callee.expression);
-  return getRuntimeExportName(c, referencedSymbol(c, object)) === 'atomic'
-    ? op
-    : '';
+  return runtimeExportOf(c, callee.expression) === 'atomic' ? op : '';
 }
 
 // The runtime's calls that block their thread, by declaring class and name, and
@@ -685,32 +735,10 @@ const scalarMarkers: Record<string, FieldKind> = {
 };
 
 // The runtime's marker of a value's kind an expression is, by the name it
-// exports it by: the export itself (through an import alias, or a namespace's
-// member), or a const that holds one; "" when the checker cannot tell.
-function scalarMarkerOf(c: Own, expr: Node, seen = new Set<Node>()): string {
-  while (
-    expr.kind === K.ParenthesizedExpression ||
-    expr.kind === K.AsExpression ||
-    expr.kind === K.SatisfiesExpression ||
-    expr.kind === K.NonNullExpression ||
-    expr.kind === K.TypeAssertionExpression
-  )
-    expr = expr.expression;
-  if (seen.has(expr)) return '';
-  seen.add(expr);
-  let symbol = referencedSymbol(c, expr);
-  const name = getRuntimeExportName(c, symbol);
-  if (name in scalarMarkers) return name;
-  if (symbol && symbol.flags & SymbolFlags.Alias)
-    symbol = c.host.resolveAlias(symbol);
-  const decl = symbol && c.host.valueDeclaration(symbol);
-  if (
-    decl?.kind === K.VariableDeclaration &&
-    decl.initializer &&
-    (decl.parent as Node).flags & NodeFlags.Const
-  )
-    return scalarMarkerOf(c, decl.initializer, seen);
-  return '';
+// exports it by, or "" when the checker cannot tell (see runtimeExportOf).
+function scalarMarkerOf(c: Own, expr: Node): string {
+  const name = runtimeExportOf(c, expr);
+  return name in scalarMarkers ? name : '';
 }
 
 // The kind of a field's marker (f64, i32, u8, bool, str, ref<T>()), and

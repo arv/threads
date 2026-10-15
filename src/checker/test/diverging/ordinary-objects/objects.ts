@@ -55,3 +55,9 @@ export const tagged: Tag = i32;                                       // error
 // an ordinary object beside SharedArrays, as what a function returns
 declare function source(): SharedArray<Node> | { value: number; next: null };
 export const fromSource: () => Node | SharedArray<Node> = source;     // error
+// a spread's values go into the parameters from its place on
+const args = [{ value: 1, next: null }] as const;
+export function spreadTuple() { return param(...args); }              // error
+declare function many(...nodes: Node[]): void;
+declare const plains: { value: number; next: null }[];
+export function spreadRest() { many(...plains); }                     // error

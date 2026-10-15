@@ -307,3 +307,23 @@ export function conditionallyReplacedThenConsumed(flag: boolean) {
   let xs = [8];
   xs[0] = flag ? (xs = [2], consume(xs).length) : consume(xs).length;  // error: on the false path the first xs, consumed, is written
 }
+// a finally's run is shared with another only for the very same state
+declare function mayThrow(): void;
+export function finallyRunsAlike(ch: Channel<number[]>) {
+  let rows = [[1], [2]];
+  for (let row of rows) { rows = []; try { mayThrow(); row = [3]; } finally { ch.send(row); continue; } }  // error: a row the loop goes on to take is sent
+}
+// a destructuring evaluates its target before it reads
+export function targetBeforeRead() {
+  let xs = [1];
+  try { consume(xs); ({ a: (xs = [2], kept).value } = pair); } finally { use(xs); }  // fine: xs is new before anything may throw
+}
+// what a place was read from, consumed and then given another value
+export function consumedThenReplaced() {
+  let xs = [8];
+  xs[0] = (consume(xs), xs = [2], 0);                         // error: the first xs, consumed, is written
+}
+export function consumedBoxThenReplaced() {
+  let box = { n: 0 };
+  box.n = (consume(box), box = { n: 1 }, 2);                  // error
+}

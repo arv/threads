@@ -165,6 +165,8 @@ describe('threads-check, where it differs from the fork', () => {
         "alias.ts(38,73): error TS96036: Field 'n' is marked i32 but typed 'number': its values are stored as its marker says and checked as its type says, so type it 'i32' or mark it f64.",
         'alias.ts(41,3): error TS96028: An atomic operation takes an i32 field of a shared struct, named by a string literal, or an element of a SharedArray<i32>.',
         'alias.ts(42,3): error TS96028: An atomic operation takes an i32 field of a shared struct, named by a string literal, or an element of a SharedArray<i32>.',
+        'alias.ts(49,3): error TS96028: An atomic operation takes an i32 field of a shared struct, named by a string literal, or an element of a SharedArray<i32>.',
+        'alias.ts(50,3): error TS96028: An atomic operation takes an i32 field of a shared struct, named by a string literal, or an element of a SharedArray<i32>.',
       ].sort(),
     );
   });
@@ -282,6 +284,9 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(287,3): error TS96001: 'box' cannot be used here: it was sent to 'send' on line 287.",
         "try-exits.ts(304,4): error TS96010: Cannot change 'frozen': it is a shared value, which is immutable.",
         "try-exits.ts(308,3): error TS96006: 'xs' may have been consumed by 'consume' on line 308.",
+        "try-exits.ts(314,87): error TS96002: 'row' cannot be used here: it may have been sent to 'send' on line 314.",
+        "try-exits.ts(324,3): error TS96006: 'xs' may have been consumed by 'consume' on line 324.",
+        "try-exits.ts(328,3): error TS96006: 'box' may have been consumed by 'consume' on line 328.",
       ].sort(),
     );
   });
@@ -322,6 +327,22 @@ describe('threads-check, where it differs from the fork', () => {
         "layouts.ts(97,40): error TS96033: A value of type 'Promise<Child>' cannot be used as 'Promise<Node>': what it resolves to: field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
         "layouts.ts(102,65): error TS96033: A value of type 'Child & Cell' cannot be used as 'Node': field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
         "layouts.ts(104,39): error TS96033: A value of type 'StructType<Child>' cannot be used as 'StructType<Node>': what it constructs: field 'value' is at place 1 of 'Child' and 0 of 'Node'. A shared struct's fields are read and written by their place, so a struct used as another must lay out that one's fields first, in its order and of its kinds.",
+      ].sort(),
+    );
+  });
+
+  it('checks what a spread argument passes', () => {
+    // a tuple's values go into the parameters from the spread's place on, an
+    // array's into the rest; the fork does not check them
+    const dir = join(checker, 'test/diverging/spread-arguments');
+    expect(
+      check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
+        .map(d => formatDiagnostic(d, dir))
+        .sort(),
+    ).toEqual(
+      [
+        'spreads.ts(14,8): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(15,11): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
       ].sort(),
     );
   });
@@ -369,6 +390,8 @@ describe('threads-check, where it differs from the fork', () => {
         `objects.ts(47,43): error TS96033: A value of type '() => Promise<${literal}>' cannot be used as '() => Promise<Node>': what it returns: what it resolves to: '${literal}' is an ordinary object, not a shared struct. ${LAID_OUT}`,
         notAStruct('54,28', 'IntegerField<i32, "i32">', 'Tag', 'Tag'),
         `objects.ts(57,59): error TS96033: A value of type '() => SharedArray<Node, "other"> | ${literal}' cannot be used as '() => Node | SharedArray<Node, "other">': what it returns: '${literal}' is an ordinary object, not a shared struct. ${LAID_OUT}`,
+        "objects.ts(60,46): error TS96035: A value of type '{ readonly value: 1; readonly next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
+        "objects.ts(63,37): error TS96035: A value of type '{ value: number; next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
       ].sort(),
     );
   });
@@ -392,6 +415,7 @@ describe('threads-check, where it differs from the fork', () => {
         "markers.ts(22,39): error TS96036: Field 'n' is marked u8 but typed 'i32': its values are stored as its marker says and checked as its type says, so type it 'u8' or mark it i32.",
         "markers.ts(28,33): error TS96036: Field 'n' is marked i32 but typed 'number': its values are stored as its marker says and checked as its type says, so type it 'i32' or mark it f64.",
         "markers.ts(31,35): error TS96038: Field 'n' is marked with a value whose kind the checker cannot tell: a Field of a number may be an f64, an i32 or a u8. Mark it with one of them, or with a const that holds one.",
+        "markers.ts(40,43): error TS96036: Field 'n' is marked i32 but typed 'number': its values are stored as its marker says and checked as its type says, so type it 'i32' or mark it f64.",
       ].sort(),
     );
   });

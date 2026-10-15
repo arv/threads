@@ -33,3 +33,9 @@ const double = f64;
 interface Doubled { n: number }
 const Doubled = struct<Doubled>({ n: double });                // fine: the runtime's f64
 export { Erased, Unknown, Doubled };
+// a marker destructured from the runtime's namespace is the one it selects
+import * as threads from "threads";
+const { f64: float, i32: int } = threads;
+interface Picked { x: number; n: number }
+const Picked = struct<Picked>({ x: float, n: int });          // error: n, a number marked i32
+export { Picked };

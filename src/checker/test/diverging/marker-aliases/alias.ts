@@ -42,3 +42,10 @@ export function atomics(w: threads.Struct<typeof Work>, key: "hits") {
   threads.atomic["add"](w, key, 1);          // error
 }
 export { ByElement };
+// the runtime's atomic, destructured from its namespace or held by a const
+const { atomic: at } = threads;
+const held = threads.atomic;
+export function heldAtomics(w: threads.Struct<typeof Work>, key: "hits") {
+  at.add(w, key, 1);                         // error: the field is not named by a string literal
+  held["add"](w, key, 1);                    // error
+}
