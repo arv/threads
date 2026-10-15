@@ -30,3 +30,10 @@ export function counted(n = read(new Node())): number {
 export function receiver(a: SharedArray<number>, b: SharedArray<number>) {
   return a[((a = b), 0)];
 }
+
+// a scalar element type's expression still runs
+let calls = 0;
+export function made(n: number): SharedArray<number> {
+  return new SharedArray((calls++, Number), n);
+}
+export const madeCalls = () => calls;

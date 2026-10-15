@@ -184,13 +184,19 @@ export interface JavaScriptOptions {
 
 // A compiled file as JavaScript: its types stripped by OXC (the syntax is
 // left as it is written, `using` and all), with a source map from the
-// original. The file name says the language (.ts, .mts, .cts, .tsx; a .tsx's
-// JSX is left for a bundler).
+// original. The file name says the language (.ts, .mts, .cts, .tsx, and with
+// allowJs .js, .mjs, .cjs, .jsx; JSX is left for a bundler).
 export function toJavaScript(
   file: CompiledFile,
   options: JavaScriptOptions = {},
 ): {code: string; map: SourceMap} {
-  const lang = /\.tsx$/i.test(file.fileName) ? 'tsx' : 'ts';
+  const lang = /\.[cm]?jsx?$/i.test(file.fileName)
+    ? /x$/i.test(file.fileName)
+      ? 'jsx'
+      : 'js'
+    : /\.tsx$/i.test(file.fileName)
+      ? 'tsx'
+      : 'ts';
   const result = transformSync(file.fileName, file.code, {
     lang,
     sourceType: 'module',
@@ -223,9 +229,17 @@ export function composeMaps(outer: SourceMap, inner: SourceMap): SourceMap {
   const out: SourceMapMappings = decode(outer.mappings).map(line => {
     const mapped: SourceMapMappings[number] = [];
     for (const segment of line) {
-      if (segment.length < 4) continue;
+      // a column mapped to nothing: it ends the segment before it
+      const unmapped = () => mapped.push([segment[0]]);
+      if (segment.length < 4) {
+        unmapped();
+        continue;
+      }
       const innerLine = innerLines[segment[2]!];
-      if (!innerLine || innerLine.length === 0) continue;
+      if (!innerLine || innerLine.length === 0) {
+        unmapped();
+        continue;
+      }
       const column = segment[3]!;
       // the last segment at or before the column
       let lo = 0,
@@ -238,9 +252,11 @@ export function composeMaps(outer: SourceMap, inner: SourceMap): SourceMap {
           lo = mid + 1;
         } else hi = mid - 1;
       }
-      if (found < 0) continue;
-      const target = innerLine[found]!;
-      if (target.length < 4) continue;
+      const target = found < 0 ? undefined : innerLine[found]!;
+      if (!target || target.length < 4) {
+        unmapped();
+        continue;
+      }
       mapped.push([segment[0], target[1]!, target[2]!, target[3]!]);
     }
     return mapped;

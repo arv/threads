@@ -64,9 +64,9 @@ const knownDifferences: Record<string, string> = {
   'cases/counting/counting.ts':
     "a class field's initializer with temporaries: threads-check gives it temporaries of its own, `(() => { var _a, _b; return ...; })()`, so a construction inside it can't overwrite them; the fork declares them in the module",
   'run/moved.ts':
-    'the program compile.test.ts runs: the defaults, declarations and initializers the lowering moves, which the fork gets wrong (as it runs, its emit gives [0,false,2,1,"ReferenceError","TypeError","ReferenceError",1] and leaks 3 blocks; threads-check\'s [0,true,2,1,6,6,10,1], leaking none)',
+    'the program compile.test.ts runs: the defaults, declarations and initializers the lowering moves, which the fork gets wrong (as it runs, its emit gives [0,false,2,1,"ReferenceError","TypeError","ReferenceError",1,"TypeError","ReferenceError","Error",1,1] and leaks 5 blocks; threads-check\'s [0,true,2,1,6,6,10,1,4,10,"Error",1,1], leaking none)',
   'emit/fixes.ts':
-    "what the fork gets wrong (compile.test.ts tests each): an arrow whose concise body is a closure keeps its owned parameter's default (the fork drops it), defaults after one that moves into the body move too, so they still run left to right, and an array that its index assigns is read (and held) before the index",
+    "what the fork gets wrong (compile.test.ts tests each): an arrow whose concise body is a closure keeps its owned parameter's default (the fork drops it), defaults after one that moves into the body move too, so they still run left to right, an array that its index assigns is read (and held) before the index, and a scalar element type's expression runs (the fork drops it)",
   'playground/main.ts': computedImport,
   'playground/compiler.ts': computedImport,
   'cases/commonjs/commonjs.ts':

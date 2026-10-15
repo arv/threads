@@ -177,6 +177,14 @@ export function transformFile(
   };
 }
 
+// A statement of a function's prologue: whether it may throw (a default
+// runs), and the owned parameter it retains.
+interface PrologueEntry {
+  ir: Ir;
+  mayThrow: boolean;
+  owned?: Node;
+}
+
 class Lowering {
   private readonly r: Resolver;
   private readonly file: Node;
@@ -414,6 +422,15 @@ class Lowering {
   }
 
   private src(node: Node, edits: Edit[] = []): Src {
+    // a renamed variable's identifier, wherever the lowering puts it
+    if (
+      node.kind === K.Identifier &&
+      edits.length === 0 &&
+      this.renamed.size > 0
+    ) {
+      const renamed = this.renamedName(node);
+      if (renamed !== undefined) edits = [this.renameEdit(node, renamed)];
+    }
     edits.sort((a, b) => a.start - b.start || a.end - b.end);
     return {
       k: 'src',
@@ -470,11 +487,6 @@ class Lowering {
 
   private visit(node: Node, ctx: Ctx = Ctx.AtOnce): Ir {
     if (isErased(node)) return this.src(node);
-    if (node.kind === K.Identifier && this.renamed.size > 0) {
-      const renamed = this.renamedName(node);
-      if (renamed !== undefined)
-        return gen(Prec.Primary, [renamed], {t: 'simple'});
-    }
     // an arrow's concise body, even one that is itself a function: the arrow's
     // parameters' prologue goes around it (the fork visits a function there
     // as a closure only, and drops an owned parameter's default)
@@ -577,6 +589,20 @@ class Lowering {
         return this.visitVariableDeclaration(node);
       case K.Parameter:
         return this.visitParameter(node);
+      case K.BindingElement: {
+        // a default is a full expression of its own (its value is never an
+        // address: destructuring one is an error)
+        const edits: Edit[] = [];
+        forEachChild(node, child => {
+          if (child === node.initializer || isErased(child)) return;
+          const ir = this.visit(child);
+          if (!isIdentity(ir, child)) edits.push(this.editOf(child, ir));
+        });
+        const initializer = this.fullExpression(node.initializer, Ctx.AtOnce);
+        if (initializer && !isIdentity(initializer, node.initializer))
+          edits.push(this.editOf(node.initializer, initializer));
+        return this.src(node, edits);
+      }
       case K.PropertyDeclaration: {
         const edits: Edit[] = [];
         forEachChild(node, child => {
@@ -973,16 +999,25 @@ class Lowering {
     const lowerable = !!fn.body && isFunctionLikeDeclaration(fn);
     let name: Ir = this.src(node.name);
     const edits: Edit[] = [];
+    const scope = this.scopes[this.scopes.length - 1]!;
+    const temps = scope.temps.length;
     forEachChild(node, child => {
       if (child === node.initializer || isErased(child)) return;
       const ir = this.visit(child);
       if (child === node.name) name = ir;
       if (!isIdentity(ir, child)) edits.push(this.editOf(child, ir));
     });
-    // after a default that moved into the body, a binding pattern is a
-    // temporary parameter, destructured there in order
-    if (pattern && lowerable && this.movingDefaults.has(fn))
+    // after a default that moved into the body, or with defaults in it whose
+    // temporaries are the body's, a binding pattern is a temporary
+    // parameter, destructured there in order
+    if (
+      pattern &&
+      lowerable &&
+      (this.movingDefaults.has(fn) || scope.temps.length > temps)
+    ) {
+      this.movingDefaults.add(fn);
       return this.lowerPattern(node, name, undefined);
+    }
     if (node.initializer) {
       // ` = init` goes
       const before = node.type ?? node.questionToken ?? node.name;
@@ -1001,8 +1036,6 @@ class Lowering {
         this.movedDefaults.set(node, undefined);
         edits.push(remove);
       } else {
-        const scope = this.scopes[this.scopes.length - 1]!;
-        const temps = scope.temps.length;
         const initializer = this.fullExpression(node.initializer, Ctx.AtOnce)!;
         if (lowerable && scope.temps.length > temps) {
           // its temporaries are the body's: it moves there, as the fork's
@@ -1030,15 +1063,13 @@ class Lowering {
 
   // `=> E`: a function's result, or a block if the function owns a parameter.
   private visitConciseBody(node: Node, fn: Node): Ir {
-    const [prologue, owned] = this.functionPrologue(fn);
+    const prologue = this.functionPrologue(fn);
     const frame = this.pushFrame({released: [], zeroed: [], conditional: 0});
     let result = this.visitExpression(node, Ctx.Return);
     this.popFrame();
     result = this.moved(this.releaseAfter(result, frame, true), node);
     if (prologue.length === 0) return result;
-    let list: Ir[] = [returnStatement(result)];
-    if (owned.length > 0) list = [this.tryFinally(list, owned)];
-    return block([...prologue, ...list]);
+    return block(this.guarded(prologue, [returnStatement(result)]));
   }
 
   // `__moved(E)` where a function's result moves into the runtime with its
@@ -1052,9 +1083,11 @@ class Lowering {
   // an owned parameter is retained (or takes its default value), and an
   // optional borrowed one that is omitted is 0. Returns the owned
   // parameters' names, which the body releases.
-  private functionPrologue(fn: Node): [Ir[], Node[]] {
-    const prologue: Ir[] = [];
-    const owned: Node[] = [];
+  private functionPrologue(fn: Node): PrologueEntry[] {
+    const entries: PrologueEntry[] = [];
+    const prologue = {
+      push: (ir: Ir, mayThrow = true) => entries.push({ir, mayThrow}),
+    };
     for (const param of fn.parameters as Node[]) {
       const name = param.name as Node;
       const moved = this.movedPatterns.get(param);
@@ -1109,26 +1142,48 @@ class Lowering {
               this.fullExpression(init, Ctx.Take)!,
               value,
             );
-          prologue.push(exprStatement(this.assign(this.name(name), value)));
-          owned.push(name);
+          entries.push({
+            ir: exprStatement(this.assign(this.name(name), value)),
+            mayThrow: !!init,
+            owned: name,
+          });
           break;
         }
         case Local.Borrowed:
           if (param.questionToken)
             prologue.push(
               exprStatement(binary(this.name(name), '??=', num(0))),
+              false,
             );
       }
     }
-    return [prologue, owned];
+    return entries;
+  }
+
+  // A function's prologue and then its body, each owned parameter released
+  // in a finally from when it is retained: around the body, and around the
+  // rest of the prologue where that may throw (a default after it).
+  private guarded(entries: PrologueEntry[], body: Ir[]): Ir[] {
+    const out: Ir[] = [];
+    const owned: Node[] = [];
+    for (const [i, entry] of entries.entries()) {
+      if (entry.mayThrow && owned.length > 0)
+        return [
+          ...out,
+          this.tryFinally(this.guarded(entries.slice(i), body), owned),
+        ];
+      out.push(entry.ir);
+      if (entry.owned) owned.push(entry.owned);
+    }
+    if (owned.length > 0) return [...out, this.tryFinally(body, owned)];
+    return [...out, ...body];
   }
 
   // A block: owned locals are released when it ends, and a function body
   // retains and releases its owned parameters (and declares the function's
   // temporaries).
   private visitBlock(node: Node): Ir {
-    let prologue: Ir[] = [],
-      owned: Node[] = [];
+    let prologue: PrologueEntry[] = [];
     let list = node.statements as Node[];
     const parent = node.parent as Node | undefined;
     const isBody =
@@ -1138,7 +1193,7 @@ class Lowering {
       parent.body === node;
     const moving = isBody && this.movingDefaults.has(parent!);
     if (isBody && isFunctionLikeDeclaration(parent))
-      [prologue, owned] = this.functionPrologue(parent!);
+      prologue = this.functionPrologue(parent!);
     if (moving) this.renameShadowingVars(parent!, node);
     const directives: Node[] = [];
     if (prologue.length > 0 || isBody) {
@@ -1154,14 +1209,14 @@ class Lowering {
     if (moving) result = [block(result)];
     // the whole body is in the try, its function declarations in place
     // (the fork moves them ahead of it)
-    if (owned.length > 0) result = [this.tryFinally(result, owned)];
+    result = this.guarded(prologue, result);
     const head: Ir[] = directives.map(d => this.src(d));
     if (isBody) {
       // the function's temporaries, declared once it is visited
       const scope = this.scopes[this.scopes.length - 1]!;
       head.push(varsStatement(scope));
     }
-    result = [...head, ...prologue, ...result];
+    result = [...head, ...result];
     return this.withStatements(node, node.statements, result, []);
   }
 
@@ -1196,6 +1251,7 @@ class Lowering {
   // (`__capture(f, x)`) as soon as they are declared.
   private visitStatements(list: Node[]): Ir[] {
     const holds = this.holdStatements(list);
+    if (this.splitsScope(list)) return this.visitStatementsFlat(list, holds);
     interface Level {
       statements: Ir[];
       owned: Node[];
@@ -1235,6 +1291,88 @@ class Lowering {
       else outer.statements.push(this.tryFinally(rest, inner.owned));
     }
     return levels[0]!.statements;
+  }
+
+  // Reports whether the nested trys of visitStatements would split the
+  // block's lexical scope: whether a statement before an owned local's try
+  // (or a function declaration that moves ahead of it) reads a name that is
+  // declared in the try (`const read = () => n; const p = new P(); const n =
+  // 7;`).
+  private splitsScope(list: Node[]): boolean {
+    // each statement's level: the try it is in (a declaration of owned
+    // locals is in the one around its own)
+    const levels: number[] = [];
+    let level = 0;
+    for (const statement of list) {
+      levels.push(level);
+      const owned = this.ownedLocalsOf(statement);
+      if (owned.length === 0) continue;
+      if (owned.some(n => n.kind !== K.Identifier)) return false;
+      level++;
+    }
+    for (let i = 1; i <= level; i++) {
+      const inner = list.filter((_, j) => levels[j]! >= i);
+      const outer = list.filter((_, j) => levels[j]! < i);
+      // the names declared in the try: its lexical declarations, and its
+      // function declarations that read them (the others move ahead of it)
+      const names = lexicalNames(inner);
+      const fns = inner.filter(s => s.kind === K.FunctionDeclaration);
+      for (let changed = true; changed;) {
+        changed = false;
+        for (const f of fns)
+          if (f.name && !names.has(f.name.text) && readsAny(f, names)) {
+            names.add(f.name.text);
+            changed = true;
+          }
+      }
+      if (outer.some(s => readsAny(s, names))) return true;
+    }
+    return false;
+  }
+
+  // visitStatements for a block whose trys would split its scope: one try
+  // around all of it, the owned locals declared (as 0) ahead of it and
+  // assigned where they were declared, function declarations in place.
+  private visitStatementsFlat(list: Node[], holds: Map<number, Ir[]>): Ir[] {
+    const owned: Node[] = [];
+    const statements: Ir[] = [...(holds.get(-1) ?? [])];
+    list.forEach((statement, i) => {
+      const names = this.ownedLocalsOf(statement);
+      if (names.length === 0) {
+        const visited = this.visitStatement(statement);
+        if (isGen(visited) && visited.tag?.t === 'stmts')
+          statements.push(...visited.tag.list);
+        else statements.push(visited);
+      } else {
+        owned.push(...names);
+        const declarationList = statement.declarationList as Node;
+        const keyword =
+          declarationList.flags & NodeFlags.Const ? 'const' : 'let';
+        for (const decl of declarationList.declarations as Node[]) {
+          if (names.includes(decl.name)) {
+            const init = this.fullExpression(decl.initializer, Ctx.Take);
+            if (init)
+              statements.push(
+                exprStatement(this.assign(this.name(decl.name), init)),
+              );
+          } else
+            statements.push(
+              gen(Prec.Primary, [
+                `\n${keyword} `,
+                this.visitVariableDeclaration(decl),
+                ';',
+              ]),
+            );
+        }
+      }
+      statements.push(...(holds.get(i) ?? []));
+    });
+    const declarations = gen(Prec.Primary, [
+      '\nlet ',
+      ...owned.flatMap((n, i) => [i > 0 ? ', ' : '', this.name(n), ' = 0']),
+      ';',
+    ]);
+    return [declarations, this.tryFinally(statements, owned)];
   }
 
   // The names of the owned locals a statement declares.
@@ -1820,6 +1958,10 @@ class Lowering {
         elementType = prefix('-', num(1));
         break;
     }
+    // a scalar element type that is more than a name still runs
+    // (`(calls++, Number)`)
+    if (cell.kind !== CellKind.ArrayOfStruct && !isNameChain(args[0]!))
+      elementType = comma([this.visitIn(args[0]!, Ctx.Discard)!, elementType]);
     return this.call('__newSharedArray', elementType, this.visit(args[1]!));
   }
 
@@ -2077,6 +2219,25 @@ class Lowering {
     const temp = this.newTemp();
     temps.push(this.assign(tempRef(temp), expr));
     return tempRef(temp);
+  }
+
+  // An identifier's edit to its new name: `{x: x_1}` for a shorthand
+  // binding element, which also names the property.
+  private renameEdit(id: Node, renamed: string): Edit {
+    const parent = id.parent as Node;
+    const shorthand =
+      parent.kind === K.BindingElement &&
+      parent.name === id &&
+      !parent.propertyName &&
+      !parent.dotDotDotToken &&
+      (parent.parent as Node).kind === K.ObjectBindingPattern;
+    return {
+      start: this.startOf(id),
+      end: id.end,
+      ir: shorthand
+        ? gen(Prec.Primary, [`${id.text}: ${renamed}`])
+        : gen(Prec.Primary, [renamed], {t: 'simple'}),
+    };
   }
 
   // A new reference to a variable, by name.
@@ -2417,6 +2578,15 @@ function readsAny(fn: Node, names: Set<string>): boolean {
     return forEachChild(node, visit);
   };
   return forEachChild(fn, visit);
+}
+
+// Reports whether an expression is a name or a property of one (`Number`,
+// `threads.i32`), which reads nothing a lowering must keep.
+function isNameChain(node: Node): boolean {
+  if (node.kind === K.Identifier) return true;
+  return (
+    node.kind === K.PropertyAccessExpression && isNameChain(node.expression)
+  );
 }
 
 // The loop a `continue` statement continues.

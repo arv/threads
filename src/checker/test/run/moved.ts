@@ -1,8 +1,10 @@
 // What the lowering moves, as it runs: parameter defaults that move into the
 // body (an owned parameter's, or one with temporaries), the declarations of a
-// body around them, function declarations next to an owned local, and a class
-// field's initializer that constructs its class again. main logs each
-// result, and how many blocks are still allocated.
+// body around them, function declarations and closures next to an owned
+// local, a class field's initializer that constructs its class again, a
+// renamed var, a default that throws after an owned parameter, and
+// destructured defaults. main logs each result, and how many blocks are still
+// allocated.
 import {f64, heapStats, log, struct, type Struct} from '@arv/threads';
 
 const P = struct({x: f64});
@@ -67,6 +69,46 @@ class C {
   value = make(new P());
 }
 
+// a body var renamed apart from what a moved default reads still moves its
+// count out (4, nothing left)
+function fresh(): P {
+  return new P();
+}
+function renamedResult(p: P = fresh()): P {
+  // eslint-disable-next-line no-var
+  var fresh = new P();
+  fresh.x = p.x + 4;
+  return fresh;
+}
+
+// a closure before an owned local reads a const after it (7 + 3)
+function closureFirst(): number {
+  const read = () => n;
+  const p = new P();
+  p.x = 3;
+  const n = 7;
+  return read() + p.x;
+}
+
+// an owned parameter is released when a default after it throws (nothing
+// left)
+function fail(): number {
+  throw new Error('fail');
+}
+function throwsAfter(a: P = new P(), b = fail()): number {
+  return a.x + b;
+}
+
+// a destructured default frees what it allocates, in a parameter and in a
+// local (1 each, nothing left)
+function destructured({x = read(new P())}: {x?: number} = {}): number {
+  return x;
+}
+function destructuredLocal(o: {x?: number}): number {
+  const {x = read(new P())} = o;
+  return x;
+}
+
 // a result, or the error it throws (the fork's emit throws for some)
 function attempt(f: () => unknown): unknown {
   try {
@@ -90,6 +132,11 @@ export function main() {
   // are counted from here
   const before = heapStats();
   results.push(attempt(() => new C().value));
+  results.push(attempt(() => renamedResult().x));
+  results.push(attempt(closureFirst));
+  results.push(attempt(throwsAfter));
+  results.push(attempt(destructured));
+  results.push(attempt(() => destructuredLocal({})));
   const after = heapStats();
   log(
     `${JSON.stringify(results)} blocks left ${after.allocated - before.allocated - (after.freed - before.freed)}`,

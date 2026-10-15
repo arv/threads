@@ -7,10 +7,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {decode} from '@jridgewell/sourcemap-codec';
+import {decode, encode} from '@jridgewell/sourcemap-codec';
 import {API} from 'typescript/sync';
 import {afterAll, describe, expect, it} from 'vite-plus/test';
-import {compile, toJavaScript} from './compile.ts';
+import {compile, composeMaps, toJavaScript} from './compile.ts';
 import type {CompiledFile} from './compile.ts';
 
 const checker = fileURLToPath(new URL('.', import.meta.url));
@@ -120,6 +120,23 @@ describe('compile', () => {
     expect(source.trim()).toBe("n.name = 'a';");
   });
 
+  it('keeps a column the intermediate code maps to nothing unmapped', () => {
+    const map = (mappings: number[][][]) => ({
+      version: 3 as const,
+      file: 'x.js',
+      sources: ['x.ts'],
+      sourcesContent: [''],
+      names: [],
+      mappings: encode(mappings as never),
+    });
+    // the outer map's columns 4 (to an unmapped column) and 8 (unmapped)
+    const composed = composeMaps(
+      map([[[0, 0, 0, 0], [4, 0, 0, 4], [8]]]),
+      map([[[0, 0, 0, 0], [3]]]),
+    );
+    expect(decode(composed.mappings)).toEqual([[[0, 0, 0, 0], [4], [8]]]);
+  });
+
   it('leaves a file that does not use the runtime as it is', () => {
     const file: CompiledFile = compile(
       path.join(checker, 'test/emit/tsconfig.json'),
@@ -153,7 +170,7 @@ describe('compile, where the fork does not', () => {
   it('runs the defaults left to right when one moves into the body', () => {
     expect(fixes).toContain('export function ordered(a, b) {');
     expect(fixes).toMatch(
-      /a = a === void 0 \? __newStruct\(Node\) : __retain\(a\);\n\tif \(b === void 0\) \{\n\t\tb = a;/,
+      /a = a === void 0 \? __newStruct\(Node\) : __retain\(a\);\n\ttry \{\n\t\tif \(b === void 0\) \{\n\t\t\tb = a;/,
     );
   });
 
@@ -167,6 +184,10 @@ describe('compile, where the fork does not', () => {
     expect(fixes).toContain(
       '_a = __retain(a), _c = (_b = a, a = __retain(b), __release(_b), 0), _c >>> 0 === _c && _c < __I32[_a + 4 >> 2] ? __F64[(_a + 16 >> 3) + _c] : __outOfBounds[_c]), __release(_a)',
     );
+  });
+
+  it("runs a scalar element type's expression", () => {
+    expect(fixes).toContain('__newSharedArray((calls++, Number, 8), n)');
   });
 
   it('puts the import on a line of its own after a directive', () => {
@@ -212,7 +233,7 @@ describe('compile, where the fork does not', () => {
 });
 
 describe('what the lowering moves, as it runs', () => {
-  it('runs defaults in order, reads what they read, keeps functions with their bindings, and frees field initializers', () => {
+  it('runs defaults in order, reads what they read, keeps functions and closures with their bindings, frees field initializers, and releases what a throwing default leaves', () => {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-moved-'));
     dirs.push(out);
     const compiled = spawnSync(
@@ -240,7 +261,7 @@ describe('what the lowering moves, as it runs', () => {
       {encoding: 'utf8', timeout: 60_000},
     );
     expect(r.stdout.trim(), r.stderr).toBe(
-      '[0,true,2,1,6,6,10,1] blocks left 0',
+      '[0,true,2,1,6,6,10,1,4,10,"Error",1,1] blocks left 0',
     );
   }, 60_000);
 
@@ -314,6 +335,31 @@ describe('threads-check compile', () => {
       'export const n = 1;\n',
     );
     expect(fs.existsSync(path.join(dir, 'app.js'))).toBe(false);
+  });
+
+  it('copies an imported JSON file, and keeps the JSX of a .jsx file', () => {
+    const dir = project(
+      {
+        'app.ts': `import data from './data.json';\nimport {view} from './view.jsx';\n${APP}export const v = [data.value, view];\n`,
+        'data.json': '{"value":1}\n',
+        'view.jsx': 'export const view = <div />;\n',
+      },
+      {
+        allowJs: true,
+        resolveJsonModule: true,
+        jsx: 'preserve',
+        outDir: 'dist',
+      },
+    );
+    const r = run(['-p', dir, '--runtime', 'threads']);
+    expect(r.stderr).toBe('');
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(path.join(dir, 'dist/data.json'), 'utf8')).toBe(
+      '{"value":1}\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'dist/view.jsx'), 'utf8')).toContain(
+      '<div />',
+    );
   });
 
   it('reports the ownership errors, exits 1, and writes the files all the same', () => {

@@ -13,7 +13,13 @@
 // (reported as tsc reports them, and not checked further), 3 if the project
 // cannot be checked, 4 on an internal error (a bug in threads-check).
 
-import {existsSync, mkdirSync, statSync, writeFileSync} from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import {basename, dirname, join, relative, resolve} from 'node:path';
 import {check, CheckError} from './check.ts';
 import {compile, toJavaScript} from './compile.ts';
@@ -160,6 +166,13 @@ function writeOutput(
     outputs.set(out, file.fileName);
   }
   for (const file of files) {
+    // an imported JSON file (resolveJsonModule), copied as it is
+    if (/\.json$/i.test(file.fileName)) {
+      const out = outputPath(file, rootDir, outDir);
+      mkdirSync(dirname(out), {recursive: true});
+      copyFileSync(file.fileName, out);
+      continue;
+    }
     const js = toJavaScript(file, {
       verbatimModuleSyntax: !!options.verbatimModuleSyntax,
       rewriteRelativeImportExtensions:
