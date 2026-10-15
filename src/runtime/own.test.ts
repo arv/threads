@@ -213,6 +213,26 @@ describe('moving values', () => {
     expect(move({after: 42})).toEqual({after: 42});
   });
 
+  it('propagates errors from an array proxy during normal serialization', () => {
+    const original = new Error('second prototype lookup');
+    for (const reentrant of [false, true]) {
+      let calls = 0;
+      const proxy = new Proxy([123], {
+        getPrototypeOf() {
+          if (++calls === 2) {
+            if (reentrant) T.share({nested: 1});
+            throw original;
+          }
+          return {};
+        },
+      });
+      expect(() => move(proxy)).toThrow(
+        reentrant ? /already serializing/ : original,
+      );
+      expect(move([123, {after: 42}])).toEqual([123, {after: 42}]);
+    }
+  });
+
   it('reclaims shared blobs when a freeze trap attempts a reentrant write', () => {
     const key = 'reentrantFreezePayload',
       name = runtime.$internRef(key);
