@@ -303,3 +303,7 @@ export function assertedIncrement() {
   const frozen = share({ n: 1 });
   (frozen.n as number)++;                                     // error: a write through a shared value
 }
+export function conditionallyReplacedThenConsumed(flag: boolean) {
+  let xs = [8];
+  xs[0] = flag ? (xs = [2], consume(xs).length) : consume(xs).length;  // error: on the false path the first xs, consumed, is written
+}

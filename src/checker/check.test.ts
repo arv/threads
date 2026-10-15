@@ -147,7 +147,9 @@ describe('threads-check, where it differs from the fork', () => {
 
   it('knows consume() and struct() under other names', () => {
     // the fork takes a call for consume() or struct() by the name it is called
-    // by: an import alias, or a const that holds it, defeats it there
+    // by: an import alias, or a const that holds it, defeats it there. a field
+    // marker or an atomic operation read by element access is the runtime's
+    // as one read by its property is
     const dir = join(checker, 'test/diverging/marker-aliases');
     expect(
       check(join(dir, 'tsconfig.json'), {runtime: 'threads', api})
@@ -160,6 +162,9 @@ describe('threads-check, where it differs from the fork', () => {
         "alias.ts(22,11): error TS96021: A value of type 'Hidden' cannot be stored in an ordinary array or object: reference counting cannot see it there. Use a SharedArray or a shared struct field, or a place typed 'unknown', which holds a handle.",
         "alias.ts(28,7): error TS96005: 'xs' was consumed by 'send' on line 27.",
         "alias.ts(33,7): error TS96005: 'xs' was consumed by 'send' on line 32.",
+        "alias.ts(38,73): error TS96036: Field 'n' is marked i32 but typed 'number': its values are stored as its marker says and checked as its type says, so type it 'i32' or mark it f64.",
+        'alias.ts(41,3): error TS96028: An atomic operation takes an i32 field of a shared struct, named by a string literal, or an element of a SharedArray<i32>.',
+        'alias.ts(42,3): error TS96028: An atomic operation takes an i32 field of a shared struct, named by a string literal, or an element of a SharedArray<i32>.',
       ].sort(),
     );
   });
@@ -276,6 +281,7 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(282,7): error TS96005: 'zs' was consumed by 'consume' on line 281.",
         "try-exits.ts(287,3): error TS96001: 'box' cannot be used here: it was sent to 'send' on line 287.",
         "try-exits.ts(304,4): error TS96010: Cannot change 'frozen': it is a shared value, which is immutable.",
+        "try-exits.ts(308,3): error TS96006: 'xs' may have been consumed by 'consume' on line 308.",
       ].sort(),
     );
   });

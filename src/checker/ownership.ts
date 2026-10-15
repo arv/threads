@@ -62,7 +62,14 @@ interface Value {
   readonly region: Region;
   readonly consumed?: Send; // for Consumed
   readonly maybe: boolean; // for Consumed: consumed on some paths only
-  readonly of?: Region; // for Consumed: the region of the value it held
+  // for Consumed: the regions of the values it may have held when consumed,
+  // each with whether it was consumed holding that one on some paths only
+  readonly origins?: readonly Origin[];
+}
+
+interface Origin {
+  readonly region: Region;
+  readonly maybe: boolean;
 }
 
 const sharedValue: Value = {kind: ValueKind.Shared, region: 0, maybe: false};
@@ -201,7 +208,7 @@ class State {
         region: 0,
         consumed: a.consumed,
         maybe: a.maybe || b.maybe,
-        of: a.of ?? b.of,
+        origins: this.joinOrigins(a, b),
       };
     }
     if (a.kind === ValueKind.Consumed)
@@ -210,7 +217,7 @@ class State {
         region: 0,
         consumed: a.consumed,
         maybe: true,
-        of: a.of,
+        origins: this.joinOrigins(a, b),
       };
     if (b.kind === ValueKind.Consumed)
       return {
@@ -218,9 +225,28 @@ class State {
         region: 0,
         consumed: b.consumed,
         maybe: true,
-        of: b.of,
+        origins: this.joinOrigins(a, b),
       };
     return this.mergeValues(a, b);
+  }
+
+  // The origins of two paths' values of a variable, one of them consumed:
+  // every region either may have held, consumed holding it on every path only
+  // where both were.
+  joinOrigins(a: Value, b: Value): readonly Origin[] | undefined {
+    const as = a.kind === ValueKind.Consumed ? (a.origins ?? []) : [];
+    const bs = b.kind === ValueKind.Consumed ? (b.origins ?? []) : [];
+    if (as.length === 0 && bs.length === 0) return undefined;
+    const same = (o: Origin, p: Origin) =>
+      this.find(o.region) === this.find(p.region);
+    const out: Origin[] = [];
+    for (const o of as) {
+      const p = bs.find(p => same(o, p));
+      out.push({region: o.region, maybe: o.maybe || !p || p.maybe});
+    }
+    for (const p of bs)
+      if (!as.some(o => same(o, p))) out.push({region: p.region, maybe: true});
+    return out;
   }
 
   // A canonical description of the state, used to detect that a loop has
@@ -250,6 +276,18 @@ class State {
           out += `=r${index}f${inf.flags}${inf.sent ? (inf.maybe ? 's?' : 's') : ''};`;
         }
       }
+    }
+    // what each consumed variable may have held: a region a variable holds by
+    // its number, any other alike
+    for (const symbol of symbols) {
+      const origins = this.vars.get(symbol)!.origins;
+      if (!origins) continue;
+      const held = origins
+        .map(
+          o => `${roots.get(this.find(o.region)) ?? 'x'}${o.maybe ? '?' : ''}`,
+        )
+        .sort();
+      out += `${idOf(symbol)}o${held.join(',')};`;
     }
     return out;
   }
@@ -1920,7 +1958,10 @@ class FunctionAnalysis {
           region: 0,
           consumed: {site: node, callee, via: operand.text, consume: true},
           maybe: false,
-          of: v.kind === ValueKind.InRegion ? s.find(v.region) : undefined,
+          origins:
+            v.kind === ValueKind.InRegion
+              ? [{region: s.find(v.region), maybe: false}]
+              : undefined,
         });
       }
     }
@@ -2148,8 +2189,8 @@ class FunctionAnalysis {
 
   // Reports an object written to after what was evaluated since it was read
   // (obj, its value then) sent it, or consumed the variable it was read from
-  // while that still held it (a consume() ends the binding, and leaves the
-  // region as it was).
+  // while that still held it, on some paths or all (a consume() ends the
+  // binding, and leaves the region as it was).
   checkStillThere(expr: Node, obj: Value, s: State): void {
     let root = skipOuterExpressions(expr, OEK.Assertions | OEK.Parentheses);
     while (
@@ -2166,13 +2207,17 @@ class FunctionAnalysis {
     }
     const symbol = this.a.symbolOfIdentifier(root);
     const bound = symbol && s.vars.get(symbol);
-    if (
-      bound?.kind === ValueKind.Consumed &&
-      bound.of !== undefined &&
-      obj.kind === ValueKind.InRegion &&
-      s.find(bound.of) === s.find(obj.region)
-    )
-      this.checkUse(root, root.text, bound, s);
+    const origin =
+      bound?.kind === ValueKind.Consumed && obj.kind === ValueKind.InRegion
+        ? bound.origins?.find(o => s.find(o.region) === s.find(obj.region))
+        : undefined;
+    if (origin)
+      this.checkUse(
+        root,
+        root.text,
+        {...bound!, maybe: bound!.maybe || origin.maybe},
+        s,
+      );
     else this.checkUse(root, root.text, obj, s);
   }
 

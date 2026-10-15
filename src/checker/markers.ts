@@ -51,6 +51,32 @@ export function getRuntimeExportName(
   return name;
 }
 
+// The name an expression reads a member by: a property's, or a literal key's
+// (`ns["f64"]` , ns[`f64`] ), or "" for another.
+function memberName(expr: Node): string {
+  if (expr.kind === K.PropertyAccessExpression) return expr.name.text;
+  if (expr.kind !== K.ElementAccessExpression) return '';
+  const key = skipParentheses(expr.argumentExpression);
+  return key.kind === K.StringLiteral ||
+    key.kind === K.NoSubstitutionTemplateLiteral
+    ? key.text
+    : '';
+}
+
+// The symbol an expression refers to: a name's, or a member's read by a
+// property or a literal key (`threads.f64` and `threads["f64"]` alike).
+function referencedSymbol(c: Own, expr: Node): TsSymbol | undefined {
+  if (expr.kind === K.Identifier) return c.host.resolvedSymbol(expr);
+  if (expr.kind === K.PropertyAccessExpression)
+    return c.host.symbolAt(expr.name);
+  const name = memberName(expr);
+  if (name === '') return undefined;
+  return c.host.checker.getPropertyOfType(
+    c.host.typeOf(expr.expression) as any,
+    name,
+  ) as TsSymbol | undefined;
+}
+
 // The marker a type node refers to: "Sending" or "Shared" for `Sending<T>` and
 // `Shared<T>` , or "".
 export function getTypeMarker(c: Own, t: Node | undefined): string {
@@ -103,13 +129,7 @@ const atomicOperations = new Set([
 // literal or on an element of a SharedArray<i32>, and false if it acts on
 // anything else, which is an error.
 export function isAtomicCallValid(c: Own, call: Node): boolean | undefined {
-  const callee = skipParentheses(call.expression);
-  if (
-    callee.kind !== K.PropertyAccessExpression ||
-    !atomicOperations.has(callee.name.text) ||
-    getRuntimeExportName(c, c.host.symbolAt(callee.expression)) !== 'atomic'
-  )
-    return undefined;
+  if (getAtomicOperation(c, call) === '') return undefined;
   if (call.arguments.length < 2) return false;
   const cell = getCellType(c, c.host.typeOf(call.arguments[0]));
   if (cell.kind === CellKind.ArrayOfI32) return true;
@@ -121,6 +141,18 @@ export function isAtomicCallValid(c: Own, call: Node): boolean | undefined {
   )
     return false;
   return cell.kinds[cell.fields.indexOf(key.text)] === 'i';
+}
+
+// The operation of the runtime's `atomic` a call calls (`atomic.add(...)` ,
+// `threads.atomic["add"](...)` and the like), or "".
+function getAtomicOperation(c: Own, call: Node): string {
+  const callee = skipParentheses(call.expression);
+  const op = memberName(callee);
+  if (!atomicOperations.has(op)) return '';
+  const object = skipParentheses(callee.expression);
+  return getRuntimeExportName(c, referencedSymbol(c, object)) === 'atomic'
+    ? op
+    : '';
 }
 
 // The runtime's calls that block their thread, by declaring class and name, and
@@ -145,10 +177,9 @@ export function getBlockingCall(
   c: Own,
   call: Node,
 ): {name: string; instead: string} | undefined {
-  if (isAtomicCallValid(c, call) !== undefined) {
-    const op = skipParentheses(call.expression).name.text as string;
+  const op = getAtomicOperation(c, call);
+  if (op !== '')
     return op === 'wait' ? {name: `atomic.${op}`, instead: ''} : undefined;
-  }
   const handle = c.host.signatureOf(call).declaration;
   if (!handle || !c.isRuntimePath(handle.path)) return undefined;
   const decl = c.host.declarationOf(handle);
@@ -667,12 +698,7 @@ function scalarMarkerOf(c: Own, expr: Node, seen = new Set<Node>()): string {
     expr = expr.expression;
   if (seen.has(expr)) return '';
   seen.add(expr);
-  let symbol =
-    expr.kind === K.Identifier
-      ? c.host.resolvedSymbol(expr)
-      : expr.kind === K.PropertyAccessExpression
-        ? c.host.symbolAt(expr.name)
-        : undefined;
+  let symbol = referencedSymbol(c, expr);
   const name = getRuntimeExportName(c, symbol);
   if (name in scalarMarkers) return name;
   if (symbol && symbol.flags & SymbolFlags.Alias)
