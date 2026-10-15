@@ -1838,7 +1838,16 @@ export function __start(fn: ThreadFn, args: unknown[], detached: boolean) {
   I32[t >> 2] = K_THREAD;
   I32[(t + 4) >> 2] = detached ? 1 : 0;
   I32[(t + 8) >> 2] = detached ? DETACHED : RUNNING;
-  const [a, bytes] = __message([key, ...args], 1);
+  let a: number, bytes: number;
+  try {
+    [a, bytes] = __message([key, ...args], 1);
+  } catch (e) {
+    // No thread or message owns these yet. Serialization rolls back the
+    // counts it took itself, but counted arguments arrived with theirs.
+    $freeBlock(t, 32);
+    for (const v of args) if (v instanceof CountedArg) release(v.a);
+    throw e;
+  }
   I32[(t + 16) >> 2] = a;
   I32[(t + 20) >> 2] = bytes;
   $quiescent();

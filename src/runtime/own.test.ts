@@ -121,6 +121,40 @@ describe('moving values', () => {
     // nested to be revoked as well.
     expect(nested.inner.n).toBe(1);
   });
+
+  it('reclaims thread blocks and arguments of rejected reentrant spawns', () => {
+    function reentrantSpawn(value: number) {
+      return value;
+    }
+    own.register(import.meta.url, {reentrantSpawn});
+    const N = own.sharedStruct('ReentrantSpawnArgument', ['n']),
+      a = own.newStruct(N),
+      pool = runtime.counters(globalThis.__escapeSab!);
+    try {
+      for (let i = 0; i < 32; i++) {
+        const value = {
+          get x() {
+            const before = T.heapStats();
+            expect(() => own.spawn(reentrantSpawn, own.countedRef(a))).toThrow(
+              /already serializing/,
+            );
+            const after = T.heapStats();
+            expect(after.allocated - before.allocated).toBe(1);
+            expect(after.freed - before.freed).toBe(1);
+            expect(runtime.I32[(a >> 2) + 1]).toBe(1);
+            return 42;
+          },
+        };
+        expect(move([123, value])).toEqual([123, {x: 42}]);
+      }
+      expect(runtime.counters(globalThis.__escapeSab!)).toMatchObject({
+        live: pool.live,
+        queued: pool.queued,
+      });
+    } finally {
+      own.release(a);
+    }
+  });
 });
 
 describe('shared structs', () => {
