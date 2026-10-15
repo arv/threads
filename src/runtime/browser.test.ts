@@ -11,6 +11,7 @@ let failNext = false; // the next worker's module does not load
 class StandIn {
   onmessage: ((e: {data: unknown}) => void) | null = null;
   onerror: unknown = null;
+  onmessageerror: (() => void) | null = null;
   terminated = false;
   constructor() {
     made.push(this);
@@ -89,6 +90,58 @@ it('a worker whose module does not load fails start() with that cause', async ()
     'threads: a worker failed to start: its module did not load',
   );
   browser.stop();
+});
+
+for (const event of ['crash', 'error', 'messageerror'] as const)
+  it(`a worker's ${event} after ready fails pending runs and stops the pool`, async () => {
+    await browser.start({workers: 1});
+    const worker = made.at(-1)!,
+      runs = [browser.run(noop), browser.run(noop)],
+      failures = Promise.all(runs.map(p => p.catch((e: unknown) => e)));
+    // Let run() queue its thread and register for the pool's failures.
+    await Promise.resolve();
+    if (event === 'crash')
+      worker.onmessage!({
+        data: {type: 'crash', message: 'worker gone', stack: 'worker stack'},
+      });
+    else if (event === 'error')
+      (worker.onerror as (e: {message: string}) => void)({
+        message: 'worker gone',
+      });
+    else worker.onmessageerror!();
+    for (const error of await failures) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(
+        event === 'messageerror' ? /message.*could not read/ : /worker gone/,
+      );
+      if (event === 'crash')
+        expect(((error as Error).cause as Error).stack).toBe('worker stack');
+    }
+    expect(made.every(w => w.terminated)).toBe(true);
+    expect(runtime.counters(sab).shutdown).toBe(1);
+    expect(() => own.spawn(noop)).toThrow(/the pool was stopped/);
+    await browser.start({workers: 1});
+    expect(made.at(-1)!.terminated).toBe(false);
+    // An error from the stopped pool must not shut down its replacement.
+    worker.onmessage!({data: {type: 'crash', message: 'late crash'}});
+    (worker.onerror as (e: {message: string}) => void)({message: 'late error'});
+    expect(runtime.counters(sab).shutdown).toBe(0);
+    expect(made.at(-1)!.terminated).toBe(false);
+    browser.stop();
+  });
+
+it('fails pending runs when a worker requested by grow cannot start', async () => {
+  await browser.start({workers: 1});
+  const worker = made.at(-1)!,
+    failure = browser.run(noop).catch((e: unknown) => e);
+  await Promise.resolve();
+  failNext = true;
+  worker.onmessage!({data: {type: 'grow'}});
+  expect(await failure).toMatchObject({
+    message: 'threads: a worker failed to start: its module did not load',
+  });
+  expect(made.every(w => w.terminated)).toBe(true);
+  expect(runtime.counters(sab).shutdown).toBe(1);
 });
 
 it('stays awake once stopped, so a collection a stopped worker runs on waits for it', async () => {

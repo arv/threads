@@ -124,6 +124,7 @@ const encoder = new TextEncoder();
 // the strings in the blob being written -> their body
 const written = new Map<string, number>();
 let repeats = 0; // the blob's repeated strings so far
+let writing = false;
 // the shapes in the blob being written, by first key (or '' for none): [ keys,
 // shape, ... ]; and the last one used, since an array's objects usually have
 // the same keys
@@ -357,11 +358,25 @@ function put(
   if (freeze) frozen.push(v);
   return boxWord(at, Array.isArray(v) ? T_ARR : T_OBJ, body);
 }
-// a blob of v in the shared heap; its address
 // a blob of v in the shared heap; its address. all or nothing: when the blob
 // does not fit (a full heap), or v cannot be sent, the counts taken for it go
 // back and nothing is frozen
-function write(v: Sent, moved: Moved | null, freeze: boolean, alloc = $alloc) {
+function write(
+  v: Sent,
+  moved: Moved | null,
+  freeze: boolean,
+  alloc = $alloc,
+  depth = 0,
+) {
+  // Reading a getter (or a proxy's trap) can call share or send again. The
+  // scratch buffer and its counts belong to the outer write until it ends:
+  // reject before changing any of them, even if the getter catches this.
+  if (writing)
+    throw new TypeError(
+      'own: already serializing a value: cannot send or share another from a getter or proxy trap',
+    );
+  writing = true;
+  revokeDepth = $checking() ? Infinity : depth;
   wn = 1;
   try {
     put(0, v, moved, freeze, 0);
@@ -382,6 +397,7 @@ function write(v: Sent, moved: Moved | null, freeze: boolean, alloc = $alloc) {
     takenCells.length = 0;
     frozen.length = 0;
     if (wf.length > BUFFER_KEPT) setBuffer(new Float64Array(BUFFER_WORDS));
+    writing = false;
   }
 }
 
@@ -570,8 +586,7 @@ const messageBlock: (bytes: number) => number = bytes =>
   $allocBlock(bytes, false); // written whole
 export function __message(v: unknown, depth = 0): [number, number] {
   const moved: Moved = [];
-  revokeDepth = $checking() ? Infinity : depth;
-  const a = write(v as Sent, moved, false, messageBlock),
+  const a = write(v as Sent, moved, false, messageBlock, depth),
     bytes = wn * 8;
   revoke(moved);
   return [a, bytes];

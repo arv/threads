@@ -71,6 +71,56 @@ describe('moving values', () => {
     expect(Object.isFrozen(shared.a[1])).toBe(true);
     expect(move(shared)).toEqual({a: [1, {b: 2}]});
   });
+
+  it('rejects reentrant writes before they can corrupt the outer value', () => {
+    const H = T.struct({n: T.f64}, 'ReentrantWrite'),
+      handle = new H(),
+      refs = () => runtime.I32[(handle.$cell >> 2) + 1];
+    for (const outer of [move, T.share])
+      for (const inner of [move, T.share]) {
+        const nested = {inner: 1},
+          value = [
+            123,
+            handle,
+            {
+              get x() {
+                inner(nested);
+                return 42;
+              },
+            },
+          ],
+          before = refs();
+        expect(() => outer(value)).toThrow(/already serializing/);
+        // Failed writes neither move nor freeze their input, and return the
+        // counts they took before the getter ran.
+        expect(value[0]).toBe(123);
+        expect(Object.isFrozen(value)).toBe(false);
+        expect(Object.isFrozen(nested)).toBe(false);
+        expect(nested.inner).toBe(1);
+        expect(refs()).toBe(before);
+        expect(move([123, {x: 42}])).toEqual([123, {x: 42}]);
+      }
+  });
+
+  it('keeps the outer move depth when a getter catches a reentrant write', () => {
+    const nested = {inner: {n: 1}};
+    let failure: unknown;
+    const value = {
+      get x() {
+        try {
+          own.__message({n: 2}, 1);
+        } catch (e) {
+          failure = e;
+        }
+        return nested;
+      },
+    };
+    expect(move(value)).toEqual({x: {inner: {n: 1}}});
+    expect(failure).toBeInstanceOf(TypeError);
+    // Only value itself moves: the rejected write's depth 1 must not cause
+    // nested to be revoked as well.
+    expect(nested.inner.n).toBe(1);
+  });
 });
 
 describe('shared structs', () => {
