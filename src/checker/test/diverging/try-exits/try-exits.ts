@@ -336,3 +336,11 @@ export function enumInitializers() {
   let xs = [1];
   try { enum E { A = (consume(xs), 1), B = getter.value } xs = [2]; } finally { use(xs); }  // error: B's getter may throw after A consumed xs
 }
+// a `var` the try's block declares is in scope in the finally, and after
+export function varInFinally(ch: Channel<number[]>) {
+  try { var ys = [1]; ch.send(ys); mayThrow(); } finally { use(ys); }  // error: ys was sent
+}
+export function varAfterTry(ch: Channel<number[]>) {
+  try { var ys = [1]; ch.send(ys); mayThrow(); } finally { use(1); }
+  use(ys);                                                    // error: ys was sent
+}

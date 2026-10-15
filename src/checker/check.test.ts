@@ -292,6 +292,8 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(328,3): error TS96006: 'box' may have been consumed by 'consume' on line 328.",
         "try-exits.ts(333,72): error TS96006: 'xs' may have been consumed by 'consume' on line 333.",
         "try-exits.ts(337,85): error TS96005: 'xs' was consumed by 'consume' on line 337.",
+        "try-exits.ts(341,64): error TS96001: 'ys' cannot be used here: it was sent to 'send' on line 341.",
+        "try-exits.ts(345,7): error TS96001: 'ys' cannot be used here: it was sent to 'send' on line 344.",
       ].sort(),
     );
   });
