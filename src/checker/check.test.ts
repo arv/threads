@@ -287,6 +287,7 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(314,87): error TS96002: 'row' cannot be used here: it may have been sent to 'send' on line 314.",
         "try-exits.ts(324,3): error TS96006: 'xs' may have been consumed by 'consume' on line 324.",
         "try-exits.ts(328,3): error TS96006: 'box' may have been consumed by 'consume' on line 328.",
+        "try-exits.ts(333,72): error TS96006: 'xs' may have been consumed by 'consume' on line 333.",
       ].sort(),
     );
   });
@@ -343,6 +344,11 @@ describe('threads-check, where it differs from the fork', () => {
       [
         'spreads.ts(14,8): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
         'spreads.ts(15,11): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(20,18): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(31,18): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(33,17): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        'spreads.ts(34,35): error TS96029: This value may not be an integer, which an i32 would truncate silently: convert it explicitly, as with Math.round(), Math.trunc() or | 0.',
+        "spreads.ts(43,7): error TS96001: 'xs' cannot be used here: it was sent to 'sendFirst' on line 42.",
       ].sort(),
     );
   });
@@ -392,6 +398,7 @@ describe('threads-check, where it differs from the fork', () => {
         `objects.ts(57,59): error TS96033: A value of type '() => SharedArray<Node, "other"> | ${literal}' cannot be used as '() => Node | SharedArray<Node, "other">': what it returns: '${literal}' is an ordinary object, not a shared struct. ${LAID_OUT}`,
         "objects.ts(60,46): error TS96035: A value of type '{ readonly value: 1; readonly next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
         "objects.ts(63,37): error TS96035: A value of type '{ value: number; next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
+        "objects.ts(65,41): error TS96035: A value of type '{ value: number; next: null; }' cannot be used as 'Node': it is an ordinary object, not a shared struct, which 'new Node()' makes.",
       ].sort(),
     );
   });
@@ -436,7 +443,9 @@ describe('threads-check, where it differs from the fork', () => {
   it('refuses a Thread or a Scope sent to another thread or shared', () => {
     // neither is a cell: the runtime refuses to send or share one, and the
     // fork, for which both were cells, says nothing. no field holds one, which
-    // the fork reports too
+    // the fork reports too. a spread tuple's elements after the function go to
+    // the Sending arguments, so a tuple declared outside is one that cannot be
+    // sent
     const dir = join(checker, 'test/diverging/threads-stay');
     const thread =
       "error TS96037: A value of type 'Thread<number>' cannot be sent to another thread or shared: it stays on the thread that made it, which joins it.";
@@ -469,6 +478,9 @@ describe('threads-check, where it differs from the fork', () => {
         `threads.ts(53,12): ${thread}`,
         `threads.ts(54,9): ${thread}`,
         `threads.ts(55,14): ${scope}`,
+        "threads.ts(53,12): error TS96008: 'toSpawn' cannot be sent: it is captured from an outer scope.",
+        "threads.ts(54,9): error TS96008: 'toGo' cannot be sent: it is captured from an outer scope.",
+        "threads.ts(55,14): error TS96008: 'toScope' cannot be sent: it is captured from an outer scope.",
         `threads.ts(56,20): ${thread}`,
         // from the second review: interfaces that extend a Thread or a Scope
         // (and not an iterable's own properties, line 69)

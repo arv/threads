@@ -327,3 +327,8 @@ export function consumedBoxThenReplaced() {
   let box = { n: 0 };
   box.n = (consume(box), box = { n: 1 }, 2);                  // error
 }
+// an array pattern gets its iterator before it evaluates a target
+export function iteratorBeforeTarget() {
+  let xs = [1];
+  try { consume(xs); [(xs = [2], kept).value] = items; } finally { use(xs); }  // error: getting the iterator may throw
+}

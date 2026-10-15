@@ -22,7 +22,7 @@ import type {SourceFile} from 'typescript/ast';
 import type {Own} from './context.ts';
 import {SymbolFlags, TypeFlags} from './host.ts';
 import type {NodeHandle, Signature, TsSymbol, Type} from './host.ts';
-import {getSharedArrayElementType, isCellType} from './layout.ts';
+import {getSharedArrayElementType, isCellType, spreadShape} from './layout.ts';
 import {getTypeMarker, isCellBranded, isConsumeCall} from './markers.ts';
 import {Messages} from './messages.ts';
 import type {Message} from './messages.ts';
@@ -2165,9 +2165,10 @@ class FunctionAnalysis {
         return;
       }
       case K.ArrayLiteralExpression:
-        // each step of the iterator may throw, after the defaults and the
-        // assignments before it; then the iterator is closed
-        if ((target.elements as Node[]).length === 0) this.mayThrow(s);
+        // getting the iterator may throw, before any target is evaluated;
+        // each step may, after the defaults and the assignments before it;
+        // then the iterator is closed
+        this.mayThrow(s);
         for (const element of target.elements as Node[]) {
           if (element.kind === K.OmittedExpression) this.mayThrow(s);
           else if (element.kind === K.SpreadElement)
@@ -2483,11 +2484,12 @@ class FunctionAnalysis {
     }
     // arguments other than the receiver and a map callback
     const otherArgs: Region[] = [];
+    const places = this.argumentPlaces(args);
     args.forEach((arg, i) => {
       const expr =
         arg.kind === K.SpreadElement ? (arg.expression as Node) : arg;
       const v = this.eval(arg, s); // a spread is iterated, which may throw
-      const param = parameterAt(params, i);
+      const param = this.sendingParameter(params, places[i]!);
       if (param && a.isSendingTypeNode(param.type)) {
         this.sendArgument(v, expr, param, name, consuming, s);
         return;
@@ -2523,6 +2525,35 @@ class FunctionAnalysis {
     return regionValue(r);
   }
 
+  // The places each argument's values go to, from..to: a spread before it
+  // fills a tuple's length of them, or an unknown number (see spreadShape),
+  // and a spread fills as many as it holds, none for an empty one.
+  argumentPlaces(args: readonly Node[]): {from: number; to: number}[] {
+    let from = 0,
+      to = 0;
+    return args.map(arg => {
+      if (arg.kind !== K.SpreadElement) return {from: from++, to: to++};
+      const shape = spreadShape(this.a.c, this.a.typeOf(arg.expression));
+      const place = {from, to: to + shape.max - 1};
+      from += shape.min;
+      to += shape.max;
+      return place;
+    });
+  }
+
+  // A `Sending` parameter an argument may go to, at one of its places.
+  sendingParameter(
+    params: Node[],
+    place: {from: number; to: number},
+  ): Node | undefined {
+    const last = Math.min(place.to, Math.max(place.from, params.length - 1));
+    for (let p = place.from; p <= last; p++) {
+      const param = parameterAt(params, p);
+      if (param && this.a.isSendingTypeNode(param.type)) return param;
+    }
+    return undefined;
+  }
+
   evalNew(node: Node, s: State): Value {
     const a = this.a;
     const args = (node.arguments ?? []) as Node[];
@@ -2540,11 +2571,12 @@ class FunctionAnalysis {
     const params = signatureParameters(decl);
     const name = calleeName(node.expression);
     const consuming = a.isConsumingSignature(decl);
+    const places = this.argumentPlaces(args);
     args.forEach((arg, i) => {
       const expr =
         arg.kind === K.SpreadElement ? (arg.expression as Node) : arg;
       const value = this.eval(arg, s); // a spread is iterated, which may throw
-      const param = parameterAt(params, i);
+      const param = this.sendingParameter(params, places[i]!);
       if (param && a.isSendingTypeNode(param.type)) {
         this.sendArgument(value, expr, param, name, consuming, s);
         return;

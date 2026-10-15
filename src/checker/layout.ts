@@ -23,7 +23,13 @@
 import type {SourceFile} from 'typescript/ast';
 import {CellKind, Conversion, isArrayKind} from './context.ts';
 import type {CellType, FieldKind, Own, StructInfo} from './context.ts';
-import {IndexKind, ObjectFlags, SymbolFlags, TypeFlags} from './host.ts';
+import {
+  ElementFlags,
+  IndexKind,
+  ObjectFlags,
+  SymbolFlags,
+  TypeFlags,
+} from './host.ts';
 import type {Signature, Type} from './host.ts';
 import {
   checkIntegerCompoundAssignment,
@@ -541,26 +547,64 @@ function checkValueInto(
     );
 }
 
-// A spread argument's values go into the parameters from its place on: a
-// tuple's each into its own, an array's into the rest. Each is checked as an
-// argument of its type would be, for its layout and as an integer.
-function checkSpreadArgument(
-  c: Own,
-  spread: Node,
-  signature: Signature,
-  i: number,
-): void {
+// What a spread passes: each value it may hold, with how many places after
+// the spread's first it may go to (a tuple's elements each to their own, an
+// iteration's to any), and how many places the spread fills, at least and at
+// most (Infinity for an iteration, or a tuple with a rest element).
+export interface SpreadShape {
+  values: {type: Type; from: number; to: number}[];
+  min: number;
+  max: number;
+}
+
+export function spreadShape(c: Own, t: Type): SpreadShape {
   const host = c.host;
-  const t = host.typeOf(spread.expression);
-  const values = host.checker.isTupleType(t)
-    ? host.typeArguments(t)
-    : [host.checker.getIndexTypeOfType(t, IndexKind.Number)];
-  values.forEach((value, j) => {
-    const parameter = host.parameterTypeAt(signature, i + j);
-    if (!value || !parameter) return;
-    checkIntegerTypeTarget(c, spread, value, parameter);
-    checkValueInto(c, spread, value, parameter, false);
+  if (!host.checker.isTupleType(t)) {
+    const values = host
+      .iteratedTypes(t)
+      .map(type => ({type, from: 0, to: Infinity}));
+    return {values, min: 0, max: Infinity};
+  }
+  const flags = ((host.typeTarget(t) as any)?.elementFlags ?? []) as number[];
+  const shape: SpreadShape = {values: [], min: 0, max: 0};
+  host.typeArguments(t).forEach((type, k) => {
+    const flag = flags[k] ?? ElementFlags.Required;
+    if (flag & ElementFlags.Variable) {
+      // a rest element's type is its elements'; a variadic one's is iterated
+      const types =
+        flag & ElementFlags.Rest ? [type] : host.iteratedTypes(type);
+      for (const each of types)
+        shape.values.push({type: each, from: shape.min, to: Infinity});
+      shape.max = Infinity;
+      return;
+    }
+    shape.values.push({type, from: shape.min, to: shape.max});
+    if (flag & ElementFlags.Required) shape.min++;
+    shape.max++;
   });
+  return shape;
+}
+
+// The parameter types of the places from..to of a signature (the rest's for
+// the places past it), each once.
+export function parameterTypesAt(
+  c: Own,
+  signature: Signature,
+  from: number,
+  to: number,
+): Type[] {
+  const last = Math.min(to, Math.max(from, signature.parameters.length - 1));
+  const types: Type[] = [];
+  const seen = new Set<string>();
+  for (let p = from; p <= last; p++) {
+    const t = c.host.parameterTypeAt(signature, p);
+    if (!t) continue;
+    const key = c.host.typeToString(t);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    types.push(t);
+  }
+  return types;
 }
 
 // Reports whether a value of type t is an ordinary object: of an object type
@@ -872,18 +916,51 @@ function computeConversion(c: Own, node: Node): void {
       const unresolved =
         (!signature.declaration && signature.parameters.length === 0) ||
         host.checker.isUnknownSignature(signature);
-      args.forEach((arg, i) => {
+      // the places an argument's value goes to, from..to: a spread before it
+      // fills a tuple's length of them, or an unknown number
+      let from = 0,
+        to = 0;
+      for (const arg of args) {
         if (arg.kind === K.SpreadElement) {
           setTarget(c, arg.expression, false);
-          if (!unresolved) checkSpreadArgument(c, arg, signature, i);
-          return;
+          const shape = spreadShape(c, host.typeOf(arg.expression));
+          if (!unresolved) {
+            // each value is checked as an argument of its type would be
+            for (const value of shape.values)
+              for (const parameter of parameterTypesAt(
+                c,
+                signature,
+                from + value.from,
+                to + value.to,
+              )) {
+                checkIntegerTypeTarget(c, arg, value.type, parameter);
+                checkValueInto(c, arg, value.type, parameter, false);
+              }
+          }
+          from += shape.min;
+          to += shape.max;
+          continue;
         }
-        if (unresolved) {
-          setTarget(c, arg, false);
-          return;
+        if (unresolved) setTarget(c, arg, false);
+        else if (from === to)
+          setTargetType(c, arg, host.parameterTypeAt(signature, from));
+        else {
+          // past a spread of unknown length: checked against each parameter
+          // it may go to
+          const parameters = parameterTypesAt(c, signature, from, to);
+          for (const parameter of parameters) {
+            checkIntegerTarget(c, arg, parameter);
+            checkLayoutTarget(c, arg, parameter, false, false);
+          }
+          setTarget(
+            c,
+            arg,
+            parameters.length > 0 && parameters.every(p => isCellType(c, p)),
+          );
         }
-        setTargetType(c, arg, host.parameterTypeAt(signature, i));
-      });
+        from++;
+        to++;
+      }
       return;
     }
     case K.VariableDeclaration:

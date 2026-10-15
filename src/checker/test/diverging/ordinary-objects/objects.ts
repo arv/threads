@@ -61,3 +61,5 @@ export function spreadTuple() { return param(...args); }              // error
 declare function many(...nodes: Node[]): void;
 declare const plains: { value: number; next: null }[];
 export function spreadRest() { many(...plains); }                     // error
+declare const plainIterable: Iterable<{ value: number; next: null }>;
+export function spreadIterable() { many(...plainIterable); }          // error
