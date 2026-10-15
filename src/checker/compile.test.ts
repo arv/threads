@@ -369,6 +369,42 @@ describe('what the lowering moves, as it runs', () => {
 describe('counting lowering review regressions', () => {
   const cases = [
     {
+      name: 'allows fresh captured static-block var bindings inside a loop',
+      source: `export function main() {
+        const callbacks: (() => number)[] = [];
+        for (let i = 0; i < 2; i++) {
+          class C { static {
+            var p = new P(); p.x = i;
+            const read = () => p.x;
+            callbacks.push(read);
+          } }
+        }
+        const q = new P(); q.x = 99;
+        log(JSON.stringify(callbacks.map(read => read())));
+      }`,
+      expected: '[0,1]',
+    },
+    {
+      name: 'releases repeated module var initializers before clearing the binding',
+      source: `const before = heapStats();
+      for (let i = 0; i < 3; i++) {
+        var p: P | undefined = new P(); p.x = i;
+      }
+      p = undefined;
+      const after = heapStats();
+      export function main() {
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '0',
+    },
+    {
+      name: 'preserves a module var value through a declaration without initializer',
+      source: `var p = new P(); p.x = 137;
+      switch (0) { case 0: var p: P; }
+      export function main() { log(p.x); }`,
+      expected: '137',
+    },
+    {
       name: 'preserves module var scope and lifetime through a switch',
       source: `switch (0) {
         case 0:

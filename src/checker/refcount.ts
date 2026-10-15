@@ -48,6 +48,7 @@ import {
   isAccessExpression,
   isAssignmentTarget,
   isClassLike,
+  isFunctionLike,
   isFunctionLikeDeclaration,
   isOwnReferencePosition,
   isOwnValueExpression,
@@ -194,11 +195,14 @@ export function isChannelReceiveLoop(c: Own, loop: Node): boolean {
   );
 }
 
-// The function that declares a variable or parameter; undefined for a module's
-// variables.
+// The function or static block that declares a variable or parameter;
+// undefined for a module's variables.
 export function declaringFunction(decl: Node): Node | undefined {
   if (decl.kind === K.Parameter) return decl.parent as Node;
-  return getContainingFunction(decl);
+  for (let node = decl.parent as Node | undefined; node; node = node.parent)
+    if (isFunctionLike(node) || node.kind === K.ClassStaticBlockDeclaration)
+      return node;
+  return undefined;
 }
 
 // The variable or parameter (with an identifier name) that an identifier in an
@@ -244,6 +248,7 @@ export function isVarReinitialization(c: Own, decl: Node): boolean {
     let parent: Node | undefined = statement;
     parent &&
     !isFunctionLikeDeclaration(parent) &&
+    parent.kind !== K.ClassStaticBlockDeclaration &&
     parent.kind !== K.SourceFile;
     child = parent, parent = parent.parent as Node | undefined
   ) {

@@ -1112,8 +1112,11 @@ class Lowering {
       local === Local.Module
         ? Ctx.Take
         : Ctx.AtOnce;
+    const moduleVar =
+      local === Local.Module &&
+      !(node.parent!.flags & (NodeFlags.Let | NodeFlags.Const));
     let initializer = this.fullExpression(node.initializer, ctx);
-    if (initializer && this.hoistedVars.has(node))
+    if (initializer && (this.hoistedVars.has(node) || moduleVar))
       initializer = this.replaceLocal(node.name, initializer, true);
     const owner = this.lexicalOwner(node.name);
     if (initializer && owner)
@@ -1129,7 +1132,18 @@ class Lowering {
       !inForInOrOf &&
       !this.hoistedVars.has(node)
     ) {
-      edits.push({start: node.end, end: node.end, ir: raw(' = 0')});
+      edits.push({
+        start: node.end,
+        end: node.end,
+        // A bare var redeclaration is a no-op. Normalize its first
+        // undefined value to the raw null address without dropping a count.
+        ir: moduleVar
+          ? gen(Prec.Primary, [
+              ' = ',
+              binary(this.name(node.name), '??', num(0)),
+            ])
+          : raw(' = 0'),
+      });
     }
     return this.src(node, edits);
   }
