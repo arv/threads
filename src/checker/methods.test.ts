@@ -92,6 +92,122 @@ function run(
 }
 
 describe('struct methods', () => {
+  it('checks constructor aliases for shared parameter representations', () => {
+    const {result} = program({
+      'main.ts': `import {struct, f64, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64}); type Leaf = Struct<typeof Leaf>;
+interface Item { value: number; }
+const Item = struct<Item, [unknown]>({value: f64, constructor(value: unknown) { this.value = typeof value === 'object' ? 1 : 0; }});
+const Alias: new (value: Leaf) => Item = Item;
+`,
+    });
+    expect(result.typeDiagnostics).toEqual([]);
+    expect(result.diagnostics.some(d => d.code === 96033)).toBe(true);
+  });
+
+  it('declares computed method name temporaries in the enclosing scope', () => {
+    const {output} = run({
+      'main.ts': `import {struct, f64, SharedArray, log} from '@arv/threads';
+const keys = new SharedArray(Number, 1);
+function index() { return 0; }
+const C = struct({[keys[index()] + keys[index()]]() { return 7; }});
+export function main() { log(new C()[0]()); }
+`,
+    });
+    expect(output.trim()).toBe('7');
+  });
+
+  it.each([
+    [false, '[Leaf]'],
+    [true, '[Leaf]'],
+    [false, '[number, ...Leaf[]]'],
+    [true, '[number, ...Leaf[]]'],
+  ] as const)(
+    'holds temporary shared rest arguments until async methods settle with rejection=%s and rest=%s',
+    (rejects, rest) => {
+      const leafIndex = rest === '[Leaf]' ? 0 : 1;
+      const {output} = run({
+        'main.ts': `import {struct, f64, collectCycles, heapStats, log, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64, constructor(value: number) { this.value = value; }}); type Leaf = Struct<typeof Leaf>;
+const C = struct({async read(...args: ${rest}) { await Promise.resolve(); ${rejects ? `throw new Error(String(args[${leafIndex}].value));` : `return args[${leafIndex}].value;`} }});
+async function read() { const c = new C(); const p = c.read(${leafIndex ? '0, ' : ''}new Leaf(7)); collectCycles(); const replacement = new Leaf(99); try { log(await p, replacement.value); } catch (e) { log((e as Error).message, replacement.value); } }
+export async function main() { const before = heapStats(); await read(); const after = heapStats(); log(after.allocated - before.allocated, after.freed - before.freed); }
+`,
+      });
+      expect(output.trim()).toBe('7 99\n3 3');
+    },
+  );
+
+  it('normalizes union-rest metadata in compiled calls to erased behavior', () => {
+    const {output} = run(
+      {
+        'leaf.ts': `import {struct, f64} from '@arv/threads'; export const Leaf = struct({value: f64, constructor(value = 7) { this.value = value; }}, 'mixed-union-rest/Leaf');`,
+        'behavior.ts': `import {struct, type Struct} from '@arv/threads'; import {Leaf} from './leaf.ts'; type Leaf = Struct<typeof Leaf>;
+export const C = struct({
+ read(...args: [Leaf] | [Leaf, number]) { return args[0].value + (args[1] ?? 0); },
+ tail(...args: [Leaf, Leaf, ...Leaf[]] | [Leaf, ...Leaf[]]) { return args.reduce((sum, leaf) => sum + leaf.value, 0); },
+}, 'mixed-union-rest/C');`,
+        'main.ts': `import {log} from '@arv/threads'; import {Leaf} from './leaf.ts'; import {C} from './behavior.ts';
+export function main() { const c = new C(), leaf = new Leaf(); log(c.read(leaf), c.read(leaf, 2), c.tail(leaf, leaf, leaf)); }`,
+      },
+      new Set(['behavior.ts']),
+    );
+    expect(output.trim()).toBe('7 9 21');
+  });
+
+  it('checks method representations when destructuring struct unions', () => {
+    const {result} = program({
+      'main.ts': `import {struct, f64, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64}); type Leaf = Struct<typeof Leaf>;
+const A = struct({make(): Leaf { return new Leaf(); }}); type A = Struct<typeof A>;
+const B = struct({make(): unknown { return null; }}); type B = Struct<typeof B>;
+function read(value: A | B) { const {make} = value; return make.call(value); }
+`,
+    });
+    expect(result.typeDiagnostics).toEqual([]);
+    expect(result.diagnostics.some(d => d.code === 96033)).toBe(true);
+  });
+
+  it.each([false, true])(
+    'normalizes union-rest adapter positions when erased=%s',
+    erased => {
+      const {output} = run(
+        {
+          'main.ts': `import {struct, f64, log, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64, constructor(value = 7) { this.value = value; }}, 'union-rest/Leaf'); type Leaf = Struct<typeof Leaf>;
+const C = struct({
+ read(...args: [Leaf] | [Leaf, number]) { return args[0].value + (args[1] ?? 0); },
+ tail(...args: [Leaf, Leaf, ...Leaf[]] | [Leaf, ...Leaf[]]) { return args.reduce((sum, leaf) => sum + leaf.value, 0); },
+}, 'union-rest/C');
+function boxed(value: unknown, leaf: unknown) { const c = value as {read(...args: [unknown] | [unknown, number]): number; tail(...args: unknown[]): number}; log(c.read(leaf), c.read(leaf, 2), c.tail(leaf, leaf, leaf)); }
+export function main() { boxed(new C(), new Leaf()); }
+`,
+        },
+        erased,
+      );
+      expect(output.trim()).toBe('7 9 21');
+    },
+  );
+
+  it.each([false, true])(
+    'adapts destructured methods on compatible struct unions when erased=%s',
+    erased => {
+      const {output} = run(
+        {
+          'main.ts': `import {struct, f64, log, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64, constructor(value = 7) { this.value = value; }}, 'union-binding/Leaf'); type Leaf = Struct<typeof Leaf>;
+const A = struct({read(leaf: Leaf) { return leaf.value; }, make(): Leaf { return new Leaf(9); }}, 'union-binding/A'); type A = Struct<typeof A>;
+const B = struct({read(leaf: Leaf) { return leaf.value + 1; }, make(): Leaf { return new Leaf(10); }}, 'union-binding/B'); type B = Struct<typeof B>;
+function read(value: A | B) { const {read, make} = value; log(read.call(value, new Leaf()), make.call(value).value); }
+export function main() { read(new A()); read(new B()); }
+`,
+        },
+        erased,
+      );
+      expect(output.trim()).toBe('7 9\n8 10');
+    },
+  );
+
   it('protects borrowed field receivers across struct constructors', () => {
     const {output} = run({
       'main.ts': `import {struct, f64, ref, log, collectCycles, type Struct} from '@arv/threads';

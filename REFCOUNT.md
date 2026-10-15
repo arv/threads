@@ -178,10 +178,11 @@ counts. Boxed handles hold their own counts until garbage collection.
 
 An arrow that captures a method's `this` keeps the receiver alive through
 `capture`. A method declared `async` uses an async wrapper that retains its
-receiver, awaits the call, and releases the receiver in `finally`. Synchronous
-methods return their results directly. Receiving an address does not load its
-behavior: the worker must import the defining module before constructing the
-struct or calling its methods.
+receiver and shared arguments, including rest tuple elements, awaits the call,
+and releases those references in `finally`. Synchronous methods return their
+results directly. Receiving an address does not load its behavior: the worker
+must import the defining module before constructing the struct or calling its
+methods.
 
 ## What the Compiler Emits
 

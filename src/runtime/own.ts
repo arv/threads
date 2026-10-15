@@ -989,9 +989,18 @@ function attachStructMethods(
       raw[name] = async (self: number, ...args: unknown[]) => {
         check(self);
         retain(self);
+        // Rest tuples are ordinary JS arrays inside the compiled body. Hold
+        // their shared elements, as well as ordinary shared parameters.
+        const held: number[] = [];
+        for (const i of signature.cells)
+          if (i < args.length) held.push(retain(args[i] as number));
+        if (signature.rest !== undefined)
+          for (let i = signature.rest; i < args.length; i++)
+            held.push(retain(args[i] as number));
         try {
           return await fn(self, ...args);
         } finally {
+          for (const value of held) release(value);
           release(self);
         }
       };

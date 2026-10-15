@@ -499,11 +499,14 @@ class Lowering {
   // VisitEachChild: the node with its children visited (in the AtOnce
   // context); types and declarations that are only types are left as they
   // are.
-  private visitEachChild(node: Node): Ir {
+  private visitEachChild(node: Node, computedName?: Ir): Ir {
     const edits: Edit[] = [];
     forEachChild(node, child => {
       if (isErased(child)) return;
-      const ir = this.visit(child);
+      const ir =
+        computedName && child === node.name
+          ? this.update(child, [[child.expression, computedName]])
+          : this.visit(child);
       if (!isIdentity(ir, child)) edits.push(this.editOf(child, ir));
     });
     return this.src(node, edits);
@@ -728,12 +731,19 @@ class Lowering {
       case K.ClassStaticBlockDeclaration:
       case K.ClassDeclaration:
       case K.ClassExpression: {
+        // Computed names run when the declaration is evaluated, before the
+        // method's function scope and ownership frame exist.
+        const computedName =
+          node.name?.kind === K.ComputedPropertyName
+            ? this.fullExpression(node.name.expression, Ctx.AtOnce)
+            : undefined;
+        if (computedName) this.computedNames.set(node, computedName);
         this.pushFrame(null);
         const scoped =
           isFunctionLikeDeclaration(node) ||
           node.kind === K.ClassStaticBlockDeclaration;
         if (scoped) this.pushScope();
-        const result = this.visitEachChild(node);
+        const result = this.visitEachChild(node, computedName);
         if (scoped) this.popScope();
         this.popFrame();
         return result;
@@ -1772,6 +1782,7 @@ class Lowering {
   }
 
   private destructuredMethods = new WeakMap<Node, Temp>();
+  private computedNames = new WeakMap<Node, Ir>();
 
   private structSignature(
     signature: Signature,
@@ -1790,7 +1801,7 @@ class Lowering {
         for (const value of spreadShape(this.r.c, type).values) {
           if (!isCellType(this.r.c, value.type)) continue;
           if (value.from === value.to) cells.push(i + value.from);
-          else rest = i + value.from;
+          else rest = Math.min(rest ?? Infinity, i + value.from);
         }
       } else if (isCellType(this.r.c, type)) {
         cells.push(i);
@@ -1803,7 +1814,7 @@ class Lowering {
       !cellResult &&
       isCellType(this.r.c, host.awaitedType(result));
     return {
-      cells,
+      cells: [...new Set(cells)].filter(i => rest === undefined || i < rest),
       result: cellResult,
       ...(async && !constructor ? {async: true} : {}),
       ...(promiseResult ? {promiseResult: true} : {}),
@@ -2112,10 +2123,12 @@ class Lowering {
           const expression = (
             computed ? method.name.expression : method.name
           ) as Node;
-          const start = this.startOf(expression);
+          const start = this.startOf(method.name);
           const inside = (e: Edit) =>
-            e.start >= start && e.end <= expression.end;
-          const value = this.src(expression, visited.edits.filter(inside));
+            e.start >= start && e.end <= method.name.end;
+          const value = computed
+            ? this.computedNames.get(method)!
+            : this.src(expression);
           const temp = this.newTemp();
           visited.edits = visited.edits.filter(e => !inside(e));
           const assigned = this.assign(

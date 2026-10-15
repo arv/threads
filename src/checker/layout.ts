@@ -175,16 +175,30 @@ export function checkStructConstructorType(
 function checkStructMethodAccess(c: Own, access: Node): void {
   const info = getStructMethodAccess(c, access);
   if (!info) return;
-  const target = c.host.typeOf(access);
-  for (const member of nonNullishMembers(c, c.host.typeOf(info.receiver))) {
+  checkStructMethodCandidates(
+    c,
+    access,
+    c.host.typeOf(info.receiver),
+    info.key ? c.host.typeOf(info.key) : info.name,
+    c.host.typeOf(access),
+  );
+}
+
+function checkStructMethodCandidates(
+  c: Own,
+  at: Node,
+  receiver: Type,
+  requested: string | Type,
+  target: Type,
+): void {
+  for (const member of nonNullishMembers(c, receiver)) {
     const decl = getStructOfType(c, member)?.decl;
     if (!decl) continue;
     for (const method of structMethods(decl)) {
       const key = structMethodKey(c, method);
-      const requested = info.key ? c.host.typeOf(info.key) : info.name;
       if (methodKeyMatches(c, requested, key)) {
         const exposed = structMethodType(c, member, method);
-        if (exposed) checkStructMethodType(c, access, exposed, target);
+        if (exposed) checkStructMethodType(c, at, exposed, target);
       }
     }
   }
@@ -1180,7 +1194,16 @@ function callableMismatch(
         );
         if (result)
           return `${construct ? 'what it constructs' : 'what it returns'}: ${result}`;
-        const parameter = parameterMismatch(c, from, to, cast, seen, method);
+        const parameter = parameterMismatch(
+          c,
+          from,
+          to,
+          cast,
+          seen,
+          method ||
+            (construct &&
+              (isCellType(c, returnOf(from)) || isCellType(c, returnOf(to)))),
+        );
         if (parameter) return parameter;
       }
     }
@@ -1305,13 +1328,30 @@ function computeConversion(c: Own, node: Node): void {
         if (init) {
           if (
             node.name.kind === K.ObjectBindingPattern &&
-            getStructOfType(c, host.typeOf(init)) &&
+            getCellType(c, host.typeOf(init)).kind === CellKind.Struct &&
             (node.name.elements as Node[]).some(
               e =>
                 !e.dotDotDotToken &&
                 host.callSignatures(host.typeOf(e.name)).length > 0,
             )
           ) {
+            for (const binding of node.name.elements as Node[]) {
+              if (
+                binding.dotDotDotToken ||
+                !host.callSignatures(host.typeOf(binding.name)).length
+              )
+                continue;
+              const name = binding.propertyName ?? binding.name;
+              checkStructMethodCandidates(
+                c,
+                binding,
+                host.typeOf(init),
+                name.kind === K.ComputedPropertyName
+                  ? host.typeOf(name.expression)
+                  : name.text,
+                host.typeOf(binding.name),
+              );
+            }
             c.structDestructures.set(init, node.name);
             c.conversions.set(init, Conversion.StructDestructure);
           } else setTarget(c, init, false); // destructured through the handle

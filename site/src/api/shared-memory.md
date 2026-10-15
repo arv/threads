@@ -44,7 +44,8 @@ Only fields take space in shared memory. Each worker loads the defining module
 and installs methods on its own local prototype. Compiled calls pass the shared
 address directly, and boxed values use the prototype methods. Methods can call
 other methods, return references to structs, and be async. An arrow that
-captures `this` keeps the receiver alive.
+captures `this` keeps the receiver alive. Async calls retain the receiver and
+shared arguments, including rest tuple elements, until they finish.
 
 An extracted method keeps ordinary, unbound `this`. Use `call`, `apply`, or
 `bind` with an instance of its declaring struct:
