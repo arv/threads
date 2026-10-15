@@ -93,6 +93,9 @@ export interface LoadedProgram {
   // the files of packages among them
   external: ReadonlySet<string>;
   esModule: boolean;
+  // the project's own files that are CommonJS modules: a .cts or .cjs, or
+  // with module node16 to nodenext, one its package.json makes CommonJS
+  commonJS: ReadonlySet<string>;
   diagnostics: Diagnostic[];
 }
 
@@ -164,9 +167,29 @@ export function loadProgram(
     throw new CheckError(
       `no file of the project imports the runtime as '${runtime}', so there is nothing to check: --runtime names the module the programs import it from (@arv/threads, say)`,
     );
+  const nodeModules =
+    moduleKind >= ModuleKind.Node16 && moduleKind <= ModuleKind.NodeNext;
+  const commonJS = new Set(
+    names.filter(
+      (name, i) =>
+        !metadata[i]?.isFromExternalLibrary &&
+        !/\.d\.([^./]+\.)?[cm]?ts$/i.test(name) &&
+        (/\.c[jt]sx?$/i.test(name) ||
+          (nodeModules &&
+            metadata[i]?.impliedNodeFormat === ModuleKind.CommonJS)),
+    ),
+  );
   const own = new Own(host, runtime, [...runtimeFiles.values()], checked);
   for (const file of checked) host.prefetch(file);
-  return {host, own, files: checked, external, esModule, diagnostics};
+  return {
+    host,
+    own,
+    files: checked,
+    external,
+    esModule,
+    commonJS,
+    diagnostics,
+  };
 }
 
 // The diagnostics of a program, sorted, but for those a comment suppresses.

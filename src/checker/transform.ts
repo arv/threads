@@ -84,6 +84,7 @@ import {
   forEachChild,
   isAssignmentOperator,
   isAssignmentTarget,
+  isClassExtends,
   isClassLike,
   isDeclarationName,
   isExpression,
@@ -599,7 +600,7 @@ class Lowering {
         return this.visitParameter(node);
       case K.ExpressionWithTypeArguments:
         // `extends E`: a full expression of its own, run as the class is
-        if ((node.parent as Node).kind === K.HeritageClause)
+        if (isClassExtends(node))
           return this.update(node, [
             [node.expression, this.fullExpression(node.expression, Ctx.AtOnce)],
           ]);
@@ -2870,13 +2871,7 @@ function isStatementLike(node: Node): boolean {
 // lowering leaves to the type stripper.
 function isErased(node: Node): boolean {
   // a class's `extends E` runs E
-  if (
-    node.kind === K.ExpressionWithTypeArguments &&
-    (node.parent as Node).kind === K.HeritageClause &&
-    (node.parent as Node).token === K.ExtendsKeyword &&
-    isClassLike((node.parent as Node).parent as Node)
-  )
-    return false;
+  if (isClassExtends(node)) return false;
   if (isTypeNode(node)) return true;
   switch (node.kind) {
     case K.InterfaceDeclaration:

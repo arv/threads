@@ -3,8 +3,9 @@
 // body around them, function declarations and closures next to an owned
 // local, a class field's initializer that constructs its class again, a
 // renamed var, a default that throws after an owned parameter, destructured
-// defaults, a closure in a default, a labelled loop and a logical assignment.
-// main logs each result, and how many blocks are still allocated.
+// defaults, a closure in a default, a labelled loop, a logical assignment and
+// a class's extends. main logs each result, and how many blocks are still
+// allocated.
 import {f64, heapStats, log, struct, type Struct} from '@arv/threads';
 
 const P = struct({x: f64});
@@ -136,6 +137,15 @@ function logical(): number {
   return n;
 }
 
+// a class's `extends` expression is converted as any other: a struct passed
+// as unknown is boxed ('object')
+let received: unknown;
+function base(value: unknown) {
+  received = value;
+  return class {};
+}
+class Extended extends base(new P()) {}
+
 // a result, or the error it throws (the fork's emit throws for some)
 function attempt(f: () => unknown): unknown {
   try {
@@ -154,6 +164,7 @@ export function main() {
     attempt(shadowed),
     attempt(shadowedVar),
     attempt(hoisted),
+    attempt(() => (new Extended(), typeof received)),
   ];
   // the closure later() made holds its p until it is collected: the blocks
   // are counted from here

@@ -5,7 +5,7 @@
 // (transform.ts), its types left in for a type stripper to erase (Vite's OXC,
 // or toJavaScript here), with a source map from the original.
 
-import {isAbsolute, resolve} from 'node:path';
+import {basename, isAbsolute, resolve} from 'node:path';
 import {decode, encode} from '@jridgewell/sourcemap-codec';
 import type {SourceMapMappings} from '@jridgewell/sourcemap-codec';
 import {transformSync} from 'oxc-transform';
@@ -20,6 +20,7 @@ import {
 import {createHost} from './host.ts';
 import type {Host} from './host.ts';
 import {computeConversions} from './layout.ts';
+import {formatMessage, Messages} from './messages.ts';
 import type {Diagnostic} from './messages.ts';
 import {checkOwnership} from './ownership.ts';
 import {checkRefCounts} from './refcount.ts';
@@ -135,7 +136,7 @@ function compileProgram(
     // the project's own sources only: a package's are analyzed, not emitted
     if (program.external.has(file.fileName as string)) continue;
     const esModule =
-      program.esModule && !/\.c[jt]sx?$/i.test(file.fileName as string);
+      program.esModule && !program.commonJS.has(file.fileName as string);
     const result = transformFile(resolver, file, {
       runtime: options.runtime,
       esModule,
@@ -161,13 +162,26 @@ function compileProgram(
       ].map(fromApi),
     );
   }
+  // a CommonJS file, which the compile would write ES module syntax into
+  // (with a module the runtime cannot work with, that is reported already)
+  const commonJS: Diagnostic[] = program.esModule
+    ? [...program.commonJS].map(fileName => ({
+        file: fileName,
+        start: 0,
+        line: 1,
+        col: 1,
+        code: Messages.CommonJSInput.code,
+        message: formatMessage(Messages.CommonJSInput, [basename(fileName)]),
+      }))
+    : [];
   return {
     files,
-    // the project's own (an option the runtime cannot work with), and with
-    // `check` the ownership diagnostics
-    diagnostics: options.check
-      ? finish(program)
-      : sortAndDeduplicate(program.diagnostics),
+    // the project's own (an option the runtime cannot work with, a CommonJS
+    // file), and with `check` the ownership diagnostics
+    diagnostics: sortAndDeduplicate([
+      ...(options.check ? finish(program) : program.diagnostics),
+      ...commonJS,
+    ]),
     typeDiagnostics,
     compilerOptions,
   };

@@ -227,6 +227,37 @@ describe('compile, where the fork does not', () => {
     expect(result.files[0]!.changed).toBe(false);
   });
 
+  it('reports a CommonJS file, which it would emit ES module syntax into', () => {
+    const options = {module: 'nodenext', moduleResolution: 'nodenext'};
+    const dir = project(
+      {
+        'app.ts': `import {n} from './tool.cjs';\n${APP}export const m = n;\n`,
+        'tool.cts': 'export const n = 1;\n',
+        'package.json': '{"type": "module"}\n',
+      },
+      options,
+    );
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+    });
+    expect(
+      result.diagnostics.map(d => [path.basename(d.file ?? ''), d.code]),
+    ).toEqual([['tool.cts', 96039]]);
+    expect(result.files.find(f => f.fileName.endsWith('app.ts'))!.changed).toBe(
+      true,
+    );
+    // without "type": "module", a .ts is CommonJS too
+    fs.writeFileSync(path.join(dir, 'package.json'), '{}\n');
+    const commonJS = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+    });
+    expect(
+      commonJS.diagnostics.map(d => path.basename(d.file ?? '')).sort(),
+    ).toEqual(['app.ts', 'tool.cts']);
+  });
+
   it("reports type errors in the project's declaration files", () => {
     const dir = project({
       'app.ts': APP,
@@ -272,7 +303,7 @@ describe('what the lowering moves, as it runs', () => {
       {encoding: 'utf8', timeout: 60_000},
     );
     expect(r.stdout.trim(), r.stderr).toBe(
-      '[0,true,2,1,6,6,10,1,4,10,"Error",1,1,7,2,1] blocks left 0',
+      '[0,true,2,1,6,6,10,"object",1,4,10,"Error",1,1,7,2,1] blocks left 0',
     );
   }, 60_000);
 

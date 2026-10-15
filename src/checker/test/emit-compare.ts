@@ -67,7 +67,7 @@ const elementAssigned =
 const knownDifferences: Record<string, string> = {
   'cases/counting/counting.ts': fieldTemporaries,
   'run/moved.ts':
-    'the program compile.test.ts runs: the defaults, declarations and initializers the lowering moves, which the fork gets wrong (as it runs, its emit gives [0,false,2,1,"ReferenceError","TypeError","ReferenceError",1,"TypeError","ReferenceError","Error",1,1,7,2,1] and leaks 5 blocks; threads-check\'s [0,true,2,1,6,6,10,1,4,10,"Error",1,1,7,2,1], leaking none)',
+    'the program compile.test.ts runs: the defaults, declarations and initializers the lowering moves, which the fork gets wrong (as it runs, its emit gives [0,false,2,1,"ReferenceError","TypeError","ReferenceError","number",1,"TypeError","ReferenceError","Error",1,1,7,2,1] and leaks 5 blocks; threads-check\'s [0,true,2,1,6,6,10,"object",1,4,10,"Error",1,1,7,2,1], leaking none)',
   'emit/fixes.ts':
     "what the fork gets wrong (compile.test.ts tests each): an arrow whose concise body is a closure keeps its owned parameter's default (the fork drops it), defaults after one that moves into the body move too, so they still run left to right, an array that its index assigns is read (and held) before the index, a scalar element type's expression runs (the fork drops it), and a class's `extends` expression is lowered as a full expression (the fork leaves it as it is)",
   'playground/main.ts': computedImport,
