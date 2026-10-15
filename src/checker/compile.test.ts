@@ -70,7 +70,7 @@ const fn = (name: string) => {
 describe('compile', () => {
   it('imports the helpers it uses and registers the top-level functions', () => {
     expect(js).toMatch(
-      /^import \{ F64 as __F64, I32 as __I32, U8 as __U8, capture as __capture, .*register as __register, .*\} from "threads";$/m,
+      /^import \{ F64 as __F64, I32 as __I32, U8 as __U8, .*capture as __capture, .*register as __register, .*\} from "threads";$/m,
     );
     expect(js).toMatch(
       /__register\(import\.meta\.url, \{[^}]*\blabeled,[^}]*\breceiveOne\b/,
@@ -278,6 +278,31 @@ describe('compile, where the fork does not', () => {
 });
 
 describe('what the lowering moves, as it runs', () => {
+  it('counts cells and immutable values through constructors, returns and reference fields', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-cells-'));
+    dirs.push(out);
+    const result = compile(path.join(checker, 'test/run/tsconfig.json'), {
+      runtime: '@arv/threads',
+      api,
+      check: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    const file = result.files.find(f => f.fileName.endsWith('/cells.ts'))!;
+    fs.writeFileSync(path.join(out, 'cells.js'), toJavaScript(file).code);
+    const run = spawnSync(
+      process.execPath,
+      [
+        path.join(checker, '../run.ts'),
+        path.join(out, 'cells.js'),
+        '--threads=1',
+        '--pool=0',
+      ],
+      {encoding: 'utf8', timeout: 60_000},
+    );
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout.trim()).toBe('cells left 0 bounded true');
+  }, 60_000);
+
   it('runs defaults in order, reads what they read, keeps functions and closures with their bindings, frees field initializers, and releases what a throwing default leaves', () => {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-moved-'));
     dirs.push(out);

@@ -231,18 +231,26 @@ export function $alloc(bytes: number) {
 // held only for a few loads and stores, so a thread spins a little before it
 // sleeps ----
 const LOCK_SPINS = 1000;
+let locksHeld = 0;
 const mlock: (i: number) => void = i => {
-  if (Atomics.compareExchange(I32, i, 0, 1) === 0) return;
+  if (Atomics.compareExchange(I32, i, 0, 1) === 0) {
+    locksHeld++;
+    return;
+  }
   for (let k = 0; k < LOCK_SPINS; k++)
     if (
       Atomics.load(I32, i) === 0 &&
       Atomics.compareExchange(I32, i, 0, 1) === 0
-    )
+    ) {
+      locksHeld++;
       return;
+    }
   while (Atomics.exchange(I32, i, 2) !== 0)
     if (CAN_BLOCK) Atomics.wait(I32, i, 2);
+  locksHeld++;
 };
 const munlock: (i: number) => void = i => {
+  locksHeld--;
   if (Atomics.sub(I32, i, 1) !== 1) {
     Atomics.store(I32, i, 0);
     Atomics.notify(I32, i, 1);
@@ -268,9 +276,37 @@ export const K_FREE = 99,
 const caches: number[][] = [];
 const cacheFor: (c: number) => number[] = c => caches[c] ?? (caches[c] = []);
 // zero: whether the block must be zeroed (a message's is overwritten whole)
+let allocationCollector: (() => void) | undefined;
+let collectingAllocation = false;
+export const setAllocationCollector = (f: () => void) => {
+  allocationCollector = f;
+};
 export function $allocBlock(bytes: number, zero = true) {
   bytes = sized(bytes);
   count(N_BALLOC);
+  try {
+    return allocBlock(bytes, zero);
+  } catch (error) {
+    // A collection can release strings and map tables. It must start outside
+    // every internal lock, after the allocator has left its free-list lock.
+    if (
+      !(error instanceof RangeError) ||
+      error.message !== heapFullMessage() ||
+      locksHeld !== 0 ||
+      collectingAllocation ||
+      !allocationCollector
+    )
+      throw error;
+    collectingAllocation = true;
+    try {
+      allocationCollector();
+      return allocBlock(bytes, zero);
+    } finally {
+      collectingAllocation = false;
+    }
+  }
+}
+function allocBlock(bytes: number, zero: boolean): number {
   const c = bytes >> 3;
   let p = 0;
   if (c <= SMALL) {

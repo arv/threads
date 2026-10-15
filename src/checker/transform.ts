@@ -78,6 +78,8 @@ import {
   write,
 } from './ir.ts';
 import type {Edit, Ir, Names, Part, Scope, Src, Temp} from './ir.ts';
+import {isRuntimeCellType, isSharedValueType, isCellType} from './layout.ts';
+import {getCallMarker} from './markers.ts';
 import {Count, Local} from './resolver.ts';
 import type {AtomicCall, Resolver, StructCall} from './resolver.ts';
 import {
@@ -120,6 +122,9 @@ const HELPERS = [
   '__outOfBounds',
   '__U8',
   '__box',
+  '__cellView',
+  '__newCell',
+  '__newShared',
   '__cellAddress',
   '__capture',
   '__moved',
@@ -723,10 +728,75 @@ class Lowering {
   // Visits an expression, applying its box, unbox or null conversion.
   private visitExpression(node: Node, ctx: Ctx): Ir {
     switch (this.r.conversion(node)) {
-      case Conversion.Box:
-        // the raw value is used at once by `__box`; the handle holds a count
-        // of its own
+      case Conversion.Box: {
+        const access = node.parent as Node | undefined;
+        const invocation = access?.parent as Node | undefined;
+        const type = this.r.c.host.typeOf(node);
+        if (
+          isRuntimeCellType(this.r.c, type) &&
+          access?.kind === K.CallExpression
+        ) {
+          const handle = this.r.c.host.signatureOf(access).declaration;
+          const decl =
+            handle && this.r.c.isRuntimePath(handle.path)
+              ? this.r.c.host.declarationOf(handle)
+              : undefined;
+          if (
+            decl?.name &&
+            ['select', 'selectAsync', 'wait', 'waitAsync'].includes(
+              decl.name.text,
+            )
+          ) {
+            let value = this.visitValue(node, Ctx.Argument);
+            const id = skipParentheses(node);
+            const index = access.arguments.indexOf(node);
+            if (
+              id.kind === K.Identifier &&
+              access.arguments
+                .slice(index + 1)
+                .some((n: Node) => this.r.assignsIn(n, id))
+            )
+              value = this.temporary(this.call('__retain', value));
+            return this.call('__cellView', value);
+          }
+        }
+        if (
+          isRuntimeCellType(this.r.c, type) &&
+          access?.kind === K.ForOfStatement &&
+          access.expression === node
+        )
+          return this.call(
+            '__cellView',
+            this.visitValue(node, Ctx.AtOnce),
+            raw('true'),
+          );
+        if (
+          isRuntimeCellType(this.r.c, this.r.c.host.typeOf(node)) &&
+          (access?.kind === K.PropertyAccessExpression ||
+            access?.kind === K.ElementAccessExpression) &&
+          access.expression === node &&
+          invocation?.kind === K.CallExpression &&
+          invocation.expression === access
+        ) {
+          // The view holds no count. Stabilize a field borrow before evaluating
+          // the method's key or arguments; one may pass a quiescent point or
+          // replace the local that supplied the receiver.
+          let value = this.visitValue(node, Ctx.Argument);
+          const id = skipParentheses(node);
+          if (
+            id.kind === K.Identifier &&
+            [
+              ...(access.kind === K.ElementAccessExpression
+                ? [access.argumentExpression]
+                : []),
+              ...invocation.arguments,
+            ].some(n => this.r.assignsIn(n, id))
+          )
+            value = this.temporary(this.call('__retain', value));
+          return this.call('__cellView', value);
+        }
         return this.call('__box', this.visitValue(node, Ctx.AtOnce));
+      }
       case Conversion.Unbox: {
         // `__unbox(E)` is a stable borrow
         const unboxed = this.call('__unbox', this.visitValue(node, Ctx.AtOnce));
@@ -1699,6 +1769,16 @@ class Lowering {
         return this.update(node, [[node.expression, expression], ...args]);
       }
       case K.CallExpression: {
+        if (
+          getCallMarker(this.r.c, node) === 'share' &&
+          this.r.isCellExpression(node)
+        )
+          return this.call(
+            isSharedValueType(this.r.c, this.r.c.host.typeOf(node))
+              ? '__newShared'
+              : '__retain',
+            this.visitIn(node.arguments[0], Ctx.Argument)!,
+          );
         const structCall = this.r.structCall(node);
         if (structCall) return this.sharedStruct(structCall);
         const atomic = this.r.atomicCall(node);
@@ -1711,6 +1791,11 @@ class Lowering {
       case K.ElementAccessExpression: {
         const lowered = this.lowerAccess(node, false, undefined);
         if (lowered) return lowered;
+        if (
+          this.r.cellType(node.expression).kind === CellKind.None &&
+          isCellType(this.r.c, this.r.c.host.typeOf(node))
+        )
+          return this.call('__unbox', this.visitEachChild(node));
         break;
       }
       case K.BinaryExpression:
@@ -2043,6 +2128,12 @@ class Lowering {
   // `new S()` and `new SharedArray(S | Number | Boolean | String | i32 | u8,
   // n)`.
   private lowerNew(node: Node): Ir | undefined {
+    if (isRuntimeCellType(this.r.c, this.r.c.host.typeOf(node)))
+      return this.call(
+        '__newCell',
+        this.visit(node.expression),
+        ...this.visitArguments(node, false).map(([, ir]) => ir!),
+      );
     const cell = this.r.cellType(node);
     if (cell.kind === CellKind.Struct)
       return this.call('__newStruct', this.visit(node.expression));

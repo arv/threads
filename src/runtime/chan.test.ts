@@ -114,7 +114,7 @@ describe('channels', () => {
     expect(bumped).toEqual([false, true]);
     // the select's records are out of the channels' lists
     for (const ch of [x, y, other])
-      expect(runtime.I32[(ch.$cell >> 2) + 11]).toBe(0);
+      expect(runtime.I32[(ch.$cell >> 2) + 13]).toBe(0);
     expect(other.recv()).toBe('elsewhere');
   });
 

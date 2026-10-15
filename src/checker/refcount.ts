@@ -1,4 +1,4 @@
-// Reference counting (ownrefcount.go): a shared struct or SharedArray is freed
+// Reference counting (ownrefcount.go): a counted shared allocation is freed
 // when nothing refers to it, and the emit adds the increments and decrements.
 // The checker reports what counting cannot follow:
 //
@@ -168,7 +168,7 @@ export function isAmbientHandle(
 
 // The element type of a channel, if t is one: the runtime's `Channel<T>` (or
 // `ChannelCell<T>`). By the runtime's export, not by name: a class named
-// Channel declared elsewhere is not one (isLastingCellFieldType does the same).
+// Channel declared elsewhere is not one (isRuntimeCellType does the same).
 export function getChannelElementType(
   c: Own,
   t: Type | undefined,

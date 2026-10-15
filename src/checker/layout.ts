@@ -182,34 +182,48 @@ export function getIntegerKind(c: Own, t: Type): FieldKind {
   return kind;
 }
 
-// The runtime's cells that last as long as the program: a field holds one by
-// address, uncounted (ownLastingCells).
-const lastingCells = new Set(['Channel', 'Condition', 'Lock']);
-
-// Reports whether a field of type t holds a lasting cell: the runtime's
-// Channel, Lock or Condition, possibly with null or undefined
-// (isOwnLastingCellFieldType).
-function isLastingCellFieldType(c: Own, t: Type): boolean {
+// Built-in counted cells use raw addresses in compiled code, with temporary
+// views for runtime method calls.
+const runtimeCells = new Set(['Channel', 'ChannelCell', 'Condition', 'Lock']);
+export function isRuntimeCellType(c: Own, t: Type): boolean {
   const members = nonNullishMembers(c, t);
-  if (members.length !== 1 || !(members[0]!.flags & TypeFlags.Object))
-    return false;
-  const target = c.host.typeTarget(members[0]!);
-  const symbol = target && c.host.typeSymbol(target);
   return (
-    !!symbol &&
-    lastingCells.has(symbol.name) &&
-    getRuntimeExportName(c, symbol) === symbol.name
+    members.length > 0 &&
+    members.every(m => {
+      const target = c.host.typeTarget(m);
+      const symbol = target && c.host.typeSymbol(target);
+      return (
+        !!symbol &&
+        runtimeCells.has(symbol.name) &&
+        getRuntimeExportName(c, symbol) === symbol.name
+      );
+    })
   );
+}
+export function isSharedValueType(c: Own, t: Type): boolean {
+  const cached = c.sharedValueTypes.get(t);
+  if (cached !== undefined) return cached;
+  const result = c.host.checker.getPropertiesOfType(t as any).some(property => {
+    const handle = property.valueDeclaration;
+    if (!handle || !c.isRuntimePath(handle.path)) return false;
+    const name = c.host.declarationOf(handle)?.name as Node | undefined;
+    return (
+      name?.kind === K.ComputedPropertyName &&
+      name.expression.kind === K.Identifier &&
+      name.expression.text === 'sharedBrand'
+    );
+  });
+  c.sharedValueTypes.set(t, result);
+  return result;
 }
 
 // The kind of a field of type t: an f64 for a number (and for a type no field
 // may have, which is reported), an i32 or a u8, a boolean, a string, a
-// reference, or a lasting cell: a Channel, a Lock or a Condition
+// counted reference, including a Channel, Lock, Condition or Shared<T>
 // (getOwnFieldKind).
 export function getFieldKind(c: Own, t: Type): FieldKind {
   const integer = getIntegerKind(c, t);
   if (integer !== '') return integer;
-  if (isLastingCellFieldType(c, t)) return 'c';
   if (isBooleanType(t)) return 'b';
   if (isStringType(c, t)) return 's';
   if (isCellType(c, t)) return 'r';
@@ -226,8 +240,7 @@ export function isFieldType(c: Own, t: Type): boolean {
     getIntegerKind(c, t) !== '' ||
     isBooleanType(t) ||
     isStringType(c, t) ||
-    (nonNullishMembers(c, t).length === 1 && isCellType(c, t)) ||
-    isLastingCellFieldType(c, t)
+    (nonNullishMembers(c, t).length === 1 && isCellType(c, t))
   );
 }
 
@@ -260,8 +273,9 @@ export function getCellType(c: Own, t: Type | undefined): CellType {
   return noCell;
 }
 
-// Reports whether a value of type t is a shared struct or a SharedArray
-// (possibly with null or undefined), which is represented by an address:
+// Reports whether t is a counted type represented by an address: a shared
+// struct, SharedArray, Channel, Lock, Condition or object-valued Shared<T>
+// (possibly with null or undefined):
 // isOwnCellType.
 export function isCellType(c: Own, t: Type | undefined): boolean {
   if (!t) return false;
@@ -273,7 +287,9 @@ export function isCellType(c: Own, t: Type | undefined): boolean {
     members.every(
       m =>
         getStructOfType(c, m) !== undefined ||
-        getSharedArrayElementType(c, m) !== undefined,
+        getSharedArrayElementType(c, m) !== undefined ||
+        isRuntimeCellType(c, m) ||
+        isSharedValueType(c, m),
     );
   c.cellTypes.set(t, result);
   return result;
@@ -995,9 +1011,25 @@ function computeConversion(c: Own, node: Node): void {
           continue;
         }
         if (unresolved) setTarget(c, arg, false);
-        else if (from === to)
-          setTargetType(c, arg, host.parameterTypeAt(signature, from));
-        else {
+        else if (from === to) {
+          const param = host.parameterTypeAt(signature, from);
+          const handle = signature.declaration;
+          const decl =
+            handle && c.isRuntimePath(handle.path)
+              ? host.declarationOf(handle)
+              : undefined;
+          const runtimeMethod =
+            decl?.name?.text === 'wait' || decl?.name?.text === 'waitAsync';
+          if (
+            param &&
+            (runtimeMethod ||
+              decl?.name?.text === 'select' ||
+              decl?.name?.text === 'selectAsync') &&
+            isRuntimeCellType(c, param)
+          )
+            setTarget(c, arg, false);
+          else setTargetType(c, arg, param);
+        } else {
           // past a spread of unknown length: checked against each parameter
           // it may go to
           const parameters = parameterTypesAt(c, signature, from, to);

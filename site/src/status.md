@@ -23,14 +23,16 @@ today:
   replaced, [arv/threads-checker](https://github.com/arv/threads-checker), any
   more: the compiler, the checker, the Vite plugin, the playground and CI all
   run on stock TypeScript.
-- **Shared memory is a fixed 256 MB, and not everything in it is freed.**
-  Structs, SharedArrays and maps are reference counted, and `collectCycles()`
-  frees cycles of them, stopping every thread for a moment. Nothing calls it on
-  its own yet. Channels, locks and conditions are never freed. A moved value (a
-  thread's arguments and result, or a channel's message) is freed once it's
-  read, but shared values are never freed. Strings are interned, one copy each,
-  and counted. A string is freed once no field, element, map or message refers
-  to it.
+- **Shared memory is a fixed 256 MB.** Structs, SharedArrays, SharedMaps,
+  SharedSets, channels, locks, conditions, immutable shared values and interned
+  strings are reference counted. Freeing a channel also releases its unread
+  messages; freeing a shared value releases its nested references and strings.
+  Blocked operations retain the cells they wait on. `collectCycles()` includes
+  channel buffers and shared values, stopping every thread for a moment. When an
+  allocation would fail outside internal runtime locks, the allocator tries one
+  collection with a 50 ms timeout and retries. Boxed handles and frozen copies
+  wait for V8 to collect them and run their finalizers. Runtime metadata and
+  legacy `sharedFloat64Array` cells still live for the program's lifetime.
 - **Closures don't cross threads.** A thread runs a top-level function.
 - **A SharedMap or SharedSet has one lock.** Every call takes it for a moment,
   so threads that change one map all the time wait for each other. A thread with

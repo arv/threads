@@ -240,6 +240,7 @@ export class Resolver {
   // it hands over ownership (`Sending<T>`).
   private isCountedCall(call: Node): boolean {
     const c = this.c;
+    if (getCallMarker(c, call) === 'share') return true;
     let signature = this.signatureDeclaration(call);
     if (!signature) return false;
     if (isAmbientHandle(c, signature.declaration)) {
@@ -590,6 +591,11 @@ export class Resolver {
     const visit = (node: Node): boolean => {
       if (isTypeNode(node) || isFunctionLike(node) || isClassLike(node))
         return false;
+      if (
+        node.kind === K.CallExpression &&
+        getCallMarker(this.c, node) === 'share'
+      )
+        return true;
       if (
         node.kind === K.PropertyAccessExpression &&
         this.isReferenceField(node)

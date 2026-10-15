@@ -174,6 +174,7 @@ function encode(v: unknown, key: boolean, adding: boolean): boolean {
       if (s !== undefined) {
         lo = s;
         hi = BOX | (T_SHARED << 11);
+        held = RETAIN;
         return true;
       }
     }
@@ -263,7 +264,9 @@ function decodeWord(f: number, h: number, p: number): unknown {
 // what a held word at at refers to: a string, a handle's cell (boxed), or an
 // address kept as a number
 const heldAddress = (at: number) =>
-  I32[(at >> 2) + 1] === CELL_HI || I32[(at >> 2) + 1] === STR_HI
+  I32[(at >> 2) + 1] === CELL_HI ||
+  I32[(at >> 2) + 1] === STR_HI ||
+  I32[(at >> 2) + 1] === (BOX | (T_SHARED << 11))
     ? I32[at >> 2]
     : F64[at >> 3];
 const KEY_HELD = 1,

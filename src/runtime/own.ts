@@ -55,6 +55,7 @@ import {
   $untrack,
   $eachTracked,
   $collectCycles,
+  setAllocationCollector,
 } from './runtime.ts';
 
 const SAB = globalThis.__escapeSab ?? null;
@@ -183,7 +184,7 @@ const boxWord = (at: number, tag: number, p: number) => {
 };
 
 // a cell's object: $cell is its block's address
-export type CellObject = {$cell: number};
+export type CellObject = {$cell: number; $raw?: boolean};
 type F64Cell = Float64Array & CellObject;
 // null, or a cell: what a reference field holds
 type MaybeCell = {$cell?: number} | null | undefined;
@@ -310,7 +311,11 @@ function put(
     // a plain object or array: shared already if it is frozen and in sharedAddr
     if (Object.isFrozen(v)) {
       const shared = sharedAddr.get(v);
-      if (shared !== undefined) return boxWord(at, T_SHARED, shared);
+      if (shared !== undefined) {
+        retain(shared);
+        takenCells.push(shared);
+        return boxWord(at, T_SHARED, shared);
+      }
     }
   } else {
     if (v instanceof CountedArg) return boxWord(at, T_COUNTED, v.a);
@@ -321,7 +326,7 @@ function put(
       if (!counted(I32[v.$cell >> 2])) return boxWord(at, T_CELL, v.$cell);
       retain(v.$cell);
       takenCells.push(v.$cell);
-      return boxWord(at, freeze ? T_CELL : T_CELL_COUNTED, v.$cell);
+      return boxWord(at, T_CELL_COUNTED, v.$cell);
     }
     if (!Array.isArray(v))
       throw new TypeError(
@@ -377,12 +382,18 @@ function write(v: Sent, moved: Moved | null, freeze: boolean, depth = 0) {
     put(0, v, moved, freeze, 0);
     // Even a shared blob may need to be rolled back: freezing can invoke
     // proxy traps after the allocation. Reuse failed blobs as messages do.
-    a = $allocBlock(wn * 8, false);
-    U8.set(new Uint8Array(wf.buffer, 0, wn * 8), a);
+    a = $allocBlock(wn * 8 + (freeze ? 16 : 0), false);
+    if (freeze) {
+      I32[a >> 2] = K_SHARED;
+      I32[(a >> 2) + 1] = 1;
+      I32[(a >> 2) + 2] = wn * 8;
+    }
+    U8.set(new Uint8Array(wf.buffer, 0, wn * 8), a + (freeze ? 16 : 0));
     for (const o of frozen) Object.freeze(o);
+    if (freeze) $track(a);
     return a;
   } catch (e) {
-    if (a !== 0) $freeBlock(a, wn * 8);
+    if (a !== 0) $freeBlock(a, wn * 8 + (freeze ? 16 : 0));
     for (const p of takenStrings) $releaseString(p);
     for (const p of takenCells) release(p);
     throw e;
@@ -460,13 +471,18 @@ function get(base: number, at: number, frozen: boolean): unknown {
       }
       return make(F64, get, base, p + 1, frozen);
     }
-    case T_SHARED:
-      return materialize(p);
+    case T_SHARED: {
+      if (rawRoot && at === 0) return p; // transfer the message's count
+      const value = materialize(p);
+      if (!frozen && given !== null) given.push(p);
+      return value;
+    }
     case T_CELL:
       return cell(p);
     case T_CELL_COUNTED: {
+      if (rawRoot && at === 0) return p;
       const c = cell(p);
-      release(p);
+      if (!frozen) release(p);
       return c;
     }
     case T_COUNTED:
@@ -483,7 +499,10 @@ let decoded: string[] | null | undefined = null,
   shapesRead: Map<number, Maker> | null | undefined = null,
   lastShapeRead = -1,
   lastMakerRead: Maker | null = null;
-function read(a: number, frozen: boolean) {
+let rawRoot = false;
+function read(a: number, frozen: boolean, raw = false) {
+  const outerRaw = rawRoot;
+  rawRoot = raw;
   const outer = [decoded, shapesRead, lastShapeRead, lastMakerRead] as const,
     outerGiven = given;
   decoded = undefined;
@@ -496,6 +515,7 @@ function read(a: number, frozen: boolean) {
   } finally {
     [decoded, shapesRead, lastShapeRead, lastMakerRead] = outer;
     given = outerGiven;
+    rawRoot = outerRaw;
   }
 }
 
@@ -600,11 +620,15 @@ export function __message(v: unknown, depth = 0): [number, number] {
 // reader gives back once it has read them (see put); null outside a message's
 // read
 let given: number[] | null = null;
-export function __unmessage<T = unknown>(a: number, bytes: number) {
+export function __unmessage<T = unknown>(
+  a: number,
+  bytes: number,
+  raw = false,
+) {
   const outer = given;
   given = [];
   try {
-    return read(a, false) as T;
+    return read(a, false, raw) as T;
   } finally {
     const list = given;
     given = outer;
@@ -618,24 +642,46 @@ export function __unmessage<T = unknown>(a: number, bytes: number) {
 // change it)
 export function share<T>(v: T) {
   if (v === null || typeof v !== 'object') return v;
-  if (sharedAddr.has(v)) return v;
+  if (sharedAddr.has(v) || (v as MaybeCell)?.$cell !== undefined) return v;
   const a = write(v as Sent, null, true);
-  sharedAddr.set(v, a);
-  copies.set(a, v); // this thread's copy is v itself
+  rememberShared(a, v);
+  release(a); // the copy holds its own count
   return v;
 }
-// the blob of a shared value, if v is one (a map holds it by that)
+// Compiled share(): the caller owns the blob, without a boxed handle.
+export function newShared(v: unknown): number {
+  $quiescent(); // a compiled call holds no uncounted argument across it
+  if (typeof v === 'number') return retain(v);
+  if (v !== null && typeof v === 'object') {
+    const known = sharedAddr.get(v);
+    if (known !== undefined) return retain(known);
+  }
+  return write(v as Sent, null, true);
+}
 export const __sharedAddress: (v: object) => number | undefined = v =>
   sharedAddr.get(v);
-// a shared blob, as this thread's own frozen copy (made once)
-const copies = new Map<number, unknown>();
+// A copy is weakly cached and holds a count. A live copy prevents reuse of
+// its address; finalization removes an expired entry before releasing it.
+const copies = new Map<number, WeakRef<object>>();
+const sharedHandles = new FinalizationRegistry<number>(a => {
+  if (copies.get(a)?.deref() === undefined) copies.delete(a);
+  finalizable--;
+  finalized++;
+  release(a);
+});
+function rememberShared(a: number, v: object) {
+  sharedAddr.set(v, a);
+  copies.set(a, new WeakRef(v));
+  retain(a);
+  sharedHandles.register(v, a);
+  finalizable++;
+}
 export const __materialize = (a: number) => materialize(a);
-function materialize(a: number) {
-  let v = copies.get(a);
+function materialize(a: number): object {
+  let v = copies.get(a)?.deref();
   if (v === undefined) {
-    v = read(a, true);
-    if (v !== null && typeof v === 'object') sharedAddr.set(v, a);
-    copies.set(a, v);
+    v = read(a + 16, true) as object;
+    rememberShared(a, v);
   }
   return v;
 }
@@ -645,6 +691,8 @@ const K_LOCK = 20,
   K_CONDITION = 21,
   K_F64 = 22,
   K_SHARED_ARRAY = 23,
+  K_CHAN = 24,
+  K_SHARED = 27,
   // maps.ts's, counted here: whether a kind is counted cannot wait for its
   // module to load, as a thread that has not loaded it may apply a decrement
   // of one (a pool worker reclaiming what another thread deferred), and a
@@ -658,9 +706,13 @@ type Holds = {
   free: (b: number) => void;
 };
 const holds = new Map<number, Holds>();
-// structs, SharedArrays, strings, maps and sets (REFCOUNT.md)
+// Every counted heap kind, including kinds whose module is not loaded here.
 const counted: (kind: number) => boolean = kind =>
   kind === K_SHARED_ARRAY ||
+  kind === K_LOCK ||
+  kind === K_CONDITION ||
+  kind === K_CHAN ||
+  kind === K_SHARED ||
   kind >= 100 ||
   kind === K_STR ||
   kind === K_SHARED_MAP ||
@@ -715,11 +767,11 @@ export const __cellKind = (kind: number, Cls: CellClass) => {
   cellKinds.set(kind, Cls);
 };
 export const __newCell = (kind: number, bytes: number, self: CellObject) =>
-  newCell(kind, bytes, self);
+  allocateCell(kind, bytes, self);
 // a counted kind's class, and how one of its blocks is freed. a block of it
 // starts [kind][count], and its handles hold counts as a struct's do
 export const __countedCellKind = (kind: number, Cls: CellClass, h: Holds) => {
-  if (kind !== K_SHARED_MAP && kind !== K_SHARED_SET)
+  if (kind !== K_SHARED_MAP && kind !== K_SHARED_SET && kind !== K_CHAN)
     throw new TypeError(`own: kind ${kind} is not one own.ts counts`);
   cellKinds.set(kind, Cls);
   holds.set(kind, h);
@@ -729,13 +781,44 @@ export const __countedCellKind = (kind: number, Cls: CellClass, h: Holds) => {
 export const __tracked = (b: number) => {
   $track(b);
 };
-const newCell = (kind: number, bytes: number, self: CellObject) => {
-  const a = $alloc(bytes);
+let rawCell = false;
+const allocateCell = (kind: number, bytes: number, self: CellObject) => {
+  const a = $allocBlock(bytes);
   I32[a >> 2] = kind;
+  I32[(a >> 2) + 1] = 1;
   self.$cell = a;
-  cells.set(a, self);
+  if (!rawCell) {
+    holdFor(self, a);
+    cells.set(a, new WeakRef(self));
+    release(a);
+  }
   return a;
 };
+// Constructors of built-in cells have no user callbacks. Compiled new keeps
+// the allocation's initial count instead of making a GC-owned handle.
+export function newCell(
+  type: new (...args: any[]) => CellObject,
+  ...args: any[]
+) {
+  const outer = rawCell;
+  rawCell = true;
+  try {
+    return new type(...args).$cell;
+  } finally {
+    rawCell = outer;
+  }
+}
+// A temporary receiver for built-in methods. Waiting methods retain the cell
+// themselves; this view must never escape into user code.
+export function cellView(a: number, keepAlive = false): CellObject {
+  return Object.assign(Object.create(cellKinds.get(I32[a >> 2])!.prototype), {
+    $cell: a,
+    $raw: true,
+    // An iterator starts after its iterable expression has been evaluated.
+    // Keep a canonical handle alive from then until the iterator is dropped.
+    ...(keepAlive ? {$handle: cell(a)} : {}),
+  });
+}
 
 // spins before a thread sleeps: the other side is often only a moment away
 const SPINS = 20000;
@@ -743,7 +826,7 @@ const SPINS = 20000;
 // `using` needs Symbol.dispose, which an engine may not have yet
 (Symbol as {dispose?: symbol}).dispose ??= Symbol.for('Symbol.dispose');
 
-// a lock: one thread at a time holds it. its block is [kind][state], state 0
+// a lock: one thread at a time holds it. its block is [kind][count][state][-], state 0
 // free, 1 held, 2 held with threads waiting (a futex, as in Drepper's "Futexes
 // Are Tricky"). a thread that waits for it is quiescent meanwhile
 // (REFCOUNT.md). hold() returns the hold, which releases the lock when it is
@@ -752,20 +835,32 @@ const SPINS = 20000;
 export class Lock {
   declare $cell: number;
   constructor() {
-    newCell(K_LOCK, 8, this);
+    allocateCell(K_LOCK, 16, this);
   }
   hold(): Disposable {
     $mustNotBlock('Lock.hold()', 'using _ = await lock.holdAsync()');
-    const i = (this.$cell >> 2) + 1;
-    acquire(i);
-    return new Held(i);
+    const i = (this.$cell >> 2) + 2;
+    retain(this.$cell);
+    try {
+      acquire(i);
+      return new Held(i);
+    } catch (e) {
+      release(this.$cell);
+      throw e;
+    }
   }
   // the same in an async function: waits for the lock without blocking its
   // worker
   async holdAsync(): Promise<Disposable> {
-    const i = (this.$cell >> 2) + 1;
-    await acquireAsync(i);
-    return new Held(i);
+    const i = (this.$cell >> 2) + 2;
+    retain(this.$cell);
+    try {
+      await acquireAsync(i);
+      return new Held(i);
+    } catch (e) {
+      release(this.$cell);
+      throw e;
+    }
   }
 }
 // a lock's hold: disposing it releases the lock, once
@@ -776,8 +871,10 @@ class Held {
   }
   [Symbol.dispose]() {
     if (this.i === 0) return;
+    const a = (this.i - 2) * 4;
     unlock(this.i);
     this.i = 0;
+    release(a);
   }
 }
 cellKinds.set(K_LOCK, Lock);
@@ -808,49 +905,63 @@ const unlock = (i: number) => {
 };
 
 // a condition: threads that hold a lock wait on it until another thread
-// notifies them. its block is [kind][seq]: every notify changes seq, which
+// notifies them. its block is [kind][count][seq][-]: every notify changes seq, which
 // waiters wait on. a waiter may wake without a notify, so it waits in a loop
 // that checks what it waits for
 export class Condition {
   declare $cell: number;
   constructor() {
-    newCell(K_CONDITION, 8, this);
+    allocateCell(K_CONDITION, 16, this);
   }
   // releases lock, which this thread holds, waits for a notify, and holds lock
   // again
   wait(lock: Lock) {
-    $mustNotBlock('Condition.wait()', 'await waitAsync()');
-    const s = (this.$cell >> 2) + 1,
-      seq = Atomics.load(I32, s),
-      l = (lock.$cell >> 2) + 1;
-    unlock(l);
-    $waitBegin();
-    let k = 0;
-    while (k < SPINS && Atomics.load(I32, s) === seq) k++;
-    while (Atomics.load(I32, s) === seq) Atomics.wait(I32, s, seq);
-    $waitEnd();
-    acquire(l);
+    retain(this.$cell);
+    retain(lock.$cell);
+    try {
+      $mustNotBlock('Condition.wait()', 'await waitAsync()');
+      const s = (this.$cell >> 2) + 2,
+        seq = Atomics.load(I32, s),
+        l = (lock.$cell >> 2) + 2;
+      unlock(l);
+      $waitBegin();
+      let k = 0;
+      while (k < SPINS && Atomics.load(I32, s) === seq) k++;
+      while (Atomics.load(I32, s) === seq) Atomics.wait(I32, s, seq);
+      $waitEnd();
+      acquire(l);
+    } finally {
+      release(lock.$cell);
+      release(this.$cell);
+    }
   }
   // the same in an async function: waits without blocking its worker
   async waitAsync(lock: Lock) {
-    const s = (this.$cell >> 2) + 1,
-      seq = Atomics.load(I32, s),
-      l = (lock.$cell >> 2) + 1;
-    unlock(l);
-    while (Atomics.load(I32, s) === seq) {
-      const w = Atomics.waitAsync(I32, s, seq);
-      if (w.async) await w.value;
+    retain(this.$cell);
+    retain(lock.$cell);
+    try {
+      const s = (this.$cell >> 2) + 2,
+        seq = Atomics.load(I32, s),
+        l = (lock.$cell >> 2) + 2;
+      unlock(l);
+      while (Atomics.load(I32, s) === seq) {
+        const w = Atomics.waitAsync(I32, s, seq);
+        if (w.async) await w.value;
+      }
+      $resumed();
+      await acquireAsync(l);
+    } finally {
+      release(lock.$cell);
+      release(this.$cell);
     }
-    $resumed();
-    await acquireAsync(l);
   }
   notifyOne() {
-    const s = (this.$cell >> 2) + 1;
+    const s = (this.$cell >> 2) + 2;
     Atomics.add(I32, s, 1);
     Atomics.notify(I32, s, 1);
   }
   notifyAll() {
-    const s = (this.$cell >> 2) + 1;
+    const s = (this.$cell >> 2) + 2;
     Atomics.add(I32, s, 1);
     Atomics.notify(I32, s);
   }
@@ -892,9 +1003,9 @@ export interface StructType<T = unknown> {
 // or a SharedArray's address in the slot's low half, 0 for null; b a byte, 0 or
 // 1, and u a byte, at the slot's start; s an interned string's address in the
 // low half, 0 for "" (see storeStr); i an i32 in the low half; c a channel's
-// address in the low half, 0 for null, with no count (a channel is never
-// freed). compiled code has c where uncompiled code, which cannot tell a
-// channel from a struct, has r. compiled with the typed layout, a
+// address in the low half, 0 for null. The legacy c accessor now counts
+// references too. New compiled layouts and uncompiled ref<T>() fields both
+// use r. Compiled with the typed layout, a
 // struct value is the block's address and `p.a` is `__F64[(p >> 3) + 1]` (see
 // newStruct). where one flows into `any` or `unknown` the compiler boxes it
 // (__box): the handle is an instance of the class this returns, an object whose
@@ -936,7 +1047,12 @@ export function sharedStruct<T = unknown>(
   Struct.kind = kind;
   Struct.size = size;
   Struct.fields = fields;
-  Struct.refs = refs;
+  Struct.refs = [
+    ...new Set([
+      ...refs,
+      ...kinds.split('').flatMap((kind, k) => (kind === 'c' ? [k] : [])),
+    ]),
+  ];
   Struct.kinds = kinds;
   Struct.strs = kinds.split('').flatMap((kind, k) => (kind === 's' ? [k] : []));
   const accessors: Record<
@@ -946,7 +1062,7 @@ export function sharedStruct<T = unknown>(
     r: k => ({
       get() {
         const q = I32[(this.$cell >> 2) + 2 + 2 * k];
-        return q === 0 ? null : cell(q);
+        return box(q);
       },
       set(v: MaybeCell) {
         store((this.$cell >> 2) + 2 + 2 * k, retain(cellAddress(v)));
@@ -955,10 +1071,10 @@ export function sharedStruct<T = unknown>(
     c: k => ({
       get() {
         const q = I32[(this.$cell >> 2) + 2 + 2 * k];
-        return q === 0 ? null : cell(q);
+        return box(q);
       },
       set(v: MaybeCell) {
-        I32[(this.$cell >> 2) + 2 + 2 * k] = cellAddress(v);
+        store((this.$cell >> 2) + 2 + 2 * k, retain(cellAddress(v)));
       },
     }),
     b: k => ({
@@ -1147,8 +1263,7 @@ const owner: (p: number) => number = p => {
 const countAt: (o: number) => number = o =>
   I32[o >> 2] === K_SHARED_ARRAY ? (o >> 2) + 3 : (o >> 2) + 1;
 // null is 0; a raw value can also be undefined at run time (a missing argument,
-// `f?.()` ). a reference field may also hold a channel (uncompiled code cannot
-// tell), which lives as long as the program and has no count
+// `f?.()` ). All reference fields hold counted addresses.
 export function retain(p: number) {
   if (p && counted(I32[p >> 2])) Atomics.add(I32, countAt(owner(p)), 1);
   return p;
@@ -1183,7 +1298,7 @@ function holdsOf(kind: number) {
   const h = holds.get(kind);
   if (h === undefined)
     throw new Error(
-      'own: a SharedMap or SharedSet is freed on a thread that has not loaded maps.ts',
+      'own: a counted cell is freed on a thread that has not loaded maps.ts or chan.ts',
     );
   return h;
 }
@@ -1192,7 +1307,9 @@ const isMap = (kind: number) => kind === K_SHARED_MAP || kind === K_SHARED_SET;
 // reference and string fields, its elements', its entries'
 function held(b: number, f: (p: number) => void) {
   const kind = I32[b >> 2];
-  if (isMap(kind)) holdsOf(kind).held(b, f);
+  if (isMap(kind) || kind === K_CHAN) holdsOf(kind).held(b, f);
+  else if (kind === K_SHARED) visitWord(b + 16, 0, new Set(), f);
+  else if (kind === K_LOCK || kind === K_CONDITION) return;
   else if (kind === K_SHARED_ARRAY) {
     const n = I32[(b >> 2) + 1],
       size = elementSize(b);
@@ -1216,7 +1333,9 @@ function held(b: number, f: (p: number) => void) {
 function freeShell(b: number) {
   const kind = I32[b >> 2];
   $untrack(b);
-  if (isMap(kind)) holdsOf(kind).free(b);
+  if (isMap(kind) || kind === K_CHAN) holdsOf(kind).free(b);
+  else if (kind === K_SHARED) $freeBlock(b, 16 + I32[(b >> 2) + 2]);
+  else if (kind === K_LOCK || kind === K_CONDITION) $freeBlock(b, 16);
   else if (kind === K_SHARED_ARRAY)
     $freeBlock(b, 16 + I32[(b >> 2) + 1] * elementSize(b));
   else $freeBlock(b, structType(kind).size);
@@ -1314,6 +1433,11 @@ function scanCycles() {
 // $collectCycles); 0 if one did not within timeout ms
 export const collectCycles = (timeout?: number) =>
   $collectCycles(scanCycles, timeout);
+// A failed allocation outside an internal lock retries once after a bounded
+// collection. The allocator suppresses recursion and skips locked callers.
+setAllocationCollector(() => {
+  collectCycles(50);
+});
 // a reference field store at i32 index i: takes over v's count. a thread may
 // have read the old value and not counted it yet, so its decrement waits for
 // every thread's next quiescent point
@@ -1376,12 +1500,13 @@ function addressForRollback(v: unknown): number | undefined {
 // still holds), and unwraps it on the way back. a struct's handle is an
 // instance of its class; a SharedArray's is an array-like Proxy over the same
 // memory
-export const box: (a: number) => CellValue | null = a => (a ? cell(a) : null);
+export const box: (a: number) => object | null = a =>
+  a ? (I32[a >> 2] === K_SHARED ? materialize(a) : cell(a)) : null;
 // the address of a cell's block (a struct's, a SharedArray's, a channel's...),
 // 0 for null: what a reference or channel field holds
 export function cellAddress(v: MaybeCell) {
   if (v == null) return 0;
-  const a = typeof v === 'object' ? v.$cell : undefined;
+  const a = typeof v === 'object' ? (v.$cell ?? sharedAddr.get(v)) : undefined;
   if (a === undefined)
     throw new TypeError(
       staysHere(v, 'is not a cell, which a field holds') ??
@@ -1440,11 +1565,8 @@ export class SharedArray<E extends ElementType = ElementType> {
 }
 export function unbox(v: MaybeCell) {
   if (v == null) return 0;
-  const a = typeof v === 'object' ? v.$cell : undefined;
-  if (
-    a === undefined ||
-    !(I32[a >> 2] === K_SHARED_ARRAY || I32[a >> 2] >= 100)
-  )
+  const a = typeof v === 'object' ? (v.$cell ?? sharedAddr.get(v)) : undefined;
+  if (a === undefined || !counted(I32[a >> 2]))
     throw new TypeError('own: not a shared struct or SharedArray');
   return a;
 }
@@ -1746,7 +1868,7 @@ function dropThread(t: number) {
   try {
     const r = I32[(t + 24) >> 2];
     if (I32[(t + 12) >> 2] !== 0) $releaseString(r);
-    else if (r !== 0) dropMessage(r, I32[(t + 20) >> 2]);
+    else if (r !== 0) __dropMessage(r, I32[(t + 20) >> 2]);
   } finally {
     $freeBlock(t, 32);
   }
@@ -1894,13 +2016,13 @@ function discardThread(t: number) {
 // a thread's arguments dropped, with the counts they carried (as the thread's
 // entry frees them once it has read them)
 function dropArguments(t: number) {
-  dropMessage(I32[(t + 16) >> 2], I32[(t + 20) >> 2]);
+  __dropMessage(I32[(t + 16) >> 2], I32[(t + 20) >> 2]);
 }
 // a message nothing else will read, freed with the counts it carried: its
 // strings', its shapes' keys', its cells' and its counted values' (which a
 // reader would own). its words are walked, not read: reading a cell would make
 // it a handle here, whose count of its own only V8's collector gives back
-function dropMessage(a: number, bytes: number) {
+export function __dropMessage(a: number, bytes: number) {
   try {
     dropWord(a, 0, new Set());
   } finally {
@@ -1909,7 +2031,18 @@ function dropMessage(a: number, bytes: number) {
 }
 // a value word of a message's blob, as get() reads it: a shape's keys are
 // counted once in the blob, at its first object (shapes: the ones seen)
+export function __messageHeld(a: number, f: (p: number) => void) {
+  visitWord(a, 0, new Set(), f);
+}
 function dropWord(base: number, at: number, shapes: Set<number>) {
+  visitWord(base, at, shapes, release);
+}
+function visitWord(
+  base: number,
+  at: number,
+  shapes: Set<number>,
+  f: (p: number) => void,
+) {
   const v = F64[(base >> 3) + at];
   if (v === v) return;
   const i = (base >> 2) + at * 2,
@@ -1917,24 +2050,25 @@ function dropWord(base: number, at: number, shapes: Set<number>) {
     p = I32[i];
   if ((hi & BOX) !== BOX) return;
   switch ((hi >>> 11) & 0xff) {
+    case T_SHARED:
+    case T_CELL:
     case T_ISTR:
     case T_CELL_COUNTED:
     case T_COUNTED:
-      release(p);
+      f(p);
       return;
     case T_ARR:
       for (let k = 0, n = I32[(base >> 2) + p * 2]; k < n; k++)
-        dropWord(base, p + 1 + k, shapes);
+        visitWord(base, p + 1 + k, shapes, f);
       return;
     case T_OBJ: {
       const shape = I32[(base >> 2) + p * 2],
         n = I32[(base >> 2) + shape * 2];
       if (!shapes.has(shape)) {
         shapes.add(shape);
-        for (let k = 0; k < n; k++)
-          release(I32[(base >> 2) + (shape + 1 + k) * 2]);
+        for (let k = 0; k < n; k++) f(I32[(base >> 2) + (shape + 1 + k) * 2]);
       }
-      for (let k = 0; k < n; k++) dropWord(base, p + 1 + k, shapes);
+      for (let k = 0; k < n; k++) visitWord(base, p + 1 + k, shapes, f);
     }
   }
 }

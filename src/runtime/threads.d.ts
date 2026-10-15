@@ -29,6 +29,7 @@ declare const fieldBrand: unique symbol;
 declare const int32Brand: unique symbol;
 declare const uint8Brand: unique symbol;
 declare const layoutBrand: unique symbol;
+declare const sharedBrand: unique symbol;
 
 /** A cell: shared and mutable. Any number of threads may hold the same one. */
 export interface Cell {
@@ -46,10 +47,15 @@ export type Sending<T> = T;
  * A deeply immutable value, which any number of threads may read. To TypeScript
  * it is deeply readonly.
  */
+type DeepShared<T> = T extends Cell | ((...args: any[]) => any)
+  ? T
+  : T extends object
+    ? {readonly [K in keyof T]: DeepShared<T[K]>}
+    : T;
 export type Shared<T> = T extends Cell | ((...args: any[]) => any)
   ? T
   : T extends object
-    ? {readonly [K in keyof T]: Shared<T[K]>}
+    ? DeepShared<T> & {readonly [sharedBrand]?: never}
     : T;
 
 /**

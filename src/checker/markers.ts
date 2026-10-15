@@ -156,7 +156,10 @@ export function getCallMarker(c: Own, call: Node | undefined): string {
   )
     return '';
   const declared = c.host.declarationOf(handle)?.name?.text;
-  return declared === 'consume' || declared === 'struct' || declared === 'ref'
+  return declared === 'consume' ||
+    declared === 'struct' ||
+    declared === 'ref' ||
+    declared === 'share'
     ? declared
     : '';
 }

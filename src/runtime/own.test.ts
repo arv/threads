@@ -1290,7 +1290,7 @@ describe('a wait that throws', () => {
     const ch = new T.Channel();
     throwing(() => expect(() => T.select(ch)).toThrow(TypeError));
     expect(runtime.I32[QS_1]).not.toBe(IDLE);
-    expect(runtime.I32[(ch.$cell >> 2) + 11]).toBe(0); // its list of selects
+    expect(runtime.I32[(ch.$cell >> 2) + 13]).toBe(0); // its list of selects
   });
 });
 
@@ -1358,7 +1358,7 @@ describe('the rest', () => {
     }
     // disposing a hold twice releases the lock once: not someone else's hold
     const state = () =>
-      runtime.I32[((lock as unknown as {$cell: number}).$cell >> 2) + 1];
+      runtime.I32[((lock as unknown as {$cell: number}).$cell >> 2) + 2];
     const first = lock.hold();
     first[Symbol.dispose]();
     const second = lock.hold();

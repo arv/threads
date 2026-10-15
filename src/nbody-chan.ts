@@ -116,7 +116,7 @@ function worker(
 function simulate(threads: number): number {
   const gather = new Channel<Positions>(threads),
     done = new Channel<Slice>(threads);
-  const scatter: Channel<Shared<Pos[]>>[] = [];
+  const scatter: unknown[] = [];
   const parts = partition(makeBodies(), threads);
   for (let t = 0; t < threads; t++) {
     const ch = new Channel<Shared<Pos[]>>(1);
@@ -131,7 +131,7 @@ function simulate(threads: number): number {
     }
     // written once; each goroutine reads its own copy
     const all = share(slots.flat());
-    for (const ch of scatter) ch.send(all);
+    for (const ch of scatter) (ch as Channel<Shared<Pos[]>>).send(all);
   }
   const slices: Body[][] = [];
   for (let k = 0; k < threads; k++) {
