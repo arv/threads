@@ -110,6 +110,9 @@ interface Part {
   readonly nullable: boolean;
 }
 
+// A class's number, for a signature: its place in its file.
+const ctorKey = (node: Node) => `${node.pos}:${node.end}`;
+
 // A consume() of a local variable: which, holding what.
 interface ConsumeEvent {
   readonly id: number;
@@ -356,7 +359,10 @@ class State {
           x.region === y.region &&
           x.consumed === y.consumed &&
           x.maybe === y.maybe &&
-          sameOrigins(x.origins, y.origins),
+          sameOrigins(x.origins, y.origins) &&
+          !!x.otherCtor === !!y.otherCtor &&
+          (x.ctors?.length ?? 0) === (y.ctors?.length ?? 0) &&
+          (x.ctors ?? []).every(n => y.ctors!.includes(n)),
       )
     );
   }
@@ -385,7 +391,11 @@ class State {
             index = roots.size;
             roots.set(r, index);
           }
-          out += `=r${index}f${inf.flags}${inf.sent ? (inf.maybe ? 's?' : 's') : ''};`;
+          out += `=r${index}f${inf.flags}${inf.sent ? (inf.maybe ? 's?' : 's') : ''}`;
+          // the classes a constructor may be, which a `new` of it takes
+          if (v.ctors)
+            out += `c${v.ctors.map(ctorKey).sort().join(',')}${v.otherCtor ? '+' : ''}`;
+          out += ';';
         }
       }
     }
@@ -1347,8 +1357,13 @@ class Analyzer {
       if (found || isTypeNode(node)) return found;
       if (
         (node.kind === K.MetaProperty && node.keywordToken === K.NewKeyword) ||
-        (node.kind === K.PropertyAccessExpression &&
-          node.name.text === 'constructor' &&
+        ((node.kind === K.PropertyAccessExpression
+          ? node.name.text === 'constructor'
+          : node.kind === K.ElementAccessExpression &&
+            (node.argumentExpression.kind === K.StringLiteral ||
+              node.argumentExpression.kind ===
+                K.NoSubstitutionTemplateLiteral) &&
+            node.argumentExpression.text === 'constructor') &&
           skipOuterExpressions(node.expression as Node, OEK.All).kind ===
             K.ThisKeyword)
       ) {
@@ -1434,6 +1449,15 @@ class FunctionAnalysis {
   // the values they extend
   readonly classes: {region: Region; node: Node}[] = [];
   readonly bases = new Map<Node, Value>();
+  // what each class's code captured as it was created: the variables, where,
+  // and the regions they held then (a binding may go before the class does)
+  readonly captured = new Map<
+    Node,
+    {symbol: TsSymbol; at: Node; region: Region}[]
+  >();
+  // the region of what each class's prototype holds, which its instances
+  // all reach
+  readonly prototypes = new Map<Node, Region>();
   // the regions of what the for-of loops being analyzed iterate, which they
   // hold outside any binding
   readonly iterating: Region[] = [];
@@ -1507,6 +1531,7 @@ class FunctionAnalysis {
         // decorators and static members are evaluated as it is; its name
         // holds the class from here, with what its static fields hold
         const closure = this.closureValue(node, s);
+        this.recordCaptures(node, s);
         const cls: Value =
           closure.kind === ValueKind.InRegion
             ? {...closure, ctors: [node]}
@@ -1947,11 +1972,14 @@ class FunctionAnalysis {
         // what a loop iterates), unless an expression being evaluated may
         // hold one
         if (this.evaluating === 0)
-          start.collect(
-            this.thisRegion === 0
-              ? this.iterating
-              : [this.thisRegion, ...this.iterating],
-          );
+          start.collect([
+            ...(this.thisRegion === 0 ? [] : [this.thisRegion]),
+            ...this.iterating,
+            // what classes captured as they were created, and their
+            // prototypes, which their instances reach
+            ...[...this.captured.values()].flatMap(c => c.map(e => e.region)),
+            ...this.prototypes.values(),
+          ]);
         const done = runs.find(r => r.start.sameAs(start));
         if (done) return done.end.copy();
         const input = start.copy();
@@ -2133,6 +2161,7 @@ class FunctionAnalysis {
         return this.closureValue(node, s);
       case K.ClassExpression: {
         const closure = this.closureValue(node, s);
+        this.recordCaptures(node, s);
         const v: Value =
           closure.kind === ValueKind.InRegion
             ? {...closure, ctors: [node]}
@@ -2401,7 +2430,8 @@ class FunctionAnalysis {
         const since = s.consumes;
         const obj = this.evalPlace(place, s);
         const v = this.eval(node.right, s);
-        this.writeMember(place, obj, v, s, since);
+        // a value that never comes writes nothing
+        if (!s.unreachable) this.writeMember(place, obj, v, s, since);
         return v;
       }
       const v = this.eval(node.right, s);
@@ -2420,7 +2450,8 @@ class FunctionAnalysis {
         const old = this.readMember(place, place.expression, obj, s);
         const assigned = s.copy();
         const v = assigned.mergeValues(old, this.eval(node.right, assigned));
-        this.writeMember(place, obj, v, assigned, since);
+        if (!assigned.unreachable)
+          this.writeMember(place, obj, v, assigned, since);
         s.assign(joinStates(s, assigned));
         return v;
       }
@@ -2441,6 +2472,7 @@ class FunctionAnalysis {
         this.checkWrite(place, place.expression, obj);
         this.mayThrow(s);
         this.eval(node.right, s);
+        if (s.unreachable) return sharedValue;
         this.checkStillThere(place.expression, obj, s, since);
         this.mayThrow(s);
         return sharedValue;
@@ -2834,6 +2866,14 @@ class FunctionAnalysis {
   readMember(node: Node, object: Node, obj: Value, s: State): Value {
     const a = this.a;
     if (obj.kind !== ValueKind.InRegion) return sharedValue;
+    // a class's prototype, which its instances reach
+    if (
+      obj.ctors &&
+      !obj.otherCtor &&
+      node.kind === K.PropertyAccessExpression &&
+      node.name.text === 'prototype'
+    )
+      return this.prototypeOf(obj, s);
     if (s.isCounted(obj)) {
       // A struct element of a SharedArray is stored inline in the array's
       // block: an alias of the array. Fields are numbers or untracked
@@ -3029,15 +3069,21 @@ class FunctionAnalysis {
   // The places each argument's values go to, from..to: a spread before it
   // fills a tuple's length of them, or an unknown number (see spreadShape),
   // and a spread fills as many as it holds, none for an empty one.
-  argumentPlaces(args: readonly Node[]): {from: number; to: number}[] {
+  argumentPlaces(
+    args: readonly Node[],
+  ): {from: number; to: number; lastStart: number}[] {
     let from = 0,
       to = 0;
     return args.map(arg => {
-      if (arg.kind !== K.SpreadElement) return {from: from++, to: to++};
+      if (arg.kind !== K.SpreadElement)
+        return {from: from++, to, lastStart: to++};
       const shape = spreadShape(this.a.c, this.a.typeOf(arg.expression));
-      // an empty one fills no place, wherever it comes
+      // an empty one fills no place, wherever it comes; a spread starts
+      // where it does, its length aside
       const place =
-        shape.max === 0 ? {from: 1, to: 0} : {from, to: to + shape.max - 1};
+        shape.max === 0
+          ? {from: 1, to: 0, lastStart: 0}
+          : {from, to: to + shape.max - 1, lastStart: to};
       from += shape.min;
       to += shape.max;
       return place;
@@ -3050,20 +3096,16 @@ class FunctionAnalysis {
   sendingParameterOf(
     arg: Node,
     params: Node[],
-    place: {from: number; to: number},
+    place: {from: number; to: number; lastStart: number},
   ): Node | undefined {
     if (arg.kind !== K.SpreadElement)
       return this.sendingParameter(params, place);
     const shape = spreadShape(this.a.c, this.a.typeOf(arg.expression));
     for (const value of shape.values) {
       if (this.a.isPrimitiveOrSharedStructType(value.type)) continue;
-      // the spread's own first place is place.from to its last less what
-      // it fills after it
-      const lastStart =
-        shape.max === Infinity ? Infinity : place.to - shape.max + 1;
       const param = this.sendingParameter(params, {
         from: place.from + value.from,
-        to: lastStart + value.to,
+        to: place.lastStart + value.to,
       });
       if (param) return param;
     }
@@ -3135,6 +3177,43 @@ class FunctionAnalysis {
     return regionValue(s.find(r));
   }
 
+  // Records what a class's code captures as the class is created (see
+  // captured).
+  recordCaptures(node: Node, s: State): void {
+    const captures = this.a.capturesOf(node);
+    const entries: {symbol: TsSymbol; at: Node; region: Region}[] = [];
+    captures.symbols.forEach((symbol, i) => {
+      const v = this.lookup(symbol, s);
+      if (v.kind === ValueKind.InRegion)
+        entries.push({symbol, at: captures.nodes[i]!, region: v.region});
+    });
+    if (captures.usesThis) {
+      const v = this.thisValue(s);
+      if (v.kind === ValueKind.InRegion)
+        entries.push({
+          symbol: {name: 'this'} as TsSymbol,
+          at: node,
+          region: v.region,
+        });
+    }
+    this.captured.set(node, entries);
+  }
+
+  // The region of what the prototype of a constructor value holds: each of
+  // its classes'.
+  prototypeOf(v: Value, s: State): Value {
+    let r = 0;
+    for (const n of v.ctors ?? []) {
+      let p = this.prototypes.get(n);
+      if (p === undefined) {
+        p = this.a.newRegion();
+        this.prototypes.set(n, p);
+      }
+      r = r === 0 ? s.find(p) : s.union(r, p);
+    }
+    return regionValue(r);
+  }
+
   // The regions a new instance shares, of a constructor value: for each class
   // defined here it may be, a fresh region of what the class's code captures
   // (with the class, where its instance code reaches the class's static
@@ -3147,8 +3226,23 @@ class FunctionAnalysis {
     for (const n of v.ctors ?? []) {
       if (seen.has(n)) continue;
       seen.add(n);
-      const own = this.closureValue(n, s);
-      if (own.kind === ValueKind.InRegion) regions.push(own.region);
+      // what its code captured as it was created, each checked where it was
+      // captured
+      const captured = this.captured.get(n);
+      if (captured) {
+        for (const c of captured) {
+          if (
+            !this.checkUse(c.at, c.symbol.name, regionValue(c.region), s) &&
+            !s.isCounted(regionValue(c.region))
+          )
+            regions.push(c.region);
+        }
+      } else {
+        const own = this.closureValue(n, s);
+        if (own.kind === ValueKind.InRegion) regions.push(own.region);
+      }
+      const prototype = this.prototypes.get(n);
+      if (prototype !== undefined) regions.push(prototype);
       if (this.a.instancesReachTheirClass(n)) {
         const cls = [...this.classes].reverse().find(c => c.node === n);
         if (cls) regions.push(cls.region);

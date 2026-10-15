@@ -322,6 +322,12 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(531,7): error TS96003: 'b' cannot be used here: it shares objects with 'a.items', which was sent to 'send' on line 530.",
         "try-exits.ts(537,36): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 539.",
         "try-exits.ts(540,14): error TS96003: 'Derived' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 539.",
+        "try-exits.ts(546,21): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 550.",
+        "try-exits.ts(551,14): error TS96003: 'C' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 550.",
+        "try-exits.ts(558,67): error TS96007: 'new K().items' cannot be sent: it may be referenced by the caller. Declare the parameter 'Sending<T>' to take ownership.",
+        "try-exits.ts(565,7): error TS96003: 'b' cannot be used here: it shares objects with 'a.items', which was sent to 'send' on line 564.",
+        "try-exits.ts(573,7): error TS96003: 'b' cannot be used here: it shares objects with 'a.items', which was sent to 'send' on line 572.",
+        "try-exits.ts(579,11): error TS96007: 'new K().items' cannot be sent: it may be referenced by the caller. Declare the parameter 'Sending<T>' to take ownership.",
       ].sort(),
     );
   });

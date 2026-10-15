@@ -539,3 +539,51 @@ export function baseAlternatives(flag: boolean, ch: Channel<number[]>) {
   ch.send(xs);
   return new Derived();                                       // error: the second base captures xs
 }
+// a loop's state says the classes a constructor may be
+export function loopLastClass(again: () => boolean, ch: Channel<number[]>) {
+  const xs = [1];
+  class A { items = [2]; }
+  class B { items = xs; }
+  use([A, B]);
+  let C: typeof A = A;
+  for (;;) { if (again()) break; C = B; }
+  ch.send(xs);
+  return new C();                                             // error: C may be B
+}
+// so does a finally run's
+export function finallyKeepsConstructors(flag: boolean, borrowed: number[], ch: Channel<number[]>) {
+  class Fresh { items = [1]; }
+  class Borrowing { items = borrowed; }
+  let K: typeof Fresh = flag ? Fresh : Borrowing;
+  try { mayThrow(); K = flag ? Fresh : Fresh; } finally { ch.send(new K().items); }  // error: K may still be Borrowing
+}
+// instance code may reach its class as this["constructor"]
+export function implicitStaticByKey(ch: Channel<number[]>) {
+  class C { static xs = [1]; items = (this["constructor"] as typeof C).xs; }
+  const a = new C(), b = new C();
+  ch.send(a.items);
+  use(b.items);                                               // error: both are C.xs
+}
+// what a class's prototype holds its instances all reach
+export function prototypeState(ch: Channel<number[]>) {
+  const C = class { declare items: number[]; };
+  C.prototype.items = [1];
+  const a = new C(), b = new C();
+  ch.send(a.items);
+  use(b.items);                                               // error: both are the prototype's
+}
+// a class keeps what it captured, whatever binding has gone since
+export function escapedClass(borrowed: number[], ch: Channel<number[]>) {
+  let K: new () => { items: number[] } = class { items: number[] = []; };
+  try { const alias = borrowed; K = class { items = alias; }; } finally {}
+  ch.send(new K().items);                                     // error: the caller's array
+}
+// a value that never comes writes nothing
+export function abruptValue() {
+  const box = { n: 0 };
+  box.n = (use(class { static { consume(box); throw 0; } }), 1);  // fine
+}
+export function abruptCompound() {
+  const box = { n: 0 };
+  box.n += (use(class { static { consume(box); throw 0; } }), 1);  // fine
+}

@@ -113,3 +113,10 @@ export function spreadPrimitives() {
   new Labeled(...args);
   use(args);                       // fine
 }
+// a spread starts where it does, however long it is
+declare function headThenSent(head: number[], ...tail: Sending<number[]>): void;
+export function objectHeadPrimitiveTail() {
+  const args: [number[], ...number[]] = [[1], 2];
+  headThenSent(...args);
+  use(args);                       // fine: the array goes to head
+}
