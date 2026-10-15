@@ -186,10 +186,9 @@ describe('compile, where the fork does not', () => {
   });
 
   it("runs a class's heritage as a full expression, which releases what it holds", () => {
-    expect(fixes).toContain(
-      'export class Derived extends (_e = (element = (_a = __retain(first),',
-    );
-    expect(fixes).toContain('Base), __release(_a), _a = 0, _e) {}');
+    expect(fixes).toContain('_f = (_e = (element = (_a = __retain(first),');
+    expect(fixes).toContain('Base), __release(_a), _a = 0, _e);');
+    expect(fixes).toContain('export class Derived extends _f {}');
   });
 
   it('keeps a parameter whose default moves optional, after an optional one', () => {
@@ -368,6 +367,16 @@ describe('what the lowering moves, as it runs', () => {
 
 describe('counting lowering review regressions', () => {
   const cases = [
+    {
+      name: 'sorts copied loop edits in a moved parameter default',
+      source: `function f(make = () => {
+        for (let get = () => p.x, p = new P(), q = new P();;) {
+          p.x = 139; q.x = 1; return get;
+        }
+      }, owned: P = new P()) { owned.x = 1; return make(); }
+      export function main() { log(f()()); }`,
+      expected: '139',
+    },
     {
       name: 'allows fresh captured static-block var bindings inside a loop',
       source: `export function main() {
@@ -953,6 +962,127 @@ describe('counting lowering review regressions', () => {
     },
     60_000,
   );
+});
+
+describe('receiver cleanup during module initialization', () => {
+  const header = `import {f64, struct} from '@arv/threads';
+    const P = struct({x: f64});
+    function fail(): never { throw new Error('fail'); }
+    let p = new P();`;
+  it.each([
+    ['statement', 'p.x = ((p = new P()), fail());'],
+    [
+      'exported initializer',
+      'export const value = p.x = ((p = new P()), fail());',
+    ],
+    [
+      'multiple declarations',
+      'export const first = 1, value = p.x = ((p = new P()), fail()), last = first;',
+    ],
+    [
+      'awaited initializer',
+      'export const value = p.x = ((p = new P()), await Promise.reject(new Error("fail")));',
+    ],
+    ['loop condition', 'for (; p.x = ((p = new P()), fail());) {}'],
+    [
+      'class heritage',
+      'export class C extends ((p.x = ((p = new P()), fail())), class {}) {}',
+    ],
+    ['default export', 'export default p.x = ((p = new P()), fail());'],
+    [
+      'TDZ in initializer',
+      'function read(): number { return value; } export const value = (p.x = ((p = new P()), 7), read());',
+    ],
+  ])(
+    'releases receiver holds on a throwing %s',
+    (_name, source) => {
+      const dir = project(
+        {
+          'bad.ts': header + source,
+          'app.ts': `import {heapStats, log} from '@arv/threads';
+        export async function main() {
+          const before = heapStats();
+          let failed = false;
+          try { await import('./bad.js'); } catch { failed = true; }
+          const after = heapStats();
+          log(JSON.stringify([failed,
+            after.allocated - before.allocated - (after.freed - before.freed)]));
+        }`,
+        },
+        {paths: {'@arv/threads': [runtimeTypes]}},
+      );
+      const result = compile(path.join(dir, 'tsconfig.json'), {
+        runtime: '@arv/threads',
+        api,
+        check: true,
+        types: true,
+      });
+      expect(result.diagnostics).toEqual([]);
+      expect(result.typeDiagnostics).toEqual([]);
+      for (const file of result.files)
+        fs.writeFileSync(
+          path.join(dir, path.basename(file.fileName, '.ts') + '.js'),
+          toJavaScript(file).code,
+        );
+      const run = spawnSync(
+        process.execPath,
+        [
+          path.join(checker, '../run.ts'),
+          path.join(dir, 'app.js'),
+          '--threads=1',
+          '--pool=0',
+        ],
+        {encoding: 'utf8', timeout: 60_000},
+      );
+      expect(run.status, run.stdout + run.stderr).toBe(0);
+      // The module's replacement binding owns one block for its lifetime;
+      // only the receiver temporary of the failed expression must be freed.
+      expect(run.stdout.trim(), run.stderr).toBe('[true,1]');
+    },
+    60_000,
+  );
+
+  it('preserves exports, promise identity and untaken top-level await timing', () => {
+    const dir = project(
+      {
+        'app.ts':
+          header.replace('{f64, struct}', '{f64, log, struct}') +
+          `
+        export const events: number[] = [];
+        Promise.resolve().then(() => events.push(2));
+        export const promise = Promise.resolve(149);
+        export const value = (p.x = ((p = new P()), 7), false ? await 0 : promise),
+          same = (events.push(1), value === promise);
+        export function main() { log(JSON.stringify([...events, same, value === promise])); }
+      `,
+      },
+      {paths: {'@arv/threads': [runtimeTypes]}},
+    );
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: '@arv/threads',
+      api,
+      check: true,
+      types: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    expect(result.typeDiagnostics).toEqual([]);
+    fs.writeFileSync(
+      path.join(dir, 'app.js'),
+      toJavaScript(result.files[0]!).code,
+    );
+    const run = spawnSync(
+      process.execPath,
+      [
+        path.join(checker, '../run.ts'),
+        path.join(dir, 'app.js'),
+        '--threads=1',
+        '--pool=0',
+      ],
+      {encoding: 'utf8', timeout: 60_000},
+    );
+    expect(run.status, run.stdout + run.stderr).toBe(0);
+    expect(run.stdout.trim(), run.stderr).toBe('[1,2,true,true]');
+  }, 60_000);
 });
 
 describe('threads-check compile', () => {

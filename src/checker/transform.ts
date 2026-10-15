@@ -198,6 +198,8 @@ class Lowering {
   // Receiver holds survive abrupt evaluation until the next catch/finally
   // boundary. Clear successful holds so these guards can run on either path.
   private readonly exceptionTemps = new Map<Scope, Set<Temp>>();
+  private readonly moduleSetups = new Map<Node, Ir[]>();
+  private readonly moduleDeclarations = new Map<Node, Ir>();
   // default values of owned parameters, moved into the body
   private readonly paramInits = new Map<Node, Node>();
   // default values of other parameters that move into the body with them
@@ -272,7 +274,34 @@ class Lowering {
     // block of its own)
     const edits: Edit[] = [];
     for (const statement of file.statements as Node[]) {
-      const ir = this.visit(statement);
+      const before = new Set(this.exceptionTemps.get(fileScope));
+      let ir = this.visit(statement);
+      const temps = [...(this.exceptionTemps.get(fileScope) ?? [])].filter(
+        t => !before.has(t),
+      );
+      if (statement.kind === K.VariableStatement) {
+        const decls = statement.declarationList.declarations as Node[];
+        if (decls.some(d => this.moduleSetups.has(d))) {
+          const start = statement.getStart(this.file as any);
+          const prefix = this.text.slice(start, this.startOf(decls[0]!));
+          ir = statements([
+            raw(this.text.slice(statement.pos, start)),
+            ...decls.flatMap(decl => [
+              ...(this.moduleSetups.get(decl) ?? []),
+              gen(Prec.Primary, [
+                '\n',
+                prefix,
+                this.moduleDeclarations.get(decl)!,
+                ';',
+              ]),
+            ]),
+          ]);
+        }
+      } else if (this.moduleSetups.has(statement)) {
+        ir = statements([...this.moduleSetups.get(statement)!, ir]);
+      } else if (temps.length) {
+        ir = this.guardTemps([ir], temps);
+      }
       if (!isIdentity(ir, statement)) edits.push(this.editOf(statement, ir));
     }
     this.scopes.pop();
@@ -995,10 +1024,57 @@ class Lowering {
   // are released after it, as `(_r = E, __release(_a), _r)`.
   private fullExpression(node: Node | undefined, ctx: Ctx): Ir | undefined {
     if (!node) return undefined;
+    const scope = this.scopes[this.scopes.length - 1]!;
+    const before =
+      this.scopes.length === 1
+        ? new Set(this.exceptionTemps.get(scope))
+        : undefined;
     const frame = this.pushFrame({released: [], zeroed: [], conditional: 0});
     const result = this.visitIn(node, ctx)!;
     this.popFrame();
-    return this.releaseAfter(result, frame, ctx !== Ctx.Discard);
+    let ir = this.releaseAfter(result, frame, ctx !== Ctx.Discard);
+    // A module declaration must stay at file scope, including its TDZ.
+    // Stage only its initializer in a try/finally, leaving the declaration
+    // where it was. Direct top-level awaits keep their original scheduling.
+    if (this.scopes.length === 1) {
+      let target: Node | undefined;
+      const parent = node.parent as Node;
+      if (
+        parent.kind === K.VariableDeclaration &&
+        parent.initializer === node &&
+        parent.parent?.parent?.kind === K.VariableStatement &&
+        parent.parent.parent.parent?.kind === K.SourceFile
+      )
+        target = parent;
+      else if (
+        parent.kind === K.ExportAssignment &&
+        parent.parent?.kind === K.SourceFile
+      )
+        target = parent;
+      else if (parent.kind === K.ExpressionWithTypeArguments) {
+        const declaration = parent.parent?.parent as Node | undefined;
+        if (
+          declaration?.kind === K.ClassDeclaration &&
+          declaration.parent?.kind === K.SourceFile
+        )
+          target = declaration;
+      }
+      const temps = [...(this.exceptionTemps.get(scope) ?? [])].filter(
+        t => !before!.has(t),
+      );
+      if (target && temps.length) {
+        const value = this.newTemp();
+        const setup = this.guardTemps(
+          [exprStatement(this.assign(tempRef(value), ir))],
+          temps,
+        );
+        const list = this.moduleSetups.get(target) ?? [];
+        list.push(setup);
+        this.moduleSetups.set(target, list);
+        ir = tempRef(value);
+      }
+    }
+    return ir;
   }
 
   private releaseAfter(expr: Ir, frame: Frame, keepValue: boolean): Ir {
@@ -1036,13 +1112,27 @@ class Lowering {
     return `${temp.name}${this.exceptionTemps.get(temp.scope)?.has(temp) ? ' = 0' : ''}`;
   }
 
-  private clearReceiverTemps(scope: Scope): Ir[] {
-    return [...(this.exceptionTemps.get(scope) ?? [])]
+  private clearTemps(temps: Iterable<Temp>): Ir[] {
+    return [...temps]
       .reverse()
       .flatMap(temp => [
         exprStatement(this.call('__release', tempRef(temp))),
         exprStatement(this.assign(tempRef(temp), num(0))),
       ]);
+  }
+
+  private clearReceiverTemps(scope: Scope): Ir[] {
+    return this.clearTemps(this.exceptionTemps.get(scope) ?? []);
+  }
+
+  private guardTemps(list: Ir[], temps: Iterable<Temp>): Ir {
+    return gen(Prec.Primary, [
+      '\ntry {',
+      ...list,
+      '\n} finally {',
+      ...this.clearTemps(temps),
+      '\n}',
+    ]);
   }
 
   private guardReceiverTemps(list: Ir[], scope: Scope): Ir[] {
@@ -1145,7 +1235,10 @@ class Lowering {
           : raw(' = 0'),
       });
     }
-    return this.src(node, edits);
+    const ir = this.src(node, edits);
+    if (node.parent?.parent?.parent?.kind === K.SourceFile)
+      this.moduleDeclarations.set(node, ir);
+    return ir;
   }
 
   // `const` becomes `let` when a return moves an owned local's count out.
@@ -1168,6 +1261,7 @@ class Lowering {
         });
       }
     }
+    result.edits.sort((a, b) => a.start - b.start || a.end - b.end);
     if (!(node.flags & NodeFlags.Const)) return result;
     for (const decl of node.declarations as Node[]) {
       if (this.r.local(decl) === Local.OwnedMoved) {
