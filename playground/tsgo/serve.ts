@@ -37,14 +37,15 @@ export type TsgoMessage =
 export async function serve(module: WebAssembly.Module, start: TsgoStart) {
   const pipes = {in: new Pipe(start.in), out: new Pipe(start.out)};
   globalThis.tsgoPipes = pipes;
-  const go = new Go();
-  go.argv = ['tsgo', ...start.args];
-  go.env = {};
-  const instance = await WebAssembly.instantiate(module, go.importObject);
+  // the client may be waiting on tsgo already: whatever stops tsgo, from
+  // making its instance on, closes the pipe, so the client hears it is gone
   try {
+    const go = new Go();
+    go.argv = ['tsgo', ...start.args];
+    go.env = {};
+    const instance = await WebAssembly.instantiate(module, go.importObject);
     await go.run(instance);
   } finally {
-    // the client reads to the end, and then hears that tsgo is gone
     pipes.out.close();
   }
 }
