@@ -588,7 +588,8 @@ export function __message(v: unknown, depth = 0): [number, number] {
   } catch (e) {
     // Channel sends pass their counted value directly; spawn passes an
     // array, whose counted arguments it rolls back itself.
-    if (countedForRollback(v)) release(v.a);
+    const address = addressForRollback(v);
+    if (address !== undefined) release(address);
     throw e;
   }
   const bytes = wn * 8;
@@ -1359,13 +1360,13 @@ export const moved: (a: number) => CountedArg = a => new CountedArg(a);
 let countedInto: number[] | null = null;
 export const __isCounted: (v: unknown) => boolean = v =>
   v instanceof CountedArg;
-function countedForRollback(v: unknown): v is CountedArg {
-  // instanceof can call a proxy's getPrototypeOf trap. Rollback must not
-  // replace the original error or skip the counted arguments after it.
+function addressForRollback(v: unknown): number | undefined {
+  // Both instanceof and the address read can invoke proxy traps. Rollback
+  // must not replace the original error or skip later counted arguments.
   try {
-    return v instanceof CountedArg;
+    return v instanceof CountedArg ? v.a : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -1844,7 +1845,10 @@ export function __start(fn: ThreadFn, args: unknown[], detached: boolean) {
   // retained for the thread (countedRef): its count is given back, as the
   // message would have carried it
   if (!$poolRunning()) {
-    for (const v of args) if (countedForRollback(v)) release(v.a);
+    for (const v of args) {
+      const address = addressForRollback(v);
+      if (address !== undefined) release(address);
+    }
     throw new Error(STOPPED);
   }
   const t = $allocBlock(32);
@@ -1858,7 +1862,10 @@ export function __start(fn: ThreadFn, args: unknown[], detached: boolean) {
     // No thread or message owns these yet. Serialization rolls back the
     // counts it took itself, but counted arguments arrived with theirs.
     $freeBlock(t, 32);
-    for (const v of args) if (countedForRollback(v)) release(v.a);
+    for (const v of args) {
+      const address = addressForRollback(v);
+      if (address !== undefined) release(address);
+    }
     throw e;
   }
   I32[(t + 16) >> 2] = a;

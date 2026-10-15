@@ -233,6 +233,74 @@ describe('moving values', () => {
     }
   });
 
+  it('preserves the original error when a counted proxy address getter throws', () => {
+    const N = own.sharedStruct('ThrowingMessageAddress', ['n']),
+      a = own.newStruct(N),
+      counted = own.countedRef(a),
+      original = new Error('original address error');
+    let reads = 0;
+    const proxy = new Proxy(counted, {
+      get(target, key, receiver) {
+        if (key === 'a') {
+          if (++reads === 1) throw original;
+          throw new Error('rollback address error');
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    let failure: unknown;
+    try {
+      try {
+        own.__message(proxy);
+      } catch (e) {
+        failure = e;
+      }
+      expect(failure).toBe(original);
+      expect(move({after: 42})).toEqual({after: 42});
+    } finally {
+      // The proxy hides its count's address; its original wrapper still owns it.
+      own.release(counted.a);
+      own.release(a);
+    }
+  });
+
+  it('continues spawn rollback after a counted proxy address getter throws', () => {
+    function addressProxySpawn(value: unknown, address: number) {
+      return [value, address];
+    }
+    own.register(import.meta.url, {addressProxySpawn});
+    const N = own.sharedStruct('ThrowingSpawnAddress', ['n']),
+      a = own.newStruct(N),
+      b = own.newStruct(N),
+      counted = own.countedRef(a),
+      proxy = new Proxy(counted, {
+        get(target, key, receiver) {
+          if (key === 'a') throw new Error('rollback address error');
+          return Reflect.get(target, key, receiver);
+        },
+      });
+    try {
+      const value = {
+        get x() {
+          const before = T.heapStats();
+          expect(() =>
+            own.spawn(addressProxySpawn, proxy, own.countedRef(b)),
+          ).toThrow(/already serializing/);
+          const after = T.heapStats();
+          expect(after.allocated - before.allocated).toBe(1);
+          expect(after.freed - before.freed).toBe(1);
+          expect(runtime.I32[(b >> 2) + 1]).toBe(1);
+          return 42;
+        },
+      };
+      expect(move([123, value])).toEqual([123, {x: 42}]);
+    } finally {
+      own.release(counted.a);
+      own.release(a);
+      own.release(b);
+    }
+  });
+
   it('reclaims shared blobs when a freeze trap attempts a reentrant write', () => {
     const key = 'reentrantFreezePayload',
       name = runtime.$internRef(key);
