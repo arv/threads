@@ -243,9 +243,11 @@ const SCHEDULED: Record<string, RegExp> = {
     /(?<=rows drawn by each )[\d, ]+/g,
   // which worker took which job
   'Channels: a pool of workers': /(?<=done by worker )\d+/g,
-  // every count it prints: the race decides the blocks allocated and freed,
-  // the decrements left pending and how far the heap grew
-  'Reference counting under a race': /\d+/g,
+  // what the race decides: how far the heap grew, the blocks allocated and
+  // freed, and the decrements left pending (but not its errors, which must
+  // be 0, nor the churn's sum)
+  'Reference counting under a race':
+    /(?<=heap (grew )?)\d+|(?<=(blocks allocated|freed|allocated - freed|decrements pending) )\d+/g,
   // how many times the reader read while the writers pushed, and how far the
   // heap grew meanwhile
   'A growable SharedVector, in user space':
