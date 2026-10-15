@@ -2054,10 +2054,22 @@ export async function resetPool(sab: SharedArrayBuffer) {
     }
     return false;
   };
+  // the old pool's workers awake as it stopped (see wake): each marks itself
+  // asleep as it waits, or as it leaves. one terminated awake (between
+  // threads, in an event loop turn, or a host) never does, and would hold up
+  // every collection for good. one asleep is never taken for dead: it may
+  // wake, and mark itself awake, at any time
+  const wasAwake: number[] = [];
+  for (let t = 2, n = Atomics.load(i32, C_NEXT_TID); t < n; t++) {
+    const e = C_THREADS + t * T_ENTRY;
+    if (Atomics.load(i32, e + T_AWAKE) === 1) wasAwake.push(e);
+  }
+  const stillAwake = () =>
+    wasAwake.some(e => Atomics.load(i32, e + T_AWAKE) === 1);
   let late = false;
   for (
     const until = performance.now() + 1000;
-    Atomics.load(i32, C_BUSY) !== 0 || running();
+    Atomics.load(i32, C_BUSY) !== 0 || running() || stillAwake();
   ) {
     if (performance.now() > until) {
       console.warn(
@@ -2098,14 +2110,16 @@ export async function resetPool(sab: SharedArrayBuffer) {
   for (let t = 2, n = i32[C_NEXT_TID]; t < n; t++) {
     const e = C_THREADS + t * T_ENTRY;
     Atomics.store(i32, e + T_HOST, 0);
-    // asleep, for a collection: a worker that was terminated awake never
-    // marks itself asleep, and one that runs on leaves
-    Atomics.store(i32, e + T_AWAKE, 0);
-    // and not waiting to wake: one that does so after the reset clears its
+    // not waiting to wake: one that does so after the reset clears its
     // own mark (see wake), and one terminated waiting never would
     Atomics.store(i32, e + T_WAKING, 0);
     if (late) Atomics.store(i32, e + T_ALIVE, 0);
   }
+  // one awake from the stop to the second's end is taken for dead, as one
+  // still in a thread is: it was terminated awake. (one that ran on all that
+  // while, and was asleep for a moment of it, is the risk ALIVE's takes too)
+  if (late)
+    for (const e of wasAwake) Atomics.compareExchange(i32, e + T_AWAKE, 1, 0);
   // a worker of the old pool that still waits for work (see stale) leaves now
   Atomics.notify(i32, C_PENDING);
   return true;

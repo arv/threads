@@ -259,4 +259,37 @@ describe('a pool reset', () => {
     expect(own.collectCycles()).toBe(2);
     expect(live()).toBe(before);
   });
+
+  it('keeps a worker that wakes as it resets visible to collections', async () => {
+    const I32 = runtime.I32,
+      NEXT_TID = 4,
+      // threads 2 and 3's entries: [alive][free][awake][waking]
+      AWAKE_2 = 2048 + 2 * 8 + 2,
+      AWAKE_3 = 2048 + 3 * 8 + 2;
+    if (I32[NEXT_TID] <= 3) I32[NEXT_TID] = 4;
+    const before = live();
+    // thread 2 waits (asleep); thread 3 was terminated awake, and stays so
+    I32[AWAKE_2] = 0;
+    I32[AWAKE_3] = 1;
+    const reset = runtime.resetPool(globalThis.__escapeSab!);
+    // thread 2 wakes while the reset waits for thread 3, and runs on
+    await new Promise(resolve => setTimeout(resolve, 50));
+    I32[AWAKE_2] = 1;
+    expect(await reset).toBe(true);
+    // thread 3, awake all along, is taken for dead; thread 2 is not
+    expect([I32[AWAKE_2], I32[AWAKE_3]]).toEqual([1, 0]);
+    own.release(ring(3));
+    expect(own.collectCycles(50)).toBe(0); // it waits for thread 2
+    I32[AWAKE_2] = 0; // which parks
+    expect(own.collectCycles()).toBe(3);
+    // a reset with every worker asleep marks none of them, and one that wakes
+    // after it is seen
+    expect(await runtime.resetPool(globalThis.__escapeSab!)).toBe(true);
+    I32[AWAKE_2] = 1;
+    own.release(ring(2));
+    expect(own.collectCycles(50)).toBe(0);
+    I32[AWAKE_2] = 0;
+    expect(own.collectCycles()).toBe(2);
+    expect(live()).toBe(before);
+  });
 });
