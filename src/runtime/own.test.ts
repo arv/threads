@@ -156,6 +156,63 @@ describe('moving values', () => {
     }
   });
 
+  it('continues spawn rollback after a proxy throws on a prototype check', () => {
+    function proxySpawn(value: unknown, address: number) {
+      return [value, address];
+    }
+    own.register(import.meta.url, {proxySpawn});
+    const N = own.sharedStruct('ProxyRollbackArgument', ['n']),
+      a = own.newStruct(N),
+      proxy = new Proxy(
+        {},
+        {
+          getPrototypeOf() {
+            throw new Error('prototype trap');
+          },
+        },
+      );
+    try {
+      const value = {
+        get x() {
+          const before = T.heapStats();
+          expect(() => own.spawn(proxySpawn, proxy, own.countedRef(a))).toThrow(
+            /already serializing/,
+          );
+          const after = T.heapStats();
+          expect(after.allocated - before.allocated).toBe(1);
+          expect(after.freed - before.freed).toBe(1);
+          expect(runtime.I32[(a >> 2) + 1]).toBe(1);
+          return 42;
+        },
+      };
+      expect(move([123, value])).toEqual([123, {x: 42}]);
+    } finally {
+      own.release(a);
+    }
+  });
+
+  it('preserves the serialization error when a proxy also throws during rollback', () => {
+    const original = new Error('original prototype error');
+    let calls = 0;
+    const proxy = new Proxy(
+      {},
+      {
+        getPrototypeOf() {
+          if (++calls === 1) throw original;
+          throw new Error('rollback prototype error');
+        },
+      },
+    );
+    let failure: unknown;
+    try {
+      own.__message(proxy);
+    } catch (e) {
+      failure = e;
+    }
+    expect(failure).toBe(original);
+    expect(move({after: 42})).toEqual({after: 42});
+  });
+
   it('reclaims shared blobs when a freeze trap attempts a reentrant write', () => {
     const key = 'reentrantFreezePayload',
       name = runtime.$internRef(key);

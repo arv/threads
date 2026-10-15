@@ -313,7 +313,7 @@ function put(
       if (shared !== undefined) return boxWord(at, T_SHARED, shared);
     }
   } else {
-    if (v instanceof CountedArg) return boxWord(at, T_COUNTED, v.a);
+    if (__isCounted(v)) return boxWord(at, T_COUNTED, v.a);
     if (v.$cell !== undefined) {
       // a struct, SharedArray or map: the value holds a count of it, so it
       // outlives the sender's handle. a moved value's reader gives the count
@@ -588,7 +588,7 @@ export function __message(v: unknown, depth = 0): [number, number] {
   } catch (e) {
     // Channel sends pass their counted value directly; spawn passes an
     // array, whose counted arguments it rolls back itself.
-    if (v instanceof CountedArg) release(v.a);
+    if (__isCounted(v)) release(v.a);
     throw e;
   }
   const bytes = wn * 8;
@@ -1357,8 +1357,15 @@ export const moved: (a: number) => CountedArg = a => new CountedArg(a);
 // released when its function returns, or null, when the reader owns them (a
 // channel message's receiver)
 let countedInto: number[] | null = null;
-export const __isCounted: (v: unknown) => boolean = v =>
-  v instanceof CountedArg;
+export const __isCounted = (v: unknown): v is CountedArg => {
+  // instanceof can call a proxy's getPrototypeOf trap. Rollback must not
+  // replace the original error or skip the counted arguments after it.
+  try {
+    return v instanceof CountedArg;
+  } catch {
+    return false;
+  }
+};
 
 // boxing: where a struct or SharedArray value (an address) flows into `any` ,
 // `unknown` , a generic and the like, the compiler wraps it in this thread's
@@ -1835,7 +1842,7 @@ export function __start(fn: ThreadFn, args: unknown[], detached: boolean) {
   // retained for the thread (countedRef): its count is given back, as the
   // message would have carried it
   if (!$poolRunning()) {
-    for (const v of args) if (v instanceof CountedArg) release(v.a);
+    for (const v of args) if (__isCounted(v)) release(v.a);
     throw new Error(STOPPED);
   }
   const t = $allocBlock(32);
@@ -1849,7 +1856,7 @@ export function __start(fn: ThreadFn, args: unknown[], detached: boolean) {
     // No thread or message owns these yet. Serialization rolls back the
     // counts it took itself, but counted arguments arrived with theirs.
     $freeBlock(t, 32);
-    for (const v of args) if (v instanceof CountedArg) release(v.a);
+    for (const v of args) if (__isCounted(v)) release(v.a);
     throw e;
   }
   I32[(t + 16) >> 2] = a;
