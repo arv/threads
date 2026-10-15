@@ -341,7 +341,18 @@ interface Target {
   breaks: State[];
   continues: State[];
   tries: number; // the try statements open when the target was entered
-  closes?: boolean; // a for-of loop, whose iterator is closed when left early
+}
+
+// A scope that cleans up as control leaves it early, which may throw: a for-of
+// loop closes its iterator, a block with a `using` declaration disposes of its
+// value. That comes after the finallies inside the scope, and throws to the
+// try around it.
+interface Cleanup {
+  // the targets open as it was entered: a for-of loop's own is the next one,
+  // which a break leaves and a continue does not
+  targets: number;
+  loop: boolean;
+  tries: number; // the try statements open as it was entered
 }
 
 // A try statement being analyzed: the states with which control leaves its
@@ -385,8 +396,12 @@ const arrayMutators = new Set([
 
 // Reports whether a statement is a `using` or `await using` declaration.
 function isUsingDeclaration(node: Node): boolean {
-  if (node.kind !== K.VariableStatement) return false;
-  const scoped = node.declarationList.flags & NodeFlags.BlockScoped;
+  return node.kind === K.VariableStatement && isUsingList(node.declarationList);
+}
+
+// Reports whether a declaration list declares with `using` or `await using`.
+function isUsingList(list: Node): boolean {
+  const scoped = list.flags & NodeFlags.BlockScoped;
   return scoped === NodeFlags.Using || scoped === NodeFlags.AwaitUsing;
 }
 
@@ -421,23 +436,6 @@ function isMemberAccess(node: Node): boolean {
   return (
     n.kind === K.PropertyAccessExpression ||
     n.kind === K.ElementAccessExpression
-  );
-}
-
-// Reports whether evaluating an assignment's place may throw before its value
-// is made: a property or element of anything but a name, `this` or a literal,
-// or one by a key that is not one of those.
-function placeMayThrow(target: Node): boolean {
-  const n = skipOuterExpressions(target, OEK.Assertions | OEK.Parentheses);
-  if (!isMemberAccess(n)) return false;
-  const simple = (e: Node) =>
-    e.kind === K.Identifier ||
-    e.kind === K.ThisKeyword ||
-    e.kind === K.StringLiteral ||
-    e.kind === K.NumericLiteral;
-  return (
-    !simple(n.expression) ||
-    (n.kind === K.ElementAccessExpression && !simple(n.argumentExpression))
   );
 }
 
@@ -1146,9 +1144,7 @@ class FunctionAnalysis {
   thisFlags = 0;
   readonly targets: Target[] = [];
   readonly tries: TryContext[] = [];
-  // the blocks open with a `using` declaration, which dispose of its value as
-  // they are left
-  disposing = 0;
+  readonly cleanups: Cleanup[] = [];
   readonly building = new Set<Node>(); // closures whose value is being computed
 
   constructor(a: Analyzer, node: Node, result: FunctionResult) {
@@ -1196,13 +1192,18 @@ class FunctionAnalysis {
   statement(node: Node, s: State): void {
     switch (node.kind) {
       case K.Block: {
-        // a `using` declaration's value is disposed of as the block ends,
-        // which may throw
+        // a `using` declaration's value is disposed of as the block is left,
+        // which may throw: as it ends, or as a jump leaves it (see exit)
         const disposes = (node.statements as Node[]).some(isUsingDeclaration);
-        if (disposes) this.disposing++;
+        if (disposes)
+          this.cleanups.push({
+            targets: this.targets.length,
+            loop: false,
+            tries: this.tries.length,
+          });
         this.statements(node.statements, s);
         if (disposes) {
-          this.disposing--;
+          this.cleanups.pop();
           if (!s.unreachable) this.mayThrow(s);
         }
         break;
@@ -1243,14 +1244,8 @@ class FunctionAnalysis {
           const v = this.eval(node.expression, s);
           this.checkReturn(node.expression, v, s);
         }
-        // leaving a for-of loop closes its iterator, and a block with a
-        // `using` declaration disposes of its value: either may throw
-        if (this.disposing > 0 || this.targets.some(t => t.closes))
-          this.mayThrow(s);
         // out through the innermost try's finally first (see TryContext)
-        this.tries
-          .at(-1)
-          ?.exits.push({st: s.copy(), to: undefined, isBreak: false});
+        this.exit({st: s.copy(), to: undefined, isBreak: false});
         s.unreachable = true;
         break;
       case K.ThrowStatement:
@@ -1292,9 +1287,12 @@ class FunctionAnalysis {
   }
 
   variableDeclarationList(list: Node, s: State): void {
+    const using = isUsingList(list);
     for (const decl of list.declarations as Node[]) {
       let v = sharedValue;
       if (decl.initializer) v = this.eval(decl.initializer, s);
+      // a `using` declaration gets its value's dispose method, which may throw
+      if (using) this.mayThrow(s);
       this.bindName(decl.name, decl, v, s);
     }
   }
@@ -1368,10 +1366,6 @@ class FunctionAnalysis {
       } else if (!t.isLoop) {
         continue;
       }
-      // the for-of loops it leaves close their iterators, and a block with a
-      // `using` declaration may dispose of its value: either may throw
-      const left = this.targets.slice(isBreak ? i : i + 1);
-      if (this.disposing > 0 || left.some(l => l.closes)) this.mayThrow(s);
       this.exit({st: s.copy(), to: t, isBreak});
       break;
     }
@@ -1417,6 +1411,14 @@ class FunctionAnalysis {
     let headSignature = head.signature(a.idOf);
     let exit: State = State.unreachable();
     let breaks: State[] = [];
+    // a for-of loop left early closes its iterator (see exit)
+    const closes = node.kind === K.ForOfStatement;
+    if (closes)
+      this.cleanups.push({
+        targets: this.targets.length,
+        loop: true,
+        tries: this.tries.length,
+      });
     for (let iteration = 0; iteration < maxLoopIterations; iteration++) {
       let st = head.copy();
       const t: Target = {
@@ -1426,7 +1428,6 @@ class FunctionAnalysis {
         breaks: [],
         continues: [],
         tries: this.tries.length,
-        closes: node.kind === K.ForOfStatement,
       };
       this.targets.push(t);
       switch (node.kind) {
@@ -1481,6 +1482,7 @@ class FunctionAnalysis {
       if (nextSignature === headSignature) break;
       headSignature = nextSignature;
     }
+    if (closes) this.cleanups.pop();
     s.assign(joinAllStates(exit, breaks));
   }
 
@@ -1523,6 +1525,19 @@ class FunctionAnalysis {
   // leaves, if any, else on to its target (see TryContext)
   exit(e: Exit): void {
     const to = e.to;
+    // the scopes it leaves that clean up, innermost first, once it has gone
+    // through the tries inside them (their finallies have run): each may
+    // throw, to the try around it
+    const at = to === undefined ? -1 : this.targets.indexOf(to);
+    for (let k = this.cleanups.length - 1; k >= 0; k--) {
+      const c = this.cleanups[k]!;
+      const leaves =
+        to === undefined ||
+        at < c.targets ||
+        (c.loop && at === c.targets && e.isBreak);
+      if (!leaves || c.tries < this.tries.length) break;
+      this.mayThrow(e.st);
+    }
     if (to === undefined || this.tries.length > to.tries)
       this.tries.at(-1)?.exits.push(e);
     else (e.isBreak ? to.breaks : to.continues).push(e.st);
@@ -1895,10 +1910,20 @@ class FunctionAnalysis {
 
   evalBinary(node: Node, s: State): Value {
     const op = node.operatorToken.kind as K;
+    // a property or element is the place of an assignment: its object and
+    // key are evaluated once, before the value, and it is written after
+    const place = skipOuterExpressions(
+      node.left,
+      OEK.Assertions | OEK.Parentheses,
+    );
+    const member = isAssignmentOperator(op) && isMemberAccess(place);
     if (op === K.EqualsToken) {
-      // a place whose object or key is more than a name is evaluated, and may
-      // throw, before the value is made
-      if (placeMayThrow(node.left)) this.mayThrow(s);
+      if (member) {
+        const obj = this.evalPlace(place, s);
+        const v = this.eval(node.right, s);
+        this.writeMember(place, obj, v, s);
+        return v;
+      }
       const v = this.eval(node.right, s);
       this.assign(node.left, v, s);
       return v;
@@ -1908,6 +1933,16 @@ class FunctionAnalysis {
       op === K.BarBarEqualsToken ||
       op === K.QuestionQuestionEqualsToken
     ) {
+      if (member) {
+        const obj = this.evalPlace(place, s);
+        this.mayThrow(s); // its read, a getter's
+        const old = this.readMember(place, place.expression, obj, s);
+        const assigned = s.copy();
+        const v = assigned.mergeValues(old, this.eval(node.right, assigned));
+        this.writeMember(place, obj, v, assigned);
+        s.assign(joinStates(s, assigned));
+        return v;
+      }
       const old = this.eval(node.left, s);
       const assigned = s.copy();
       const v = assigned.mergeValues(old, this.eval(node.right, assigned));
@@ -1919,8 +1954,16 @@ class FunctionAnalysis {
       // Compound assignment: reads and writes the target. a property's read
       // (a getter's) may throw before the right side is made, its conversion
       // and its write (a setter's) after
+      if (member) {
+        const obj = this.evalPlace(place, s);
+        this.checkWrite(place, place.expression, obj);
+        this.mayThrow(s);
+        this.eval(node.right, s);
+        this.checkStillThere(place.expression, obj, s);
+        this.mayThrow(s);
+        return sharedValue;
+      }
       this.evalWriteTarget(node.left, s);
-      if (isMemberAccess(node.left)) this.mayThrow(s);
       this.eval(node.right, s);
       this.mayThrow(s);
       return sharedValue;
@@ -1992,16 +2035,9 @@ class FunctionAnalysis {
         return;
       }
       case K.PropertyAccessExpression:
-      case K.ElementAccessExpression: {
-        const obj = this.eval(target.expression, s);
-        if (target.kind === K.ElementAccessExpression)
-          this.eval(target.argumentExpression, s);
-        this.checkWrite(target, target.expression, obj);
-        this.mayThrow(s); // a setter's, or of null
-        if (obj.kind === ValueKind.InRegion && !s.isCounted(obj))
-          s.mergeValues(obj, v);
+      case K.ElementAccessExpression:
+        this.writeMember(target, this.evalPlace(target, s), v, s);
         return;
-      }
       case K.ArrayLiteralExpression:
         // each step of the iterator may throw, after the defaults and the
         // assignments before it; then the iterator is closed
@@ -2069,6 +2105,47 @@ class FunctionAnalysis {
         return;
     }
     this.eval(target, s);
+  }
+
+  // Evaluates the object of a property or element, and its key: what it is
+  // read from or written to.
+  evalPlace(place: Node, s: State): Value {
+    const obj = this.eval(place.expression, s);
+    if (place.kind === K.ElementAccessExpression)
+      this.eval(place.argumentExpression, s);
+    return obj;
+  }
+
+  // Writes a value into a property or element whose object (obj) was
+  // evaluated before the value was: a setter may throw, and the object may
+  // have been sent or consumed since.
+  writeMember(place: Node, obj: Value, v: Value, s: State): void {
+    this.checkStillThere(place.expression, obj, s);
+    this.checkWrite(place, place.expression, obj);
+    this.mayThrow(s); // a setter's, or of null
+    if (obj.kind === ValueKind.InRegion && !s.isCounted(obj))
+      s.mergeValues(obj, v);
+  }
+
+  // Reports an object written to after what was evaluated since it was read
+  // sent it or consumed it: by the variable it was read from, whose binding a
+  // consume() ends, else by its region.
+  checkStillThere(expr: Node, obj: Value, s: State): void {
+    let root = expr;
+    while (
+      root.kind === K.PropertyAccessExpression ||
+      root.kind === K.ElementAccessExpression ||
+      root.kind === K.NonNullExpression ||
+      root.kind === K.ParenthesizedExpression
+    )
+      root = root.expression;
+    if (root.kind === K.Identifier) {
+      const symbol = this.a.symbolOfIdentifier(root);
+      const bound = symbol && s.vars.get(symbol);
+      if (bound) this.checkUse(root, root.text, bound, s);
+      return;
+    }
+    this.checkUse(expr, expressionName(expr), obj, s);
   }
 
   // Reports a write to a property or element of a shared value. Fields of

@@ -264,8 +264,14 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(221,71): error TS96006: 'xs' may have been consumed by 'consume' on line 221.",
         "try-exits.ts(225,85): error TS96006: 'xs' may have been consumed by 'consume' on line 225.",
         "try-exits.ts(229,92): error TS96005: 'xs' was consumed by 'consume' on line 229.",
-        "try-exits.ts(233,75): error TS96005: 'xs' was consumed by 'consume' on line 233.",
+        "try-exits.ts(233,75): error TS96006: 'xs' may have been consumed by 'consume' on line 233.",
         "try-exits.ts(237,79): error TS96005: 'xs' was consumed by 'consume' on line 237.",
+        "try-exits.ts(242,73): error TS96006: 'xs' may have been consumed by 'consume' on line 242.",
+        "try-exits.ts(248,111): error TS96006: 'xs' may have been consumed by 'consume' on line 248.",
+        "try-exits.ts(252,102): error TS96006: 'xs' may have been consumed by 'consume' on line 252.",
+        "try-exits.ts(265,73): error TS96005: 'xs' was consumed by 'consume' on line 265.",
+        "try-exits.ts(269,75): error TS96006: 'xs' may have been consumed by 'consume' on line 269.",
+        "try-exits.ts(273,3): error TS96005: 'ys' was consumed by 'consume' on line 273.",
       ].sort(),
     );
   });

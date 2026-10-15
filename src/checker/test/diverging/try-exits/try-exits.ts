@@ -236,3 +236,39 @@ export function definedEnum() {
   let xs = [1];
   try { consume(xs); enum Late { A = getter.value } xs = [2]; } finally { use(xs); }  // error: its member may throw
 }
+// a `using` declaration gets its value's dispose method as it is declared
+export function usingAcquired() {
+  let xs = [1];
+  try { using held = (consume(xs), resource); xs = [2]; } finally { use(xs); }  // error: getting the method may throw
+}
+// a scope's cleanup comes as a jump leaves it, after the finallies inside it,
+// and throws to the try around it; a jump that stays inside cleans up nothing
+export function closedPastInnerCatch() {
+  let xs = [1];
+  try { for (const item of items) { try { consume(xs); break; } catch { xs = [2]; } } xs = [3]; } catch { use(xs); }  // error: closing throws to this catch
+}
+export function closedOnReturnPastInnerCatch() {
+  let xs = [1];
+  try { for (const item of items) { try { consume(xs); return; } catch { xs = [2]; } } } catch { use(xs); }  // error
+}
+export function jumpInsideUsing() {
+  let xs = [1];
+  try { { using held = resource; for (;;) { consume(xs); break; } xs = [2]; } } catch { use(xs); }  // fine: the break stays in the block
+}
+export function usingAroundTry() {
+  let xs = [1];
+  { using held = resource; try { consume(xs); return; } catch { use(xs); } }  // fine: disposing throws outside the try
+}
+// an assignment's place is evaluated before its value, once, and written after
+export function placeOnceBeforeValue() {
+  let xs = [1];
+  try { (xs = [2], kept).value = consume(xs); xs = [3]; } finally { use(xs); }  // error: the setter may throw
+}
+export function logicalPlaceOnce() {
+  let xs = [1];
+  try { (xs = [2], kept).value ??= consume(xs); xs = [3]; } finally { use(xs); }  // error
+}
+export function storedIntoWhatItConsumes() {
+  const ys: { next: unknown } = { next: null };
+  ys.next = consume(ys);                                      // error: ys is written after it is consumed
+}
