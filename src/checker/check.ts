@@ -93,8 +93,9 @@ export interface LoadedProgram {
   // the files of packages among them
   external: ReadonlySet<string>;
   esModule: boolean;
-  // the project's own files that are CommonJS modules: a .cts or .cjs, or
-  // with module node16 to nodenext, one its package.json makes CommonJS
+  // the project's own files that are CommonJS modules: all of them with a
+  // CommonJS module kind, a .cts or .cjs, or with module node16 to nodenext,
+  // one its package.json makes CommonJS
   commonJS: ReadonlySet<string>;
   diagnostics: Diagnostic[];
 }
@@ -174,7 +175,8 @@ export function loadProgram(
       (name, i) =>
         !metadata[i]?.isFromExternalLibrary &&
         !/\.d\.([^./]+\.)?[cm]?ts$/i.test(name) &&
-        (/\.c[jt]sx?$/i.test(name) ||
+        (!esModule ||
+          /\.c[jt]sx?$/i.test(name) ||
           (nodeModules &&
             metadata[i]?.impliedNodeFormat === ModuleKind.CommonJS)),
     ),

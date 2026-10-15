@@ -135,11 +135,12 @@ function compileProgram(
   for (const file of program.files) {
     // the project's own sources only: a package's are analyzed, not emitted
     if (program.external.has(file.fileName as string)) continue;
-    const esModule =
-      program.esModule && !program.commonJS.has(file.fileName as string);
+    // nor a CommonJS one, which is an error: the compile writes ES modules
+    // only
+    if (program.commonJS.has(file.fileName as string)) continue;
     const result = transformFile(resolver, file, {
       runtime: options.runtime,
-      esModule,
+      esModule: true,
       forceModule,
     });
     files.push({
@@ -162,18 +163,15 @@ function compileProgram(
       ].map(fromApi),
     );
   }
-  // a CommonJS file, which the compile would write ES module syntax into
-  // (with a module the runtime cannot work with, that is reported already)
-  const commonJS: Diagnostic[] = program.esModule
-    ? [...program.commonJS].map(fileName => ({
-        file: fileName,
-        start: 0,
-        line: 1,
-        col: 1,
-        code: Messages.CommonJSInput.code,
-        message: formatMessage(Messages.CommonJSInput, [basename(fileName)]),
-      }))
-    : [];
+  // each CommonJS file, which it does not compile
+  const commonJS: Diagnostic[] = [...program.commonJS].map(fileName => ({
+    file: fileName,
+    start: 0,
+    line: 1,
+    col: 1,
+    code: Messages.CommonJSInput.code,
+    message: formatMessage(Messages.CommonJSInput, [basename(fileName)]),
+  }));
   return {
     files,
     // the project's own (an option the runtime cannot work with, a CommonJS

@@ -217,17 +217,19 @@ describe('compile, where the fork does not', () => {
     }
   });
 
-  it("reports a module kind the runtime's helpers cannot be imported into, unchecked", () => {
+  it("reports a module kind the runtime's helpers cannot be imported into, and compiles none of its files", () => {
     const dir = project({'app.ts': APP}, {module: 'commonjs'});
     const result = compile(path.join(dir, 'tsconfig.json'), {
       runtime: 'threads',
       api,
     });
-    expect(result.diagnostics.map(d => d.code)).toContain(96014);
-    expect(result.files[0]!.changed).toBe(false);
+    expect(result.diagnostics.map(d => d.code).sort((a, b) => a - b)).toEqual([
+      96014, 96039,
+    ]);
+    expect(result.files).toEqual([]);
   });
 
-  it('reports a CommonJS file, which it would emit ES module syntax into', () => {
+  it('reports a CommonJS file, and compiles it not at all', () => {
     const options = {module: 'nodenext', moduleResolution: 'nodenext'};
     const dir = project(
       {
@@ -244,9 +246,10 @@ describe('compile, where the fork does not', () => {
     expect(
       result.diagnostics.map(d => [path.basename(d.file ?? ''), d.code]),
     ).toEqual([['tool.cts', 96039]]);
-    expect(result.files.find(f => f.fileName.endsWith('app.ts'))!.changed).toBe(
-      true,
-    );
+    expect(result.files.map(f => path.basename(f.fileName))).toEqual([
+      'app.ts',
+    ]);
+    expect(result.files[0]!.changed).toBe(true);
     // without "type": "module", a .ts is CommonJS too
     fs.writeFileSync(path.join(dir, 'package.json'), '{}\n');
     const commonJS = compile(path.join(dir, 'tsconfig.json'), {
@@ -256,6 +259,7 @@ describe('compile, where the fork does not', () => {
     expect(
       commonJS.diagnostics.map(d => path.basename(d.file ?? '')).sort(),
     ).toEqual(['app.ts', 'tool.cts']);
+    expect(commonJS.files).toEqual([]);
   });
 
   it("reports type errors in the project's declaration files", () => {
@@ -402,6 +406,24 @@ describe('threads-check compile', () => {
     expect(fs.readFileSync(path.join(dir, 'dist/view.jsx'), 'utf8')).toContain(
       '<div />',
     );
+  });
+
+  it('writes nothing for a CommonJS file, and exits 1', () => {
+    const dir = project(
+      {
+        'app.ts': `import {n} from './tool.cjs';\n${APP}export const m = n;\n`,
+        'tool.cts': 'export const n = 1;\n',
+        'package.json': '{"type": "module"}\n',
+      },
+      {module: 'nodenext', moduleResolution: 'nodenext', outDir: 'dist'},
+    );
+    const r = run(['-p', dir, '--runtime', 'threads']);
+    expect(r.stdout).toMatch(
+      /tool\.cts\(1,1\): error TS96039: 'tool\.cts' is a CommonJS module/,
+    );
+    expect(r.status).toBe(1);
+    expect(fs.existsSync(path.join(dir, 'dist/app.js'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'dist/tool.cjs'))).toBe(false);
   });
 
   it('reports the ownership errors, exits 1, and writes the files all the same', () => {
