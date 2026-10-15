@@ -314,6 +314,9 @@ describe('threads-check, where it differs from the fork', () => {
         "try-exits.ts(462,14): error TS96003: 'Derived' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 461.",
         "try-exits.ts(469,10): error TS96003: 'C' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 468.",
         "try-exits.ts(475,10): error TS96003: 'K' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 474.",
+        "try-exits.ts(495,7): error TS96003: 'b' cannot be used here: it shares objects with 'a.items', which was sent to 'send' on line 494.",
+        "try-exits.ts(501,23): error TS96001: 'xs' cannot be used here: it was sent to 'send' on line 502.",
+        "try-exits.ts(503,14): error TS96003: 'C' cannot be used here: it shares objects with 'xs', which was sent to 'send' on line 502.",
       ].sort(),
     );
   });

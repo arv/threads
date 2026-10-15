@@ -487,3 +487,24 @@ export function optionalWithDefault() {
   let xs = [1];
   try { const { a: { [(xs = [2], "b")]: y } = (consume(xs), { b: "" }) } = optional; use(y); } finally { use(xs); }  // fine
 }
+// instance code that names its class reaches its static state
+export function instancesShareStatic(ch: Channel<number[]>) {
+  class C { static xs = [1]; items = C.xs; }
+  const a = new C(), b = new C();
+  ch.send(a.items);
+  use(b.items);                                               // error: both are C.xs
+}
+// `new` makes an instance of the class the name holds now
+export function reassignedClass(ch: Channel<number[]>) {
+  const xs = [1];
+  let C = class { items = [2]; };
+  C = class { items = xs; };
+  ch.send(xs);
+  return new C();                                             // error: its initializer captures xs
+}
+// `==` and `!=` between objects convert nothing
+declare const otherObj: object;
+export function looseObjects() {
+  let xs = [1];
+  try { consume(xs); void (someObj == otherObj); void (someObj != otherObj); xs = [2]; } finally { use(xs); }  // fine
+}

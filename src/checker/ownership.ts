@@ -584,6 +584,7 @@ class Analyzer {
   readonly loopFresh = new Map<Node, Set<TsSymbol>>();
   readonly primitiveOrShared = new Map<Type, boolean>();
   readonly blockScoped = new Map<Node, Set<number>>();
+  readonly namesTheirClass = new Map<Node, boolean>();
   readonly idOf: (symbol: TsSymbol) => number;
 
   constructor(c: Own) {
@@ -1318,6 +1319,42 @@ class Analyzer {
       visit(child, fn.kind === K.ArrowFunction);
     });
     return captures;
+  }
+
+  // Reports whether a class's instance code (its methods, accessors,
+  // constructor and instance fields) names the class itself.
+  instancesNameTheirClass(cls: Node): boolean {
+    let result = this.namesTheirClass.get(cls);
+    if (result !== undefined) return result;
+    const self = this.c.host.symbolOfDeclaration(cls);
+    const id = self && this.idOf(self);
+    let found = false;
+    const visit = (node: Node): boolean => {
+      if (found || isTypeNode(node)) return found;
+      if (node.kind === K.Identifier && isOwnValueReference(node)) {
+        const symbol = this.symbolOfIdentifier(node);
+        if (symbol && id !== undefined && this.idOf(symbol) === id)
+          found = true;
+        return found;
+      }
+      forEachChild(node, visit);
+      return found;
+    };
+    for (const m of cls.members as Node[]) {
+      const isStatic = ((m.modifiers ?? []) as Node[]).some(
+        x => x.kind === K.StaticKeyword,
+      );
+      if (m.kind === K.ClassStaticBlockDeclaration || isStatic) continue;
+      for (const part of [
+        ...((m.parameters ?? []) as Node[]),
+        m.body,
+        m.initializer,
+      ] as (Node | undefined)[])
+        if (part) visit(part);
+    }
+    result = found;
+    this.namesTheirClass.set(cls, result);
+    return result;
   }
 
   // The variables with a fresh binding in each iteration of a loop: those its
@@ -2405,6 +2442,21 @@ class FunctionAnalysis {
     const nullishOnly = (t: Type) =>
       !!(t.flags & (TypeFlags.Null | TypeFlags.Undefined | TypeFlags.Void)) &&
       !(t.flags & TypeFlags.Union);
+    // an object or null or undefined: two of them compare with no conversion
+    const host = this.a.c.host;
+    const objectLike = (t: Type): boolean =>
+      t.flags & TypeFlags.Union
+        ? host.memberTypes(t).every(objectLike)
+        : !!(
+            t.flags &
+            (TypeFlags.Object |
+              TypeFlags.NonPrimitive |
+              TypeFlags.Null |
+              TypeFlags.Undefined |
+              TypeFlags.Void)
+          ) ||
+          (!!(t.flags & TypeFlags.Intersection) &&
+            host.memberTypes(t).every(objectLike));
     if (
       op !== K.EqualsEqualsEqualsToken &&
       op !== K.ExclamationEqualsEqualsToken &&
@@ -2412,7 +2464,9 @@ class FunctionAnalysis {
       !(
         (op === K.EqualsEqualsToken || op === K.ExclamationEqualsToken) &&
         (nullishOnly(this.a.typeOf(node.left)) ||
-          nullishOnly(this.a.typeOf(node.right)))
+          nullishOnly(this.a.typeOf(node.right)) ||
+          (objectLike(this.a.typeOf(node.left)) &&
+            objectLike(this.a.typeOf(node.right))))
       ) &&
       (op === K.InKeyword ||
         op === K.InstanceOfKeyword ||
@@ -2985,9 +3039,10 @@ class FunctionAnalysis {
     // an instance of a class defined here holds what the class's code
     // captures (its bases' too), not the class itself: its static state, and
     // the other instances, are no part of it
-    const cls = this.classDefinedAs(node.expression, v, s);
-    if (cls) regions.push(...this.instanceCaptures(cls, s));
-    else if (v.kind === ValueKind.InRegion) regions.push(v.region);
+    const classes = this.classesDefinedAs(node.expression, v, s);
+    for (const cls of classes) regions.push(...this.instanceCaptures(cls, s));
+    if (classes.length === 0 && v.kind === ValueKind.InRegion)
+      regions.push(v.region);
     const decl = a.signatureDeclarationOf(node);
     const params = signatureParameters(decl);
     const name = calleeName(node.expression);
@@ -3024,31 +3079,35 @@ class FunctionAnalysis {
     return regionValue(s.find(r));
   }
 
-  // The class a `new` 's callee is, if it is one defined in this function: by
-  // the declaration its name refers to, else by its value's region.
-  classDefinedAs(callee: Node, v: Value, s: State): Node | undefined {
+  // The classes a `new` 's callee may be, of those defined in this function:
+  // the one a name that is never given another refers to (a class's, a
+  // const's), else every one whose value's region the callee's value is in
+  // (after a join, it may be either).
+  classesDefinedAs(callee: Node, v: Value, s: State): Node[] {
     const host = this.a.c.host;
     const expr = skipOuterExpressions(callee, OEK.All);
     if (expr.kind === K.Identifier) {
       const symbol = this.a.symbolOfIdentifier(expr);
       const decl = symbol && host.valueDeclaration(symbol);
-      const node =
+      const fixed =
         decl?.kind === K.ClassDeclaration
           ? decl
           : decl?.kind === K.VariableDeclaration &&
+              (decl.parent as Node).flags & NodeFlags.Const &&
               decl.initializer &&
               skipOuterExpressions(decl.initializer, OEK.All).kind ===
                 K.ClassExpression
             ? skipOuterExpressions(decl.initializer, OEK.All)
             : undefined;
-      if (node && this.classes.some(c => c.node === node)) return node;
+      if (fixed && this.classes.some(c => c.node === fixed)) return [fixed];
     }
-    if (v.kind !== ValueKind.InRegion) return undefined;
+    if (v.kind !== ValueKind.InRegion) return [];
     const root = s.find(v.region);
-    for (let k = this.classes.length - 1; k >= 0; k--)
-      if (s.find(this.classes[k]!.region) === root)
-        return this.classes[k]!.node;
-    return undefined;
+    return [
+      ...new Set(
+        this.classes.filter(c => s.find(c.region) === root).map(c => c.node),
+      ),
+    ];
   }
 
   // The regions a new instance of a class shares: what its code captures, a
@@ -3061,6 +3120,11 @@ class FunctionAnalysis {
       seen.add(n);
       const own = this.closureValue(n, s);
       if (own.kind === ValueKind.InRegion) regions.push(own.region);
+      // code of its instances that names the class reaches its static state
+      if (this.a.instancesNameTheirClass(n)) {
+        const cls = [...this.classes].reverse().find(c => c.node === n);
+        if (cls) regions.push(cls.region);
+      }
       const base = this.bases.get(n);
       if (!base) break;
       const baseClass =
