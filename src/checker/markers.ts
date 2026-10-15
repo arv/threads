@@ -22,7 +22,10 @@ import type {Signature, TsSymbol, Type} from './host.ts';
 import {getCellType, getFieldKind, isFieldType} from './layout.ts';
 import {Messages} from './messages.ts';
 import {
+  FunctionFlags,
   forEachChild,
+  getFunctionFlags,
+  isFunctionLike,
   isPropertyNameLiteral,
   isThisParameter,
   K,
@@ -630,6 +633,20 @@ export function getStructRegistry(c: Own): Map<Type, Node> {
       ) {
         const t = getStructTypeOfCall(c, node);
         if (t) structs.set(t, node);
+        // Contextual ThisType and the returned mapped instance type can be
+        // distinct TypeScript types, even though they describe this struct.
+        for (const method of structMethods(node)) {
+          if ((method.parameters as Node[]).some(isThisParameter)) continue;
+          const receiver = (child: Node): void => {
+            if (
+              child.kind === K.ThisKeyword &&
+              structReceiver(c, child) === method
+            )
+              structs.set(c.host.typeOf(child), node);
+            forEachChild(child, receiver);
+          };
+          forEachChild(method, receiver);
+        }
       }
       return forEachChild(node, visit);
     };
@@ -640,7 +657,7 @@ export function getStructRegistry(c: Own): Map<Type, Node> {
 
 // The type of the values of the struct a `struct(...)` call declares: T in
 // StructType<T>.
-function getStructTypeOfCall(c: Own, call: Node): Type | undefined {
+export function getStructTypeOfCall(c: Own, call: Node): Type | undefined {
   const t = c.host.typeOf(call);
   if (
     !t ||
@@ -649,6 +666,74 @@ function getStructTypeOfCall(c: Own, call: Node): Type | undefined {
   )
     return undefined;
   return c.host.typeArguments(t)[0];
+}
+
+// A declaration's methods belong to the struct, not its shared layout.
+export function structMethods(call: Node): Node[] {
+  const literal = call.arguments?.[0] && skipParentheses(call.arguments[0]);
+  return literal?.kind === K.ObjectLiteralExpression
+    ? (literal.properties as Node[]).filter(p => p.kind === K.MethodDeclaration)
+    : [];
+}
+
+// A literal key, or the type of a computed key. Unique symbol types preserve
+// identity; broad key types describe names that are only known at runtime.
+export function structMethodKey(
+  c: Own,
+  method: Node,
+): string | Type | undefined {
+  const name = method.name as Node | undefined;
+  if (!name) return undefined;
+  if (isPropertyNameLiteral(name))
+    return name.kind === K.NumericLiteral
+      ? String(Number(name.text))
+      : name.text;
+  if (name.kind !== K.ComputedPropertyName) return undefined;
+  const type = c.host.typeOf(name.expression);
+  if (type.isStringLiteralType()) return type.value;
+  if (type.isNumberLiteralType()) return String(type.value);
+  return type;
+}
+
+export function isStructMethod(c: Own, node: Node | undefined): boolean {
+  if (node?.kind !== K.MethodDeclaration) return false;
+  const literal = node.parent;
+  const call = literal && walkUpParenthesizedExpressions(literal.parent);
+  return (
+    call?.kind === K.CallExpression &&
+    skipParentheses(call.arguments[0]) === literal &&
+    getCallMarker(c, call) === 'struct'
+  );
+}
+
+export function isStructConstructor(c: Own, node: Node | undefined): boolean {
+  return isStructMethod(c, node) && node!.name?.text === 'constructor';
+}
+
+// The receiver inherited by an arrow, but never by a nested ordinary function.
+export function structReceiver(c: Own, node: Node): Node | undefined {
+  for (
+    let child = node,
+      parent: Node | undefined = node.parent as Node | undefined;
+    parent;
+    child = parent, parent = parent.parent as Node | undefined
+  ) {
+    // Class field initializers and static blocks have their own receiver.
+    // Heritage expressions and computed names still use the outer receiver.
+    if (
+      (parent.kind === K.PropertyDeclaration && child === parent.initializer) ||
+      parent.kind === K.ClassStaticBlockDeclaration
+    )
+      return undefined;
+    if (
+      !isFunctionLike(parent) ||
+      parent.kind === K.ArrowFunction ||
+      child === parent.name
+    )
+      continue;
+    return isStructMethod(c, parent) ? parent : undefined;
+  }
+  return undefined;
 }
 
 // The layout of the struct a `struct(...)` call declares: its fields in the
@@ -783,8 +868,63 @@ export function checkStructCall(c: Own, call: Node): void {
     c.error(call.arguments[0], Messages.StructField);
     return;
   }
+  const binding = walkUpParenthesizedExpressions(call.parent);
+  const topLevel =
+    binding?.kind === K.VariableDeclaration &&
+    binding.name.kind === K.Identifier &&
+    binding.parent?.kind === K.VariableDeclarationList &&
+    !!(binding.parent.flags & NodeFlags.Const) &&
+    binding.parent.parent?.kind === K.VariableStatement &&
+    binding.parent.parent.parent?.kind === K.SourceFile;
+  const memberNames = new Set<string | Type>();
   for (const property of literal.properties as Node[]) {
     const name = property.name as Node | undefined;
+    if (property.kind === K.MethodDeclaration) {
+      const key = structMethodKey(c, property);
+      const knownKey =
+        typeof key === 'string' ||
+        !!(key && key.flags & TypeFlags.UniqueESSymbol);
+      if (name?.kind === K.ComputedPropertyName && key === 'constructor')
+        c.error(property, Messages.StructConstructor);
+      const explicitThis = (property.parameters as Node[]).find(
+        isThisParameter,
+      );
+      if (explicitThis) {
+        const receiver = c.host.typeOf(explicitThis);
+        const matches =
+          receiver === t ||
+          (!!(receiver.flags & TypeFlags.Intersection) &&
+            c.host.memberTypes(receiver).includes(t));
+        if (!matches) c.error(explicitThis, Messages.StructMethod);
+      }
+      if (
+        key === undefined ||
+        key === '$cell' ||
+        (getFunctionFlags(property) & FunctionFlags.Generator) !== 0 ||
+        (key === 'constructor' &&
+          ((getFunctionFlags(property) & FunctionFlags.Async) !== 0 ||
+            property.typeParameters?.length > 0)) ||
+        !topLevel ||
+        (knownKey && memberNames.has(key))
+      )
+        c.error(property, Messages.StructMethod);
+      if (knownKey && key !== undefined) memberNames.add(key);
+      const checkSuper = (child: Node): void => {
+        if (
+          child.kind === K.SuperKeyword &&
+          structReceiver(c, child) === property
+        )
+          c.error(child, Messages.StructMethod);
+        forEachChild(child, checkSuper);
+      };
+      forEachChild(property, checkSuper);
+      continue;
+    }
+    if (name) memberNames.add(name.text);
+    if (name?.text === 'constructor') {
+      c.error(property, Messages.StructConstructor);
+      continue;
+    }
     if (
       !name ||
       !(

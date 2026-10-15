@@ -23,56 +23,63 @@ import {
   type Thread,
 } from '@arv/threads';
 
-interface SharedVector {
-  length: number;
-  grows: number;
-  data: SharedArray<number> | null;
-}
-const SharedVector = struct<SharedVector>({
-  length: f64,
-  grows: f64,
-  data: ref<SharedArray<number>>(),
-});
+// The constructor and methods are local to each worker; only these three
+// fields use shared storage. Construction starts with zero length and growth count,
+// then allocates the backing array. The explicit identity also lets the
+// example run with types erased.
+const SharedVector = struct(
+  {
+    length: f64,
+    grows: f64,
+    data: ref<SharedArray<number>>(),
 
-/** An empty vector with room for `capacity` numbers. */
-function vector(capacity = 8): SharedVector {
-  const v = new SharedVector();
-  v.data = new SharedArray(Number, capacity);
-  return v;
-}
+    constructor(capacity = 8) {
+      if (!Number.isInteger(capacity) || capacity < 1)
+        throw new RangeError('capacity must be a positive integer');
+      this.data = new SharedArray(Number, capacity);
+    },
 
-/** Appends x, growing the vector when it is full. One thread at a time. */
-function push(v: SharedVector, x: number) {
-  let data = v.data!;
-  if (v.length === data.length) {
-    const bigger = new SharedArray(Number, data.length * 2);
-    for (let i = 0; i < v.length; i++) bigger[i] = data[i];
-    // the old array is freed once no thread can still be reading it
-    v.data = bigger;
-    v.grows++;
-    data = bigger;
-  }
-  data[v.length] = x;
-  v.length++;
-}
+    /** Appends x, growing the vector when it is full. One thread at a time. */
+    push(x: number): void {
+      let data = this.data!;
+      if (this.length === data.length) {
+        const bigger = new SharedArray(Number, data.length * 2);
+        for (let i = 0; i < this.length; i++) bigger[i] = data[i];
+        // the old array is freed once no thread can still be reading it
+        this.data = bigger;
+        this.grows++;
+        data = bigger;
+      }
+      data[this.length] = x;
+      this.length++;
+    },
 
-/** Element i. */
-function at(v: SharedVector, i: number): number {
-  const data = v.data!;
-  if (!(i >= 0 && i < v.length && i < data.length))
-    throw new RangeError(
-      `index ${i} is out of range for a vector of ${v.length}`,
-    );
-  return data[i];
-}
+    /** Element i. */
+    at(i: number): number {
+      const data = this.data!;
+      if (!(i >= 0 && i < this.length && i < data.length))
+        throw new RangeError(
+          `index ${i} is out of range for a vector of ${this.length}`,
+        );
+      return data[i];
+    },
 
-/** The elements, copied into an ordinary array. */
-function toArray(v: SharedVector): number[] {
-  const data = v.data!,
-    out: number[] = [];
-  for (let i = 0; i < v.length; i++) out.push(data[i]);
-  return out;
-}
+    /** The elements, copied into an ordinary array. */
+    toArray(): number[] {
+      const data = this.data!,
+        out: number[] = [];
+      for (let i = 0; i < this.length; i++) out.push(data[i]);
+      return out;
+    },
+
+    /** Iterate a snapshot, copied when iteration starts. */
+    [Symbol.iterator](): ArrayIterator<number> {
+      return this.toArray().values();
+    },
+  },
+  '@arv/threads/examples/shared-vector',
+);
+type SharedVector = Struct<typeof SharedVector>;
 
 // ---- a demo: writers pushing into one vector while a reader reads it ----
 
@@ -89,7 +96,7 @@ function writer(
 ) {
   for (let k = 0; k < count; k++) {
     lock.recv(); // take the token: no one else pushes now
-    push(v, first + k);
+    v.push(first + k);
     lock.send(0); // give it back
   }
 }
@@ -112,17 +119,19 @@ function reader(v: SharedVector, flag: Flag, max: number): number {
 }
 
 export function main(threadCounts: readonly number[]) {
-  // one thread: a million pushes into a vector that starts with room for eight
+  // The default constructor capacity is eight.
+  // One thread: a million pushes, growing the backing array as needed.
   const t0 = performance.now(),
-    one = vector();
-  for (let i = 0; i < 1_000_000; i++) push(one, i);
+    one = new SharedVector();
+  for (let i = 0; i < 1_000_000; i++) one.push(i);
   log(
     `one thread: 1000000 pushes in ${(performance.now() - t0).toFixed(0)} ms, ${one.grows} grows, ` +
-      `capacity ${one.data!.length}, element 999999 is ${at(one, 999_999)}`,
+      `capacity ${one.data!.length}, element 999999 is ${one.at(999_999)}`,
   );
 
   for (const threads of threadCounts) {
-    const v = vector(),
+    // A constructor argument chooses the initial capacity for this run.
+    const v = new SharedVector(16),
       lock = new Channel<number>(1),
       flag = new Flag(),
       total = threads * PER_WRITER;
@@ -144,7 +153,7 @@ export function main(threadCounts: readonly number[]) {
     const seen = new Uint8Array(total);
     let missing = 0,
       twice = 0;
-    for (const x of toArray(v)) {
+    for (const x of v) {
       if (seen[x]++) twice++;
     }
     for (let x = 0; x < total; x++) if (!seen[x]) missing++;

@@ -234,6 +234,15 @@ names carry the ownership rules:
   `struct({...})`. For a struct that refers to itself, you use
   `struct<I>({...})` with an interface.
 
+A struct can also declare a synchronous `constructor` and prototype methods.
+Construction zeroes its fields before running the constructor; methods live on
+each worker's local prototype. Declare these structs in top-level `const`s and
+import their modules in every worker that constructs them or calls their
+methods. Compiled calls pass the shared address directly. The
+[SharedVector example](https://github.com/arv/threads/blob/main/playground/programs/shared-vector.ts)
+uses this API to allocate a backing array in its constructor and grow it in
+`push`.
+
 Two tools add what the types can't say:
 
 - **The ownership checker,**

@@ -165,8 +165,21 @@ Then come the bigger examples:
 - The nearest-centers example from [the tutorial](../TUTORIAL.md)
 - What channels cost
 - Reference counting under a race
-- A growable `SharedVector`, written in user space on the API
+- A growable `SharedVector` with a constructor and methods, written in user
+  space on the API
 - The mistakes the checker catches
+
+The [SharedVector demo](programs/shared-vector.ts) declares a shared struct with
+`constructor(capacity = 8)`, `push`, `at`, `toArray`, and `[Symbol.iterator]()`.
+`new SharedVector()` uses the default capacity; `new SharedVector(16)` starts
+with room for sixteen. Only its length, growth count, and backing-array
+reference are shared. Each worker loads the constructor and methods locally, and
+the explicit declaration identity lets both **Compiled** and **Types erased**
+modes find the same struct. Writers take a channel token before calling `push`;
+methods do not lock by themselves. Iteration copies a snapshot when it starts;
+the demo uses `for (const x of v)` to check the vector's contents. The demo
+checks a million sequential pushes, then concurrent writers and a reader,
+reporting missing, duplicate, and invalid values.
 
 ### How Fast They Run
 

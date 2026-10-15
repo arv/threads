@@ -13,10 +13,96 @@ joining a thread, or an atomic operation is what orders them.
 
 |                                                                          |                                                                                                                                                                                                                                   |
 | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `struct({ x: f64, n: i32, done: bool, name: str, next: ref<T>() })`      | A shared struct type. `new S()` makes a zeroed one, and `Struct<typeof S>` is the type of its values.                                                                                                                             |
+| `struct({ x: f64, n: i32, done: bool, name: str, next: ref<T>() })`      | A shared struct type. `new S(...args)` zeroes its fields, then runs its optional constructor. `Struct<typeof S>` is the instance type.                                                                                            |
 | `f64`, `i32`, `u8`, `bool`, `str`, `ref<T>()`                            | Field kinds: a number, a 32-bit integer, a byte, a boolean, a string (interned), and a reference to a struct, a SharedArray, a Channel, a Lock or a Condition (or null).                                                          |
 | `new SharedArray(Number \| i32 \| u8 \| Boolean \| String \| S, length)` | A fixed-length array of numbers, i32s, bytes, booleans, strings or structs, stored inline.                                                                                                                                        |
 | `atomic.add(s, "field", v)`, `atomic.add(array, i, v)`                   | An atomic operation on an `i32` field or on an element of a `SharedArray<i32>`: `load`, `store`, `add`, `sub`, `and`, `or`, `xor`, `exchange`, `compareExchange`, `wait` and `notify`. Compiled, it's that `Atomics` call itself. |
+
+## Methods
+
+A struct declaration can contain methods alongside its field markers. `this` has
+the struct's instance type, including its other methods:
+
+```ts
+const Counter = struct({
+  value: f64,
+  constructor(value = 0) {
+    this.value = value;
+  },
+  add(amount: number): number {
+    this.value += amount;
+    return this.value;
+  },
+});
+type Counter = Struct<typeof Counter>;
+
+const counter = new Counter(10);
+counter.add(3);
+```
+
+Only fields take space in shared memory. Each worker loads the defining module
+and installs methods on its own local prototype. Compiled calls pass the shared
+address directly, and boxed values use the prototype methods. Methods can call
+other methods, return references to structs, and be async. An arrow that
+captures `this` keeps the receiver alive.
+
+An extracted method keeps ordinary, unbound `this`. Use `call`, `apply`, or
+`bind` with an instance of its declaring struct:
+
+```ts
+const add = counter.add;
+add.call(counter, 2);
+const boundAdd = add.bind(counter);
+boundAdd(1);
+```
+
+A missing receiver, a plain object, or an instance of another struct is
+rejected, even if it has the same fields. The
+[TC39 structs proposal](https://github.com/tc39/proposal-structs#structs) calls
+this receiver restriction **non-generic**; the term does not refer to TypeScript
+type parameters. Struct inheritance is not supported here.
+
+Methods support computed property names such as `[methodName]()`, `[1 + 2]()`,
+and `[Symbol.iterator]()`. Names can evaluate to strings, numbers, or symbols;
+each name expression and its property-key coercion run once, in source order.
+Returning an iterator makes the struct usable with `for...of`, spread, and
+`Array.from`. These methods live on local prototypes and use no shared field
+storage. SharedVector implements snapshot iteration this way. Initializers use
+`constructor(...) { ... }` syntax; computed methods cannot declare a
+constructor.
+
+Declare a struct with a constructor or methods in a top-level `const`. Methods
+are fixed after declaration: they cannot be replaced or shadowed on an instance.
+Getters, setters, generators, `super`, and private members are not supported.
+Methods do not acquire a lock automatically; callers must still order concurrent
+writes.
+
+The compiler identifies each declaration by its module and binding name, so
+unrelated structs with identical fields can have different behavior. For code
+run with only its types erased, provide a stable, module-qualified identity as
+the second argument, for example
+`struct({ /* fields, constructor and methods */ }, 'my-package/counter#Counter')`.
+Use the same identity and layout on every worker, and import the defining module
+before constructing instances or calling methods. The
+[SharedVector example](https://github.com/arv/threads/blob/main/playground/programs/shared-vector.ts)
+shows both execution modes.
+
+## Constructors
+
+`new S(...args)` zeroes every field before calling `constructor(...args)` on the
+new instance: numeric fields become `0`, booleans `false`, strings `''`, and
+references `null`. Constructors are synchronous, cannot declare type parameters,
+and may call methods or publish `this`. Their return values are evaluated and
+discarded. If a constructor throws, construction releases its ownership of the
+instance; any references it published remain valid. Boxed handles follow the
+usual garbage collection rules.
+
+Constructor arguments are inferred from the declaration, including defaults and
+rest parameters. With an explicit instance interface, use a second type argument
+to check the argument tuple, for example `struct<Node, [value: number]>(...)`.
+`Struct<typeof S>` describes the instance without its initializer, and
+`StructType<T, Args>` describes the constructor. Inline elements created by
+`new SharedArray(S, n)` are zeroed without running user constructors.
 
 ## Integers
 

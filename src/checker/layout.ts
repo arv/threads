@@ -41,6 +41,10 @@ import {
   getStructOfCall,
   getStructRegistry,
   isAssignableToCell,
+  isStructConstructor,
+  structMethodKey,
+  getStructTypeOfCall,
+  structMethods,
 } from './markers.ts';
 import {Messages} from './messages.ts';
 import {
@@ -78,17 +82,108 @@ function getStructOfType(c: Own, t: Type | undefined): StructInfo | undefined {
   if (!t) return undefined;
   if (c.structOfType.has(t)) return c.structOfType.get(t);
   let result: StructInfo | undefined;
-  if (t.flags & TypeFlags.Intersection) {
+  const registered = getStructRegistry(c).get(t);
+  if (registered) result = getStructOfCall(c, registered);
+  else if (t.flags & TypeFlags.Intersection) {
     for (const member of c.host.memberTypes(t)) {
       result = getStructOfType(c, member);
       if (result) break;
     }
-  } else if (t.flags & TypeFlags.Object) {
-    const call = getStructRegistry(c).get(t);
-    if (call) result = getStructOfCall(c, call);
   }
   c.structOfType.set(t, result);
   return result;
+}
+
+// Direct calls and extracted methods use the compiler's raw calling convention.
+interface StructMethodAccess {
+  receiver: Node;
+  name: string;
+  key?: Node;
+}
+
+function methodKeyMatches(
+  c: Own,
+  name: string | Type,
+  declared: string | Type | undefined,
+): boolean {
+  if (declared === name) return true;
+  if (declared === undefined || typeof declared === 'string') return false;
+  if (declared.isStringLiteralType())
+    return typeof name === 'string'
+      ? name === declared.value
+      : c.host.checker.isTypeAssignableTo(declared, name);
+  if (declared.isNumberLiteralType())
+    return typeof name === 'string'
+      ? name === String(declared.value)
+      : c.host.checker.isTypeAssignableTo(declared, name);
+  if (declared.flags & TypeFlags.Union)
+    return c.host.memberTypes(declared).some(t => methodKeyMatches(c, name, t));
+  if (typeof name === 'string')
+    return !!(
+      declared.flags & (TypeFlags.StringLike | TypeFlags.Any) ||
+      (declared.flags & TypeFlags.NumberLike && String(Number(name)) === name)
+    );
+  return (
+    c.host.checker.isTypeAssignableTo(name, declared) ||
+    c.host.checker.isTypeAssignableTo(declared, name)
+  );
+}
+
+export function getStructMethodCall(
+  c: Own,
+  node: Node,
+): StructMethodAccess | undefined {
+  if (node.kind !== K.CallExpression) return undefined;
+  return getStructMethodAccess(c, skipParentheses(node.expression));
+}
+
+export function getStructMethodAccess(
+  c: Own,
+  access: Node,
+): StructMethodAccess | undefined {
+  let names: (string | Type)[];
+  let key: Node | undefined;
+  if (access.kind === K.PropertyAccessExpression) names = [access.name.text];
+  else if (access.kind === K.ElementAccessExpression) {
+    key = access.argumentExpression as Node;
+    const type = c.host.typeOf(key);
+    const keys =
+      type.flags & TypeFlags.Union ? c.host.memberTypes(type) : [type];
+    names = keys.map(t =>
+      t.isStringLiteralType()
+        ? t.value
+        : t.isNumberLiteralType()
+          ? String(t.value)
+          : t,
+    );
+  } else return undefined;
+  if (names.length === 0) return undefined;
+  if (names.includes('constructor')) return undefined;
+  const members = nonNullishMembers(c, c.host.typeOf(access.expression));
+  if (
+    members.length === 0 ||
+    !members.every(t => {
+      const info = getStructOfType(c, t);
+      return (
+        info?.decl &&
+        names.every(name =>
+          structMethods(info.decl!).some(m => {
+            const declared = structMethodKey(c, m);
+            if (declared === name) return true;
+            if (c.host.callSignatures(c.host.typeOf(access)).length === 0)
+              return false;
+            return methodKeyMatches(c, name, declared);
+          }),
+        )
+      );
+    })
+  )
+    return undefined;
+  return {
+    receiver: access.expression,
+    name: typeof names[0] === 'string' ? names[0] : '',
+    key,
+  };
 }
 
 // The element type of a SharedArray type, if t is one.
@@ -407,7 +502,14 @@ function setTarget(c: Own, expr: Node | undefined, targetRaw: boolean): void {
   if (targetRaw && !sourceRaw && nonNullishMembers(c, t).length > 0) {
     c.conversions.set(expr, Conversion.Unbox);
   } else if (targetRaw && isNullishOnly(c, t)) {
-    c.conversions.set(expr, Conversion.Zero);
+    // Raw references use 0 for null, but keep JavaScript's undefined so
+    // default parameters and forwarding have their ordinary semantics.
+    if (t.flags & TypeFlags.Undefined) c.conversions.delete(expr);
+    else
+      c.conversions.set(
+        expr,
+        t.flags & TypeFlags.Null ? Conversion.Zero : Conversion.Unbox,
+      );
   } else if (!targetRaw && sourceRaw) {
     c.conversions.set(expr, Conversion.Box);
   } else {
@@ -753,6 +855,46 @@ function unfit(
       if (why)
         return `field '${to.fields[k]}' of '${from.name}' refers to what that of '${to.name}' cannot stand for: ${why}`;
     }
+    const source = from.decl && getStructTypeOfCall(c, from.decl);
+    const target = to.decl && getStructTypeOfCall(c, to.decl);
+    if (source && target) {
+      const checker = c.host.checker;
+      const properties = checker.getPropertiesOfType(source);
+      for (const property of checker.getPropertiesOfType(target)) {
+        if (
+          property.name === 'constructor' ||
+          to.fields.includes(property.name)
+        )
+          continue;
+        const other = properties.find(p => p.name === property.name);
+        if (!other) continue; // Missing members are TypeScript's diagnostic.
+        const why = callableMismatch(
+          c,
+          c.host.typeOfSymbol(other),
+          c.host.typeOfSymbol(property),
+          cast,
+          seen,
+          true,
+        );
+        if (why) return `method '${property.name}' of '${from.name}': ${why}`;
+      }
+      // A computed name typed string, number or symbol becomes an index
+      // signature rather than a named property of the instance type.
+      for (const into of checker.getIndexInfosOfType(target)) {
+        for (const out of checker.getIndexInfosOfType(source)) {
+          if (!checker.isTypeAssignableTo(into.keyType, out.keyType)) continue;
+          const why = callableMismatch(
+            c,
+            out.valueType,
+            into.valueType,
+            cast,
+            seen,
+            true,
+          );
+          if (why) return `computed method of '${from.name}': ${why}`;
+        }
+      }
+    }
     return undefined;
   });
 }
@@ -844,6 +986,7 @@ function callableMismatch(
   target: Type,
   cast: boolean,
   seen: Seen,
+  method = false,
 ): string | undefined {
   const composite = TypeFlags.Object | TypeFlags.Union | TypeFlags.Intersection;
   if (!(source.flags & composite) || !(target.flags & composite))
@@ -852,7 +995,7 @@ function callableMismatch(
   // a union of functions: any of them may be the one called
   if (source.flags & TypeFlags.Union) {
     for (const member of host.memberTypes(source)) {
-      const why = callableMismatch(c, member, target, cast, seen);
+      const why = callableMismatch(c, member, target, cast, seen, method);
       if (why) return why;
     }
     return undefined;
@@ -885,6 +1028,13 @@ function callableMismatch(
                   assignable(returnOf(f), returnOf(to)),
               );
         if (!from) continue;
+        if (
+          method &&
+          (isCellType(c, returnOf(from)) !== isCellType(c, returnOf(to)) ||
+            isCellType(c, host.awaitedType(returnOf(from))) !==
+              isCellType(c, host.awaitedType(returnOf(to))))
+        )
+          return 'its return values use different shared-reference representations';
         const result = layoutMismatch(
           c,
           returnOf(from),
@@ -898,6 +1048,8 @@ function callableMismatch(
           const passed = host.parameterTypeAt(to, i),
             taken = host.parameterTypeAt(from, i);
           if (!passed || !taken) break;
+          if (method && isCellType(c, passed) !== isCellType(c, taken))
+            return `parameter ${i + 1} uses different shared-reference representations`;
           const why = layoutMismatch(c, passed, taken, cast, seen);
           if (why) return `what it is called with, parameter ${i + 1}: ${why}`;
         }
@@ -1048,6 +1200,7 @@ function computeConversion(c: Own, node: Node): void {
     case K.ReturnStatement:
       if (node.expression) {
         const fn = getContainingFunction(node);
+        if (isStructConstructor(c, fn)) return;
         setTargetType(
           c,
           node.expression,
@@ -1150,7 +1303,9 @@ function computeConversion(c: Own, node: Node): void {
           if (k < 0) checkStructUnionField(c, node, t);
           if (cell.kinds[k] === 's' || cell.kinds[k] === 'c')
             checkConvertedTarget(c, node);
-          setTarget(c, object, k >= 0);
+          if (isAssignmentTarget(node) && getStructMethodAccess(c, node))
+            c.error(node, Messages.StructMethodWrite);
+          setTarget(c, object, k >= 0 || !!getStructMethodAccess(c, node));
           break;
         }
         default:
@@ -1168,7 +1323,13 @@ function computeConversion(c: Own, node: Node): void {
       }
       const kind = getCellType(c, t).kind;
       if (kind === CellKind.ArrayOfString) checkConvertedTarget(c, node);
-      setTarget(c, object, isArrayKind(kind));
+      if (isAssignmentTarget(node) && getStructMethodAccess(c, node))
+        c.error(node, Messages.StructMethodWrite);
+      setTarget(
+        c,
+        object,
+        isArrayKind(kind) || !!getStructMethodAccess(c, node),
+      );
       return;
     }
   }

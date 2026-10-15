@@ -25,6 +25,10 @@ export const HELPERS = new Set([
   'release',
   'retain',
   'sharedStruct',
+  'structIdentity',
+  'structKey',
+  'structMethod',
+  'structMethodValue',
   'store',
   'storeStr',
   'strAt',
@@ -39,8 +43,8 @@ export function helpersOf(
 ): Record<string, string> {
   for (const m of code.matchAll(/^import \{ ([^}]*) \} from "([^"]*)";$/gm)) {
     if (m[2] !== runtime) continue;
-    const pairs = m[1].split(',').map(s => s.trim().split(/\s+as\s+/));
-    if (pairs.every(([name]) => HELPERS.has(name)))
+    const pairs = m[1]!.split(',').map(s => s.trim().split(/\s+as\s+/));
+    if (pairs.every(([name]) => name !== undefined && HELPERS.has(name)))
       return Object.fromEntries(
         pairs.map(([name, local]) => [name, local ?? name]),
       );
@@ -61,7 +65,13 @@ export function uniqueName(source: string, name: string) {
 // its last statement, under whatever name it imported register as) with `key`
 // in place of import.meta.url.
 export function keyRegistration(code: string, runtime: string, key: string) {
-  const register = helpersOf(code, runtime).register;
+  const helpers = helpersOf(code, runtime);
+  if (helpers.structIdentity)
+    code = code.replaceAll(
+      `${helpers.structIdentity}(import.meta.url,`,
+      `${helpers.structIdentity}(${JSON.stringify(key)},`,
+    );
+  const register = helpers.register;
   if (!register) return code;
   const call = `${register}(import.meta.url, {`,
     at = code.lastIndexOf(call);

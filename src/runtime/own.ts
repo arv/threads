@@ -195,6 +195,7 @@ const cellKinds = new Map<number, CellClass>(); // kind -> class
 // every struct type declared on this thread (sharedStruct; newSharedArray
 // checks): one per kind, as a layout declared again is the type declared first
 const structTypes = new WeakSet<object>();
+const nominalStructs = new WeakSet<object>();
 const sharedAddr = new WeakMap<object, number>(); // a shared value -> its blob
 const REVOKED = new Proxy(Object.create(null), {
   get: (_, key) => {
@@ -697,11 +698,11 @@ function cell(a: number) {
       c = new Float64Array(SAB!, a + 16, I32[(a >> 2) + 1]) as F64Cell;
       c.$cell = a;
     } else if (kind === K_SHARED_ARRAY) c = sharedArrayHandle(a);
-    else
-      c = Object.assign(
-        Object.create((Cls ?? structType(kind)).prototype) as object,
-        {$cell: a},
-      );
+    else {
+      const type = Cls ?? structType(kind);
+      c = Object.assign(Object.create(type.prototype) as object, {$cell: a});
+      if (nominalStructs.has(type)) Object.seal(c);
+    }
     if (counted(kind)) {
       holdFor(c, a);
       cells.set(a, new WeakRef(c));
@@ -874,13 +875,177 @@ export function sharedFloat64Array(n: number) {
 
 // a struct type: a class of handles on its blocks, and its layout
 export interface StructType<T = unknown> {
-  new (): T & CellObject;
+  new (...args: any[]): T & CellObject;
   kind: number;
   size: number;
   fields: string[];
   refs: number[];
   kinds: string;
   strs: number[]; // the string fields
+}
+
+type StructMethod = (...args: any[]) => any;
+type StructMethods = Record<string | symbol, StructMethod>;
+export interface StructMethodSignature {
+  cells: number[];
+  result: boolean;
+  async?: boolean;
+  promiseResult?: boolean;
+  rest?: number;
+}
+// Behavior is local to this realm. Only the declaration identity and layout
+// are in shared memory; a reconstructed type can acquire behavior later.
+const structBehavior = new WeakMap<object, StructMethods>();
+const structMethodValues = new WeakMap<object, StructMethods>();
+const structInitializers = new WeakMap<
+  object,
+  {
+    raw: (...args: any[]) => unknown;
+    boxed: (this: MaybeCell, ...args: unknown[]) => unknown;
+  }
+>();
+const structDeclarations = new Map<string, number>();
+
+export const structIdentity = (module: string, name: string) =>
+  JSON.stringify([module, name]);
+
+// Keep symbol keys intact and convert other property keys to strings.
+export function structKey(
+  value: PropertyKey,
+  declaration = false,
+): string | symbol {
+  const key = typeof value === 'symbol' ? value : String(value);
+  if (declaration && key === 'constructor')
+    throw new TypeError(
+      'own: a struct constructor must be declared with constructor(...) { ... }',
+    );
+  return key;
+}
+
+function attachStructMethods(
+  type: StructType,
+  methods: StructMethods,
+  signatures?: Record<string | symbol, StructMethodSignature>,
+) {
+  if (Reflect.ownKeys(methods).length === 0) return;
+  if (structBehavior.has(type))
+    throw new TypeError('own: a struct declaration already has methods here');
+  const raw: StructMethods = Object.create(null);
+  const values: StructMethods = Object.create(null);
+  const entries = Reflect.ownKeys(methods).map(
+    key => [key, methods[key]!] as const,
+  );
+  // Validate the whole declaration before installing immutable properties.
+  for (const [name, fn] of entries) {
+    if (
+      (typeof name === 'string' && type.fields.includes(name)) ||
+      name === '$cell'
+    )
+      throw new TypeError(`own: reserved struct method name '${String(name)}'`);
+    if (typeof fn !== 'function')
+      throw new TypeError(
+        `own: struct method '${String(name)}' is not a function`,
+      );
+    if (
+      name === 'constructor' &&
+      (fn.constructor.name === 'AsyncFunction' ||
+        fn.constructor.name === 'GeneratorFunction' ||
+        fn.constructor.name === 'AsyncGeneratorFunction')
+    )
+      throw new TypeError('own: a struct constructor must be synchronous');
+  }
+  for (const [name, fn] of entries) {
+    const signature = signatures?.[name];
+    const check = (self: unknown): number => {
+      const a =
+        typeof self === 'number' ? self : cellAddress(self as MaybeCell);
+      if (!a || I32[a >> 2] !== type.kind)
+        throw new TypeError(
+          `own: '${String(name)}' needs a receiver of its struct type`,
+        );
+      return a;
+    };
+    if (!signature)
+      raw[name] = (self: number, ...args: unknown[]) =>
+        fn.apply(box(check(self)), args);
+    else if (signature.async)
+      raw[name] = async (self: number, ...args: unknown[]) => {
+        check(self);
+        retain(self);
+        try {
+          return await fn(self, ...args);
+        } finally {
+          release(self);
+        }
+      };
+    else raw[name] = fn;
+    // An extracted method in compiled code still has ordinary, unbound
+    // `this`, but its explicit arguments and result use the compiler's ABI.
+    const boxedMethod = function (this: MaybeCell, ...args: unknown[]) {
+      const self = check(this);
+      if (!signature) return fn.apply(this, args);
+      for (const i of signature.cells)
+        if (i < args.length) args[i] = unbox(args[i] as MaybeCell);
+      if (signature.rest !== undefined)
+        for (let i = signature.rest; i < args.length; i++)
+          args[i] = unbox(args[i] as MaybeCell);
+      const result = raw[name](self, ...args);
+      const boxed = (value: number) => {
+        try {
+          return box(value);
+        } finally {
+          release(value);
+        }
+      };
+      return signature.result
+        ? signature.promiseResult
+          ? result.then(boxed)
+          : boxed(result)
+        : result;
+    };
+    if (name === 'constructor') {
+      const initialize = raw[name] as StructMethod;
+      structInitializers.set(type, {
+        raw: signature
+          ? (self: number, ...args: unknown[]) => {
+              for (const i of signature.cells)
+                if (i < args.length && args[i] === null) args[i] = 0;
+              return initialize(self, ...args);
+            }
+          : initialize,
+        boxed: boxedMethod,
+      });
+    } else {
+      values[name] = function (this: unknown, ...args: unknown[]) {
+        return raw[name](check(this), ...args);
+      };
+      Object.defineProperty(type.prototype, name, {value: boxedMethod});
+    }
+  }
+  structBehavior.set(type, Object.freeze(raw));
+  structMethodValues.set(type, Object.freeze(values));
+  Object.freeze(type.prototype);
+}
+
+// A compiled call uses its numeric receiver directly. Looking up behavior by
+// the actual type also preserves dispatch through compatible struct types.
+export function structMethod(self: number, name: PropertyKey) {
+  name = structKey(name);
+  if (!self) throw new TypeError('own: a struct method needs a receiver');
+  const type = structType(I32[self >> 2]);
+  const method =
+    name === 'constructor' ? undefined : structBehavior.get(type)?.[name];
+  if (!method)
+    throw new TypeError(
+      `own: struct method '${String(name)}' is not loaded in this worker; import its defining module`,
+    );
+  return method;
+}
+
+export function structMethodValue(self: number, name: PropertyKey) {
+  name = structKey(name);
+  structMethod(self, name); // validate the receiver and module registration
+  return structMethodValues.get(structType(I32[self >> 2]))![name];
 }
 // `const Name = struct({a: f64, b: ref<Name>(), c: bool, d: str, e: i32, f: u8,
 // g: ref<Channel>()})`
@@ -911,12 +1076,28 @@ export function sharedStruct<T = unknown>(
   fields: string[],
   refs: number[] = [],
   kinds = '',
+  identity = '',
+  methods?: StructMethods,
+  signatures?: Record<string | symbol, StructMethodSignature>,
 ) {
   // the layout, as JSON: a field's name may hold anything (see structType)
-  const layout = `struct ${JSON.stringify([name, fields, refs, kinds])}`;
+  const description = [identity || name, fields, refs, kinds];
+  if (identity) description.push(identity);
+  const layout = `struct ${JSON.stringify(description)}`;
   const kind = $intern(layout),
     known = cellKinds.get(kind);
-  if (known !== undefined) return known as StructType<T>;
+  if (identity) {
+    const previous = structDeclarations.get(identity);
+    if (previous !== undefined && previous !== kind)
+      throw new TypeError(
+        'own: a struct identity was declared with a different layout',
+      );
+    structDeclarations.set(identity, kind);
+  }
+  if (known !== undefined) {
+    if (methods) attachStructMethods(known as StructType, methods, signatures);
+    return known as StructType<T>;
+  }
   if (!kinds)
     kinds = fields.map((_, k) => (refs.includes(k) ? 'r' : 'f')).join('');
   const n = fields.length,
@@ -924,12 +1105,14 @@ export function sharedStruct<T = unknown>(
   const Struct = {
     [name]: class {
       declare $cell: number;
-      constructor() {
-        const a = newStruct(Struct);
+      constructor(...args: unknown[]) {
+        const a = allocateStruct(Struct);
         this.$cell = a;
         holdFor(this, a);
         cells.set(a, new WeakRef(this));
         release(a);
+        if (identity) Object.seal(this);
+        structInitializers.get(Struct)?.boxed.apply(this, args);
       }
     },
   }[name] as StructType<T>;
@@ -1010,6 +1193,8 @@ export function sharedStruct<T = unknown>(
   );
   cellKinds.set(kind, Struct);
   structTypes.add(Struct);
+  if (identity) nominalStructs.add(Struct);
+  if (methods) attachStructMethods(Struct, methods, signatures);
   return Struct;
 }
 // the struct type of kind: declared here, or by another thread, whose module
@@ -1030,20 +1215,22 @@ function structType(kind: number): StructType {
   }
   if (
     !Array.isArray(layout) ||
-    layout.length !== 4 ||
+    (layout.length !== 4 && layout.length !== 5) ||
     typeof layout[0] !== 'string' ||
     !Array.isArray(layout[1]) ||
     !Array.isArray(layout[2]) ||
-    typeof layout[3] !== 'string'
+    typeof layout[3] !== 'string' ||
+    (layout.length === 5 && typeof layout[4] !== 'string')
   )
     throw new TypeError(`own: no cell of kind ${kind}`);
-  const [name, fields, refs, kinds] = layout as [
+  const [name, fields, refs, kinds, identity] = layout as [
     string,
     string[],
     number[],
     string,
+    string?,
   ];
-  return sharedStruct(name, fields, refs, kinds);
+  return sharedStruct(name, fields, refs, kinds, identity);
 }
 
 // ---- typed layouts: what the compiler emits for shared structs and
@@ -1073,7 +1260,7 @@ export function storeStr(i: number, s: string) {
 }
 // a zeroed struct: [kind][count 1], then its fields from byte 8. the caller
 // owns the count
-export function newStruct(type: StructType) {
+function allocateStruct(type: StructType) {
   const a = $allocBlock(type.size);
   I32[a >> 2] = type.kind;
   I32[(a >> 2) + 1] = 1;
@@ -1081,6 +1268,19 @@ export function newStruct(type: StructType) {
   // unknown, may be)
   if (type.refs?.length !== 0) $track(a);
   return a;
+}
+
+// Constructor return values never replace the allocated instance. If an
+// initializer throws, release our ownership; references it published survive.
+export function newStruct(type: StructType, ...args: unknown[]) {
+  const a = allocateStruct(type);
+  try {
+    structInitializers.get(type)?.raw(a, ...args);
+    return a;
+  } catch (error) {
+    release(a);
+    throw error;
+  }
 }
 // [kind][length][element][count] then the elements from byte 16. type, which
 // the compiler emits, is a struct type or the element's size in bytes, negative
@@ -1376,7 +1576,9 @@ function addressForRollback(v: unknown): number | undefined {
 // still holds), and unwraps it on the way back. a struct's handle is an
 // instance of its class; a SharedArray's is an array-like Proxy over the same
 // memory
-export const box: (a: number) => CellValue | null = a => (a ? cell(a) : null);
+export function box(a: number | undefined): CellValue | null | undefined {
+  return a === undefined ? undefined : a ? cell(a) : null;
+}
 // the address of a cell's block (a struct's, a SharedArray's, a channel's...),
 // 0 for null: what a reference or channel field holds
 export function cellAddress(v: MaybeCell) {
@@ -1439,6 +1641,7 @@ export class SharedArray<E extends ElementType = ElementType> {
   }
 }
 export function unbox(v: MaybeCell) {
+  if (v === undefined) return undefined;
   if (v == null) return 0;
   const a = typeof v === 'object' ? v.$cell : undefined;
   if (
@@ -1522,6 +1725,10 @@ function oob(a: number, i: number): never {
 // code the compiler did not lay out finds the index here, through the handle
 function atomicIndex(target: MaybeCell, key: any) {
   const a = unbox(target);
+  if (!a)
+    throw new TypeError(
+      'own: an atomic operation needs a shared struct or SharedArray',
+    );
   if (I32[a >> 2] === K_SHARED_ARRAY) {
     if (elementKind(a) !== E_I32)
       throw new TypeError(

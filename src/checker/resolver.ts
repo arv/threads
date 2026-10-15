@@ -16,6 +16,8 @@ import {
   getCellType,
   getConversion,
   getSharedArrayElementType,
+  getStructMethodCall,
+  getStructMethodAccess,
   isCellType,
   isNarrowedReference,
   nonNullishMembers,
@@ -25,6 +27,9 @@ import {
   getCallMarker,
   getStructOfCall,
   isConsumeCall,
+  isStructMethod,
+  structMethods,
+  structReceiver,
 } from './markers.ts';
 import {Analyzer, ReturnKind} from './ownership.ts';
 import {
@@ -87,6 +92,8 @@ export interface AtomicCall {
 export interface StructCall {
   name: string;
   layout: CellType;
+  node: Node;
+  methods: Node[];
 }
 
 const noCell: CellType = {kind: CellKind.None, fields: [], kinds: []};
@@ -167,6 +174,9 @@ export class Resolver {
           return Count.OwnedLocal;
         return Count.Stable;
       }
+      case K.ThisKeyword:
+        if (structReceiver(c, expr)) return Count.Stable;
+        break;
       case K.NewExpression:
         return Count.Owned;
       case K.CallExpression:
@@ -225,6 +235,24 @@ export class Resolver {
   // The declaration of the signature a call resolves to, unless it has none
   // (an unknown or `any` signature).
   private signatureDeclaration(call: Node) {
+    const callee = skipParentheses(call.expression);
+    if (
+      callee.kind === K.PropertyAccessExpression &&
+      (callee.name.text === 'call' || callee.name.text === 'apply')
+    ) {
+      const target = this.c.host.callSignatures(
+        this.c.host.typeOf(callee.expression),
+      );
+      if (
+        target.length === 1 &&
+        target[0]!.declaration &&
+        isStructMethod(
+          this.c,
+          this.c.host.declarationOf(target[0]!.declaration),
+        )
+      )
+        return target[0];
+    }
     const signature = this.c.host.signatureOf(call);
     if (
       !signature ||
@@ -677,8 +705,18 @@ export class Resolver {
     if (!info) return undefined;
     return {
       name: info.name,
+      node: call,
+      methods: structMethods(call),
       layout: {kind: CellKind.Struct, fields: info.fields, kinds: info.kinds},
     };
+  }
+
+  structMethodCall(call: Node) {
+    return getStructMethodCall(this.c, call);
+  }
+
+  structMethodAccess(access: Node) {
+    return getStructMethodAccess(this.c, access);
   }
 
   // GetOwnAtomicCall: the atomic operation a call is, if it is a valid one

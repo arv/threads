@@ -145,6 +145,18 @@ export const Messages = {
     code: 96039,
     text: "'{0}' is a CommonJS module: threads-check compiles ES modules only.",
   },
+  StructMethod: {
+    code: 96040,
+    text: 'A shared struct method must be a non-generator method in a top-level const struct declaration, without super; $cell and field names are reserved, and constructors must be synchronous and non-generic.',
+  },
+  StructMethodWrite: {
+    code: 96041,
+    text: 'Shared struct methods are fixed by their declaration and cannot be replaced.',
+  },
+  StructConstructor: {
+    code: 96042,
+    text: 'A shared struct constructor must be declared with constructor(...) { ... }.',
+  },
 } as const;
 
 export type Message = (typeof Messages)[keyof typeof Messages];

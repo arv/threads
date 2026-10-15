@@ -78,10 +78,15 @@ import {
   write,
 } from './ir.ts';
 import type {Edit, Ir, Names, Part, Scope, Src, Temp} from './ir.ts';
+import {isCellType} from './layout.ts';
+import {isStructConstructor, structReceiver} from './markers.ts';
 import {Count, Local} from './resolver.ts';
 import type {AtomicCall, Resolver, StructCall} from './resolver.ts';
 import {
+  FunctionFlags,
   forEachChild,
+  getContainingFunction,
+  getFunctionFlags,
   isAssignmentOperator,
   isAssignmentTarget,
   isClassExtends,
@@ -92,6 +97,7 @@ import {
   isFunctionLikeDeclaration,
   isOptionalChain,
   isOwnReferencePosition,
+  isThisParameter,
   isTypeNode,
   K,
   NodeFlags,
@@ -131,6 +137,10 @@ const HELPERS = [
   '__release',
   '__retain',
   '__sharedStruct',
+  '__structIdentity',
+  '__structKey',
+  '__structMethod',
+  '__structMethodValue',
   '__store',
   '__storeStr',
   '__strAt',
@@ -220,6 +230,7 @@ class Lowering {
   // the var scopes of the functions being visited, innermost last
   private readonly scopes: Scope[] = [];
   private readonly starts = new Map<Node, number>();
+  private readonly receivers = new Map<Node, string>();
 
   constructor(r: Resolver, file: Node, options: TransformOptions) {
     this.r = r;
@@ -249,7 +260,15 @@ class Lowering {
     const helperNames = new Map<string, string>();
     const unique = (name: string): string => {
       let n = name;
-      for (let i = 1; identifiers.has(n); i++) n = `${name}_${i}`;
+      // The bundler substitutes this helper's generated module argument.
+      // Keep its name out of source strings and comments as well as bindings.
+      for (
+        let i = 1;
+        identifiers.has(n) ||
+        (name === '__structIdentity' && this.text.includes(n));
+        i++
+      )
+        n = `${name}_${i}`;
       return n;
     };
     const names: Names = {
@@ -515,6 +534,15 @@ class Lowering {
       case K.ExpressionStatement:
         return this.visitExpressionStatement(node);
       case K.ReturnStatement: {
+        if (
+          node.expression &&
+          isStructConstructor(this.r.c, getContainingFunction(node))
+        ) {
+          return statements([
+            exprStatement(this.fullExpression(node.expression, Ctx.Discard)!),
+            raw('return;'),
+          ]);
+        }
         let expression = this.fullExpression(node.expression, Ctx.Return);
         if (expression) expression = this.moved(expression, node.expression);
         return this.update(node, [[node.expression, expression]]);
@@ -1178,9 +1206,8 @@ class Lowering {
   }
 
   // The statements a function body starts with for its counted parameters:
-  // an owned parameter is retained (or takes its default value), and an
-  // optional borrowed one that is omitted is 0. Returns the owned
-  // parameters' names, which the body releases.
+  // An owned parameter is retained (or takes its default value). Returns
+  // the owned parameters' names, which the body releases.
   private functionPrologue(fn: Node): PrologueEntry[] {
     const entries: PrologueEntry[] = [];
     const prologue = {
@@ -1247,12 +1274,6 @@ class Lowering {
           });
           break;
         }
-        case Local.Borrowed:
-          if (param.questionToken)
-            prologue.push(
-              exprStatement(binary(this.name(name), '??=', num(0))),
-              false,
-            );
       }
     }
     return entries;
@@ -1656,10 +1677,27 @@ class Lowering {
       if (scope.temps.length > 0) result = this.withVars(node, result, scope);
     }
     const captures = this.r.captures(node);
-    if (captures.length === 0) return result;
+    const receiver =
+      node.kind === K.ArrowFunction && this.capturedReceiver(node);
+    if (captures.length === 0 && !receiver) return result;
     const args: Ir[] = [result];
     for (const decl of captures) args.push(this.name(decl.name));
+    if (receiver) args.push(raw(receiver));
     return this.call('__capture', ...args);
+  }
+
+  private capturedReceiver(node: Node): string | undefined {
+    let receiver: string | undefined;
+    const visit = (child: Node): void => {
+      if (child.kind === K.ThisKeyword) {
+        const method = structReceiver(this.r.c, child);
+        if (method) receiver = this.receivers.get(method);
+      } else if (!isFunctionLike(child) || child.kind === K.ArrowFunction) {
+        forEachChild(child, visit);
+      }
+    };
+    forEachChild(node, visit);
+    return receiver;
   }
 
   // An arrow function whose concise body becomes `{ var _a; return E; }`
@@ -1681,6 +1719,12 @@ class Lowering {
 
   private lower(node: Node, ctx: Ctx): Ir {
     switch (node.kind) {
+      case K.ThisKeyword: {
+        const method = structReceiver(this.r.c, node);
+        const receiver = method && this.receivers.get(method);
+        if (receiver) return raw(receiver);
+        break;
+      }
       // (reached as a concise body: elsewhere visit() takes them first)
       case K.ArrowFunction:
       case K.FunctionExpression:
@@ -1703,6 +1747,31 @@ class Lowering {
         if (structCall) return this.sharedStruct(structCall);
         const atomic = this.r.atomicCall(node);
         if (atomic) return this.lowerAtomic(node, atomic);
+        const method = this.r.structMethodCall(node);
+        if (method) {
+          const temps: Ir[] = [];
+          let receiver = this.receiver(method.receiver, Ctx.Argument, [
+            ...(method.key ? [method.key] : []),
+            ...(node.arguments as Node[]),
+          ]);
+          // Key coercion can call user code and replace the receiver even
+          // when the source key expression contains no explicit call.
+          if (method.key && this.frames[this.frames.length - 1])
+            receiver = this.temporary(this.call('__retain', receiver));
+          const self = this.copiable(receiver, temps);
+          const args = this.visitArguments(node, false).map(([, ir]) => ir!);
+          return this.sequence(
+            temps,
+            call(
+              this.call(
+                '__structMethod',
+                self,
+                method.key ? this.visit(method.key) : str(method.name),
+              ),
+              [self, ...args],
+            ),
+          );
+        }
         const callee = this.visit(node.expression);
         const args = this.visitArguments(node, isOptionalChain(node));
         return this.update(node, [[node.expression, callee], ...args]);
@@ -1711,6 +1780,21 @@ class Lowering {
       case K.ElementAccessExpression: {
         const lowered = this.lowerAccess(node, false, undefined);
         if (lowered) return lowered;
+        const method = this.r.structMethodAccess(node);
+        if (method) {
+          let receiver = this.receiver(
+            method.receiver,
+            Ctx.Argument,
+            method.key ? [method.key] : [],
+          );
+          if (method.key && this.frames[this.frames.length - 1])
+            receiver = this.temporary(this.call('__retain', receiver));
+          return this.call(
+            '__structMethodValue',
+            receiver,
+            method.key ? this.visit(method.key) : str(method.name),
+          );
+        }
         break;
       }
       case K.BinaryExpression:
@@ -1777,7 +1861,127 @@ class Lowering {
     });
     const args: Ir[] = [str(structCall.name), fields, arrayLiteral(refs)];
     const letters = kindLetters(layout);
-    if (letters !== '') args.push(str(letters));
+    if (
+      letters !== '' ||
+      structCall.methods.length > 0 ||
+      structCall.node.arguments[1]
+    )
+      args.push(str(letters));
+    if (structCall.methods.length > 0 || structCall.node.arguments[1]) {
+      args.push(
+        structCall.node.arguments[1]
+          ? this.visit(structCall.node.arguments[1])
+          : this.call(
+              '__structIdentity',
+              raw('import.meta.url'),
+              str(structCall.name),
+            ),
+      );
+    }
+    if (structCall.methods.length > 0) {
+      const methods: Ir[] = [],
+        signatures: Ir[] = [];
+      const host = this.r.c.host;
+      for (const method of structCall.methods) {
+        let self = '__self';
+        for (let i = 1; this.fileIdentifiers.has(self); i++)
+          self = `__self_${i}`;
+        this.fileIdentifiers.add(self);
+        this.receivers.set(method, self);
+        const visited = this.visit(method) as Src;
+        const receiverParameter = (method.parameters as Node[]).find(
+          isThisParameter,
+        );
+        if (receiverParameter) {
+          const start = this.startOf(receiverParameter);
+          visited.edits = visited.edits.filter(
+            e => e.end <= start || e.start >= receiverParameter.end,
+          );
+          visited.edits.push({
+            start,
+            end: receiverParameter.end,
+            ir: raw(self),
+          });
+        } else
+          visited.edits.push({
+            start: method.parameters.pos,
+            end: method.parameters.pos,
+            ir: raw(self + (method.parameters.length ? ', ' : '')),
+          });
+        let key: Ir = str(method.name.text ?? '');
+        if (
+          method.name.kind === K.ComputedPropertyName ||
+          method.name.kind === K.NumericLiteral
+        ) {
+          // Evaluate a computed name once, in the methods object, and reuse
+          // that exact key for its calling-convention metadata.
+          const computed = method.name.kind === K.ComputedPropertyName;
+          const expression = (
+            computed ? method.name.expression : method.name
+          ) as Node;
+          const start = this.startOf(expression);
+          const inside = (e: Edit) =>
+            e.start >= start && e.end <= expression.end;
+          const value = this.src(expression, visited.edits.filter(inside));
+          const temp = this.newTemp();
+          visited.edits = visited.edits.filter(e => !inside(e));
+          const assigned = this.assign(
+            tempRef(temp),
+            this.call('__structKey', value, raw('true')),
+          );
+          visited.edits.push(
+            this.editOf(
+              expression,
+              computed ? assigned : gen(Prec.Primary, ['[', assigned, ']']),
+            ),
+          );
+          key = gen(Prec.Primary, ['[', tempRef(temp), ']']);
+        }
+        visited.edits.sort((a, b) => a.start - b.start || a.end - b.end);
+        methods.push(visited);
+        const cells: number[] = [];
+        let rest: number | undefined;
+        const parameters = (method.parameters as Node[]).filter(
+          p => !isThisParameter(p),
+        );
+        for (let i = 0; i < parameters.length; i++) {
+          const p = parameters[i]!;
+          let t = host.typeOf(p);
+          if (p.dotDotDotToken) t = host.typeArguments(t)[0]!;
+          if (t && isCellType(this.r.c, t)) {
+            if (p.dotDotDotToken) rest = i;
+            else cells.push(i);
+          }
+        }
+        const signature = host.checker.getSignatureFromDeclaration(method);
+        const result = host.checker.getReturnTypeOfSignature(signature);
+        const constructor = isStructConstructor(this.r.c, method);
+        const cellResult = !constructor && isCellType(this.r.c, result);
+        const promisedCellResult =
+          !constructor &&
+          !cellResult &&
+          isCellType(this.r.c, host.awaitedType(result));
+        const metadata = {
+          cells,
+          result: cellResult || promisedCellResult,
+          ...(!constructor && getFunctionFlags(method) & FunctionFlags.Async
+            ? {async: true}
+            : {}),
+          ...(promisedCellResult ? {promiseResult: true} : {}),
+          ...(rest === undefined ? {} : {rest}),
+        };
+        signatures.push(
+          gen(Prec.Primary, [key, ': ', raw(JSON.stringify(metadata))]),
+        );
+      }
+      const object = (members: Ir[]) =>
+        gen(Prec.Primary, [
+          '{\n',
+          ...members.flatMap((m, i) => [i ? ',\n' : '', m]),
+          '\n}',
+        ]);
+      args.push(object(methods), object(signatures));
+    }
     return this.call('__sharedStruct', ...args);
   }
 
@@ -1834,7 +2038,8 @@ class Lowering {
     if (conditional) this.conditional++;
     const visited: [Node, Ir][] = [];
     for (const arg of args) {
-      if (arg.kind === K.SpreadElement) visited.push([arg, this.visit(arg)]);
+      if (arg.kind === K.SpreadElement)
+        visited.push([arg, gen(Prec.Assignment, [this.visit(arg)])]);
       else if (this.r.isRefArgument(arg))
         visited.push([
           arg,
@@ -2045,7 +2250,11 @@ class Lowering {
   private lowerNew(node: Node): Ir | undefined {
     const cell = this.r.cellType(node);
     if (cell.kind === CellKind.Struct)
-      return this.call('__newStruct', this.visit(node.expression));
+      return this.call(
+        '__newStruct',
+        this.visit(node.expression),
+        ...this.visitArguments(node, false).map(([, ir]) => ir!),
+      );
     const args = node.arguments as Node[] | undefined;
     if (cell.kind < CellKind.ArrayOfNumber || !args || args.length !== 2)
       return undefined;
