@@ -117,7 +117,12 @@ export function start(options: Options = {}) {
         else reject(e);
       };
       w.onmessage = ({data: m}: MessageEvent<Message>) => {
-        if (generation !== g) return;
+        if (generation !== g) {
+          // The heap survives stop(): a queued nudge can reclaim decrements
+          // that became safe after the page's last shutdown reclaim.
+          if (m.type === 'nudge') $nudged();
+          return;
+        }
         if (m.type === 'ready') {
           ready = true;
           resolve();

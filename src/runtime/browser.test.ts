@@ -144,6 +144,37 @@ it('fails pending runs when a worker requested by grow cannot start', async () =
   expect(runtime.counters(sab).shutdown).toBe(1);
 });
 
+it('processes a late worker nudge to reclaim what became safe after stop', async () => {
+  await browser.start({workers: 1});
+  const worker = made.at(-1)!,
+    N = own.sharedStruct('LateShutdownNudge', ['next'], [0]),
+    QS_3 = 2048 + 3 * 8 + 5,
+    EPOCH = 17,
+    NEXT_TID = 4;
+  // Simulate two workers: thread 3 holds up what thread 2 defers.
+  if (runtime.I32[NEXT_TID] < 4) runtime.I32[NEXT_TID] = 4;
+  runtime.threadBegin(3);
+  runtime.threadBegin(2);
+  const a = own.newStruct(N),
+    b = own.newStruct(N);
+  own.store((a >> 2) + 2, b);
+  own.store((a >> 2) + 2, 0);
+  runtime.threadEnd();
+  runtime.threadBegin(1);
+  browser.stop();
+  expect(runtime.I32[b >> 2]).toBe(N.kind);
+  // The other worker passes a point after stop's reclaim, then the queued
+  // nudge arrives from the terminated worker of the old generation.
+  Atomics.store(runtime.I32, QS_3, Atomics.load(runtime.I32, EPOCH));
+  worker.onmessage!({data: {type: 'nudge'}});
+  expect(runtime.I32[b >> 2]).toBe(runtime.K_FREE);
+  expect(runtime.I32[QS_1]).toBe(IDLE);
+  runtime.threadBegin(3);
+  runtime.threadEnd();
+  runtime.threadBegin(1);
+  own.release(a);
+});
+
 it('stays awake once stopped, so a collection a stopped worker runs on waits for it', async () => {
   // thread 1's awake word, the word that names the thread that collects, and
   // thread 2's entry, as runtime.ts lays them out

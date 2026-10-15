@@ -155,6 +155,70 @@ describe('moving values', () => {
       own.release(a);
     }
   });
+
+  it('reclaims shared blobs when a freeze trap attempts a reentrant write', () => {
+    const key = 'reentrantFreezePayload',
+      name = runtime.$internRef(key);
+    try {
+      for (const traps of [
+        {
+          preventExtensions() {
+            T.share({nested: 1});
+            return false;
+          },
+        },
+        {
+          defineProperty() {
+            T.share({nested: 1});
+            return false;
+          },
+        },
+      ])
+        for (let i = 0; i < 32; i++) {
+          const value = new Proxy({[key]: 123}, traps),
+            before = T.heapStats();
+          expect(() => T.share(value)).toThrow(/already serializing/);
+          const after = T.heapStats();
+          expect(after.allocated - before.allocated).toBe(1);
+          expect(after.freed - before.freed).toBe(1);
+          expect(runtime.I32[(name >> 2) + 1]).toBe(1);
+        }
+      expect(move([123, {x: 42}])).toEqual([123, {x: 42}]);
+    } finally {
+      own.release(name);
+    }
+  });
+
+  it('returns counted arguments when reentrant channel sends fail', async () => {
+    const N = own.sharedStruct('ReentrantChannelArgument', ['n']),
+      a = own.newStruct(N),
+      ch = new T.Channel(1);
+    try {
+      for (const async of [false, true]) {
+        let failure: Promise<unknown> | undefined;
+        const value = {
+          get x() {
+            if (async)
+              failure = ch
+                .sendAsync(own.countedRef(a))
+                .catch((e: unknown) => e);
+            else
+              expect(() => ch.send(own.countedRef(a))).toThrow(
+                /already serializing/,
+              );
+            return 42;
+          },
+        };
+        expect(move([123, value])).toEqual([123, {x: 42}]);
+        if (async) expect(await failure).toBeInstanceOf(TypeError);
+        expect(runtime.I32[(a >> 2) + 1]).toBe(1);
+        await ch.sendAsync(7);
+        expect(await ch.recvAsync()).toBe(7);
+      }
+    } finally {
+      own.release(a);
+    }
+  });
 });
 
 describe('shared structs', () => {

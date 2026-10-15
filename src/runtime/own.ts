@@ -361,13 +361,7 @@ function put(
 // a blob of v in the shared heap; its address. all or nothing: when the blob
 // does not fit (a full heap), or v cannot be sent, the counts taken for it go
 // back and nothing is frozen
-function write(
-  v: Sent,
-  moved: Moved | null,
-  freeze: boolean,
-  alloc = $alloc,
-  depth = 0,
-) {
+function write(v: Sent, moved: Moved | null, freeze: boolean, depth = 0) {
   // Reading a getter (or a proxy's trap) can call share or send again. The
   // scratch buffer and its counts belong to the outer write until it ends:
   // reject before changing any of them, even if the getter catches this.
@@ -378,13 +372,17 @@ function write(
   writing = true;
   revokeDepth = $checking() ? Infinity : depth;
   wn = 1;
+  let a = 0;
   try {
     put(0, v, moved, freeze, 0);
-    const a = alloc(wn * 8);
+    // Even a shared blob may need to be rolled back: freezing can invoke
+    // proxy traps after the allocation. Reuse failed blobs as messages do.
+    a = $allocBlock(wn * 8, false);
     U8.set(new Uint8Array(wf.buffer, 0, wn * 8), a);
     for (const o of frozen) Object.freeze(o);
     return a;
   } catch (e) {
+    if (a !== 0) $freeBlock(a, wn * 8);
     for (const p of takenStrings) $releaseString(p);
     for (const p of takenCells) release(p);
     throw e;
@@ -582,12 +580,18 @@ function revoke(objs: Moved) {
 // block of its own, which the receiver frees once it has read it. [address,
 // bytes]. the moved values are v, or v's elements (depth 1: a thread's
 // arguments)
-const messageBlock: (bytes: number) => number = bytes =>
-  $allocBlock(bytes, false); // written whole
 export function __message(v: unknown, depth = 0): [number, number] {
   const moved: Moved = [];
-  const a = write(v as Sent, moved, false, messageBlock, depth),
-    bytes = wn * 8;
+  let a: number;
+  try {
+    a = write(v as Sent, moved, false, depth);
+  } catch (e) {
+    // Channel sends pass their counted value directly; spawn passes an
+    // array, whose counted arguments it rolls back itself.
+    if (v instanceof CountedArg) release(v.a);
+    throw e;
+  }
+  const bytes = wn * 8;
   revoke(moved);
   return [a, bytes];
 }
