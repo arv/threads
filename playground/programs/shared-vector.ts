@@ -26,7 +26,8 @@ import {
 // The constructor and methods are local to each worker; only these three
 // fields use shared storage. Construction starts with zero length and growth count,
 // then allocates the backing array. The explicit identity also lets the
-// example run with types erased.
+// example run with types erased. Scope it to this module URL so the playground's
+// compiled and erased modules can coexist in the same worker pool.
 const SharedVector = struct(
   {
     length: f64,
@@ -77,7 +78,7 @@ const SharedVector = struct(
       return this.toArray().values();
     },
   },
-  '@arv/threads/examples/shared-vector',
+  `${import.meta.url}#SharedVector`,
 );
 type SharedVector = Struct<typeof SharedVector>;
 

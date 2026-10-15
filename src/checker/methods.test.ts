@@ -32,7 +32,7 @@ function program(files: Record<string, string>) {
         module: 'esnext',
         moduleResolution: 'bundler',
         strict: true,
-        lib: ['es2022'],
+        lib: ['es2022', 'dom'],
         allowImportingTsExtensions: true,
         paths: {
           '@arv/threads': [path.join(checker, '../runtime/threads.d.ts')],
@@ -53,16 +53,22 @@ function program(files: Record<string, string>) {
   return {dir, result};
 }
 
-function run(files: Record<string, string>, erased = false) {
+function run(
+  files: Record<string, string>,
+  erased: boolean | ReadonlySet<string> = false,
+  {pool = 2, heap = 8} = {},
+) {
   const {dir, result} = program(files);
   expect(result.typeDiagnostics).toEqual([]);
   expect(result.diagnostics).toEqual([]);
   for (const file of result.files) {
     const compiled = toJavaScript(file).code;
-    const source = files[path.basename(file.fileName)]!;
+    const name = path.basename(file.fileName);
+    const source = files[name]!;
+    const erase = typeof erased === 'boolean' ? erased : erased.has(name);
     fs.writeFileSync(
       path.join(dir, path.basename(file.fileName, '.ts') + '.js'),
-      (erased
+      (erase
         ? stripTypeScriptTypes(source) +
           registration(source, '@arv/threads', compiled).tail
         : compiled
@@ -74,8 +80,8 @@ function run(files: Record<string, string>, erased = false) {
     [
       path.join(checker, '../run.ts'),
       path.join(dir, 'main.js'),
-      '--pool=2',
-      '--heap=8',
+      `--pool=${pool}`,
+      `--heap=${heap}`,
       '--check',
     ],
     {encoding: 'utf8', timeout: 20_000},
@@ -86,6 +92,29 @@ function run(files: Record<string, string>, erased = false) {
 }
 
 describe('struct methods', () => {
+  it('runs compiled and type-erased SharedVector modules in the same worker pool', () => {
+    const vector = fs.readFileSync(
+      path.join(checker, '../../playground/programs/shared-vector.ts'),
+      'utf8',
+    );
+    const {output} = run(
+      {
+        'compiled.ts': vector,
+        'erased.ts': vector,
+        'main.ts': `import {main as compiled} from './compiled.ts';
+import {main as erased} from './erased.ts';
+export function main() { compiled([1, 2]); erased([1, 2]); }
+`,
+      },
+      new Set(['erased.ts']),
+      {pool: 4, heap: 64},
+    );
+    expect(output.match(/one thread: 1000000 pushes/g)).toHaveLength(2);
+    expect(
+      output.match(/0 missing, 0 twice; reader: \d+ reads, 0 bad/g),
+    ).toHaveLength(4);
+  });
+
   it.each(['result', 'parameter'])(
     'rejects incompatible reference representations in method %ss',
     direction => {

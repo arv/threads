@@ -95,7 +95,7 @@ function getStructOfType(c: Own, t: Type | undefined): StructInfo | undefined {
 }
 
 // Direct calls and extracted methods use the compiler's raw calling convention.
-interface StructMethodAccess {
+export interface StructMethodAccess {
   receiver: Node;
   name: string;
   key?: Node;
