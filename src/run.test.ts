@@ -120,6 +120,7 @@ describe('programs on threads', () => {
       'held, 1 threads: bad reads 0, blocks left 0',
       'race, 3 readers, 2 collectors: bad reads 0, blocks freed by collections some, by the last some, blocks left 0',
       'held, 4 threads: bad reads 0, blocks left 0',
+      'stuck: a collection gave up, freeing 0; the parked thread went on: true; the next freed 3, blocks left 0',
     ]);
   }, 60_000);
 });

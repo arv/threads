@@ -305,9 +305,10 @@ from outside the heap. A collection goes like this:
    flight or a shared value. It's a root. Everything a root reaches through
    references stays.
 5. **Free the rest.** What's left is garbage: cycles, and blocks that only
-   cycles reach. The collector notes what each of them holds outside the garbage
-   (strings, and blocks something else holds as well), frees each block once,
-   and then gives those counts back.
+   cycles reach. The collector gives back the counts they hold outside the
+   garbage (strings, and blocks something else holds as well), and then frees
+   each block once. Its own bookkeeping is a few typed arrays, 13 bytes for each
+   block it walks.
 
 A collection is all or nothing. If a thread doesn't reach a quiescent point
 within the timeout (a second by default), the collector frees nothing and

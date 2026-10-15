@@ -5,15 +5,19 @@
 // --check poisons freed blocks, so a read after free shows up as a bad value.
 //
 //   shared struct Ring { value: number; check: number; next: Ring | null }
-//   shared struct Box { item: Ring | null; done: number }
+//   shared struct Box { item: Ring | null; done: number; collected: i32 }
+//   shared struct Flags { stop: i32; started: i32; ticks: i32 }
 //
 // a writer keeps replacing box.item with a fresh ring, so that the old one is
 // a cycle nothing refers to; a mutator inserts nodes into the ring box.item
 // holds and takes them out again; readers walk that ring without counting its
 // addresses (valid until their next quiescent point), and now and then hold
 // one, counted, across quiescent points; and collectors collect cycles all the
-// while. a node a reader reaches always has its ring's value, and nothing is
-// left once the threads are done
+// while. the writer goes on until a collection has freed something, so that
+// collections overlap the changes. a node a reader reaches always has its
+// ring's value, and nothing is left once the threads are done. then a thread
+// that never reaches a quiescent point makes a collection give up: it frees
+// nothing, the threads it parked go on, and a later one frees what is left
 import {
   F64,
   I32,
@@ -34,9 +38,11 @@ import {
 import {K_FREE, POISON} from '@arv/threads/runtime';
 
 const Ring = sharedStruct('Ring', ['value', 'check', 'next'], [2]);
-const Box = sharedStruct('Box', ['item', 'done'], [0]);
+const Box = sharedStruct('Box', ['item', 'done', 'collected'], [0], 'rfi');
+const Flags = sharedStruct('Flags', ['stop', 'started', 'ticks'], [], 'iii');
 // Ring: value F64[(p >> 3) + 1], check F64[(p >> 3) + 2], next I32[(p >> 2) +
-// 6]; Box: item I32[(p >> 2) + 2], done F64[(p >> 3) + 2]
+// 6]; Box: item I32[(p >> 2) + 2], done F64[(p >> 3) + 2], collected I32[(p >>
+// 2) + 6]; Flags: stop I32[(p >> 2) + 2], started + 4, ticks + 6
 
 // function ring(n: number, v: number): Ring, n nodes, the last one's next the
 // first
@@ -53,9 +59,10 @@ function ring(n: number, v: number) {
   return first;
 }
 
-// function writer(box: Box, rounds: number)
+// function writer(box: Box, rounds: number): rounds at least, and on until a
+// collection has freed something
 function writer(box: number, rounds: number) {
-  for (let i = 1; i <= rounds; i++) {
+  for (let i = 1; i <= rounds || Atomics.load(I32, (box >> 2) + 6) === 0; i++) {
     store((box >> 2) + 2, ring(3 + (i % 5), i)); // box.item = ring(...)
     if (i % 4 === 0) release(ring(2, -i)); // a cycle that was never stored
     quiescent();
@@ -130,7 +137,9 @@ function collector(box: number) {
   let freed = 0,
     x = 0;
   while (F64[(box >> 3) + 2] === 0) {
-    freed += collectCycles();
+    const f = collectCycles();
+    if (f > 0) Atomics.add(I32, (box >> 2) + 6, f); // box.collected += f
+    freed += f;
     for (let k = 0; k < 20000; k++) x += k; // a moment between collections
     quiescent();
   }
@@ -209,11 +218,67 @@ function held(threads: number) {
   );
 }
 
+// function spinner(flags: Flags): a loop with no quiescent point, until
+// flags.stop
+function spinner(flags: number) {
+  Atomics.store(I32, (flags >> 2) + 4, 1); // flags.started = 1
+  let x = 0;
+  while (Atomics.load(I32, (flags >> 2) + 2) === 0) x++;
+  return x === -1 ? -1 : 0;
+}
+// function ticker(flags: Flags): counts its quiescent points, where it parks
+// while a collection runs, until flags.stop
+function ticker(flags: number) {
+  while (Atomics.load(I32, (flags >> 2) + 2) === 0) {
+    Atomics.add(I32, (flags >> 2) + 6, 1); // flags.ticks++
+    quiescent();
+  }
+  return 0;
+}
+
+function stuck() {
+  const before = live(),
+    flags = newStruct(Flags);
+  let gaveUp = 0,
+    goesOn = false,
+    after = 0;
+  try {
+    scope(s => {
+      const sp = s.spawn(spinner, countedRef(flags)),
+        tk = s.spawn(ticker, countedRef(flags));
+      const pause = new Int32Array(new SharedArrayBuffer(4));
+      while (Atomics.load(I32, (flags >> 2) + 4) === 0)
+        Atomics.wait(pause, 0, 0, 1);
+      release(ring(3, 1)); // a cycle to collect
+      // the ticker parks; the spinner never does
+      gaveUp = collectCycles(200);
+      const left = live() - before;
+      // the ticker goes on: it was let go
+      const ticks = Atomics.load(I32, (flags >> 2) + 6);
+      for (let k = 0; k < 1000 && !goesOn; k++) {
+        Atomics.wait(pause, 0, 0, 1);
+        goesOn = Atomics.load(I32, (flags >> 2) + 6) !== ticks;
+      }
+      Atomics.store(I32, (flags >> 2) + 2, 1); // flags.stop = 1
+      sp.join();
+      tk.join();
+      return left;
+    });
+    after = collectCycles();
+  } finally {
+    release(flags);
+  }
+  log(
+    `stuck: a collection gave up, freeing ${gaveUp}; the parked thread went on: ${goesOn}; the next freed ${after}, blocks left ${live() - before}`,
+  );
+}
+
 export function main(threadCounts: number[]) {
   for (const n of threadCounts) {
     race(Math.max(1, n - 1), n > 1 ? 2 : 1);
     held(n);
   }
+  stuck();
 }
 
 register(import.meta.url, {
@@ -225,5 +290,8 @@ register(import.meta.url, {
   race,
   holder,
   held,
+  spinner,
+  ticker,
+  stuck,
   main,
 });

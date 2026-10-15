@@ -1219,47 +1219,74 @@ function trackedOwner(p: number) {
   const kind = I32[p >> 2];
   return counted(kind) && kind !== K_STR ? owner(p) : 0;
 }
+// the scan's own memory is a few typed arrays, 13 bytes for each tracked block
+// (at least 16 bytes of the heap): the blocks' addresses in order, their counts
+// less the heap's references, a mark each, and a work list
 function scanCycles() {
-  // each tracked block's count, less the counts tracked blocks hold on it
-  const left = new Map<number, number>();
-  $eachTracked(b => {
-    left.set(b, I32[countAt(b)]);
+  let n = 0;
+  $eachTracked(() => {
+    n++;
   });
-  for (const b of left.keys())
-    held(b, p => {
-      const o = trackedOwner(p),
-        n = left.get(o);
-      if (n !== undefined) left.set(o, n - 1);
-    });
+  if (n === 0) return 0;
+  const at = new Int32Array(n),
+    left = new Int32Array(n),
+    mark = new Uint8Array(n),
+    work = new Int32Array(n);
+  n = 0;
+  $eachTracked(b => {
+    at[n] = b;
+    left[n] = I32[countAt(b)];
+    n++;
+  });
+  // the index of the tracked block a count p holds is on, or -1
+  const indexOf = (p: number) => {
+    const o = trackedOwner(p);
+    if (o === 0) return -1;
+    for (let lo = 0, hi = n - 1; lo <= hi;) {
+      const mid = (lo + hi) >> 1;
+      if (at[mid] < o) lo = mid + 1;
+      else if (at[mid] > o) hi = mid - 1;
+      else return mid;
+    }
+    return -1;
+  };
+  // each tracked block's count, less the counts tracked blocks hold on it
+  const subtract = (p: number) => {
+    const i = indexOf(p);
+    if (i >= 0) left[i]--;
+  };
+  for (let i = 0; i < n; i++) held(at[i], subtract);
   // what is held from outside, and what it reaches
-  const reached = new Set<number>(),
-    work: number[] = [];
-  for (const [b, n] of left)
-    if (n > 0) {
-      reached.add(b);
-      work.push(b);
+  let top = 0,
+    reached = 0;
+  for (let i = 0; i < n; i++)
+    if (left[i] > 0) {
+      mark[i] = 1;
+      work[top++] = i;
+      reached++;
     }
   const reach = (p: number) => {
-    const o = trackedOwner(p);
-    if (left.has(o) && !reached.has(o)) {
-      reached.add(o);
-      work.push(o);
+    const i = indexOf(p);
+    if (i >= 0 && mark[i] === 0) {
+      mark[i] = 1;
+      work[top++] = i;
+      reached++;
     }
   };
-  while (work.length !== 0) held(work.pop()!, reach);
-  if (reached.size === left.size) return 0;
-  // the rest: what it holds outside of itself is noted before any of it is
-  // freed, then it is freed, then that is given back
-  const garbage = new Set<number>();
-  for (const b of left.keys()) if (!reached.has(b)) garbage.add(b);
-  const outside: number[] = [];
-  for (const b of garbage)
-    held(b, p => {
-      if (p !== 0 && !garbage.has(trackedOwner(p))) outside.push(p);
-    });
-  for (const b of garbage) freeShell(b);
-  for (const p of outside) release(p);
-  return garbage.size;
+  while (top !== 0) held(at[work[--top]], reach);
+  if (reached === n) return 0;
+  // the rest gives back what it holds outside of itself (strings, blocks held
+  // from elsewhere too, and blocks that only it holds, which hold no
+  // reference: none of it is reached from there, nor freed by it), and then
+  // each block of it is freed
+  const outside = (p: number) => {
+    if (p === 0) return;
+    const i = indexOf(p);
+    if (i < 0 || mark[i] === 1) release(p);
+  };
+  for (let i = 0; i < n; i++) if (mark[i] === 0) held(at[i], outside);
+  for (let i = 0; i < n; i++) if (mark[i] === 0) freeShell(at[i]);
+  return n - reached;
 }
 // frees the cycles of shared structs, SharedArrays, maps and sets that nothing
 // outside them refers to, and returns how many blocks it freed. every other
