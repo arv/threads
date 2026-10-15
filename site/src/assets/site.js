@@ -3,6 +3,8 @@
 // contents' current section, and a Copy button on each code block. It's plain
 // JavaScript, which the site serves as it is.
 
+import {escape, rank, snippet} from './search-results.js';
+
 // The theme
 
 const media = matchMedia('(prefers-color-scheme: dark)');
@@ -59,7 +61,8 @@ matchMedia('(min-width: 768px)').addEventListener('change', event => {
   if (event.matches) menu.close();
 });
 
-// Search, over the index the build writes (lib/search.ts)
+// Search, over the index the build writes (lib/search.ts). The input keeps the
+// focus, and names the result the arrow keys select as its active descendant
 
 const searchDialog = document.querySelector('[data-search]');
 const searchInput = searchDialog.querySelector('input');
@@ -107,70 +110,13 @@ searchDialog.addEventListener('close', () => {
   render([]);
 });
 
-const words = text => text.toLowerCase().match(/[\p{L}\p{N}_$]+/gu) ?? [];
-
-function score(entry, tokens, phrase) {
-  const page = entry.page.toLowerCase();
-  const section = (entry.section ?? '').toLowerCase();
-  const text = entry.text.toLowerCase();
-  const titleWords = words(`${page} ${section}`);
-  const textWords = words(text);
-  let total = 0;
-  for (const token of tokens) {
-    const inTitle = titleWords.some(word => word.startsWith(token));
-    const inText = textWords.some(word => word.startsWith(token));
-    if (!inTitle && !inText) return 0;
-    if (inTitle) total += entry.section ? 16 : 10;
-    if (inText) total += 1;
-  }
-  if (section.includes(phrase)) total += 18;
-  if (page.includes(phrase)) total += 12;
-  if (text.includes(phrase)) total += 4;
-  return total;
-}
-
 function search() {
-  const phrase = searchInput.value.trim().toLowerCase();
-  const tokens = words(phrase);
-  if (!tokens.length || !Array.isArray(index)) {
+  if (!Array.isArray(index)) {
     render([]);
     return;
   }
-  render(
-    index
-      .map(entry => ({entry, score: score(entry, tokens, phrase)}))
-      .filter(result => result.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 20)
-      .map(result => result.entry),
-    tokens,
-  );
-}
-
-const escape = text =>
-  text.replace(
-    /[&<>"']/g,
-    c =>
-      ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'})[
-        c
-      ],
-  );
-
-function snippet(text, tokens) {
-  const lower = text.toLowerCase();
-  const at = Math.min(
-    ...tokens.map(token => lower.indexOf(token)).filter(i => i !== -1),
-  );
-  const start = Number.isFinite(at) ? Math.max(at - 60, 0) : 0;
-  const part = text.slice(start, start + 120);
-  const marked = escape(part).replace(
-    new RegExp(
-      `(${tokens.map(token => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`,
-      'gi',
-    ),
-    '<mark>$1</mark>',
-  );
-  return `${start > 0 ? '…' : ''}${marked}${start + 120 < text.length ? '…' : ''}`;
+  const {entries, tokens} = rank(index, searchInput.value);
+  render(entries, tokens);
 }
 
 const pageIcon =
@@ -194,6 +140,7 @@ function render(entries, tokens = []) {
     )
     .join('');
   emptyMessage.hidden = entries.length > 0 || !searchInput.value.trim();
+  searchInput.setAttribute('aria-expanded', String(entries.length > 0));
   if (entries.length)
     searchInput.setAttribute('aria-activedescendant', 'search-result-0');
   else searchInput.removeAttribute('aria-activedescendant');

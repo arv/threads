@@ -132,12 +132,22 @@
     <dialog class="search-dialog" aria-label="Search" data-search>
       <div class="search-input-row">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
-        <input type="search" placeholder="Type to search..." aria-label="Search the docs" autocomplete="off" spellcheck="false" />
+        <input
+          type="search"
+          role="combobox"
+          placeholder="Type to search..."
+          aria-label="Search the docs"
+          aria-controls="search-results"
+          aria-expanded="false"
+          aria-autocomplete="list"
+          autocomplete="off"
+          spellcheck="false"
+        />
         <button type="button" class="icon-button" aria-label="Close" data-close>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </div>
-      <ul class="search-results" role="listbox" aria-label="Results"></ul>
+      <ul id="search-results" class="search-results" role="listbox" aria-label="Results"></ul>
       <p class="search-empty" hidden>No results found.</p>
     </dialog>
   </body>

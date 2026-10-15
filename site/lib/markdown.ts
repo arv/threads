@@ -18,10 +18,8 @@ export const themes = {light: 'github-light', dark: 'github-dark'} as const;
 // one in another language fails the build
 export const languages = ['ts', 'js', 'sh'] as const;
 
-const notes = {
-  note: {emoji: '🤔', heading: 'Note'},
-  warning: {emoji: '😬', heading: 'Warning'},
-} as const;
+// each kind of note, and its heading when the note names none
+const notes = {note: 'Note', warning: 'Warning'} as const;
 
 export async function markdown(): Promise<MarkdownIt> {
   const md = markdownIt({html: true});
@@ -34,7 +32,7 @@ export async function markdown(): Promise<MarkdownIt> {
 
   // `::: warning Status: experimental` starts a note headed "Status:
   // experimental"; `:::` ends it
-  for (const [type, {emoji, heading}] of Object.entries(notes))
+  for (const [type, heading] of Object.entries(notes))
     md.use(container, type, {
       render(tokens, i) {
         const token = tokens[i];
@@ -44,7 +42,6 @@ export async function markdown(): Promise<MarkdownIt> {
         return (
           `<div class="note note-${type}" id="${md.utils.escapeHtml(id)}">` +
           `<p class="note-heading"><a class="heading-link" href="#${md.utils.escapeHtml(id)}">` +
-          `<span class="note-emoji" aria-hidden="true">${emoji}</span>` +
           `<span>${md.utils.escapeHtml(title)}</span></a></p>` +
           '<div class="note-body">\n'
         );

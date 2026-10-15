@@ -5,8 +5,8 @@ publishes them at [arv.github.io/threads](https://arv.github.io/threads/), with
 [the playground](../playground) beside them at /playground/.
 
 The site is static, built by [Eleventy](https://www.11ty.dev) from the Markdown
-in [src/](src). It has no framework: a Nunjucks layout, one stylesheet and one
-small script.
+in [src/](src). It has no framework: a Nunjucks layout, one stylesheet and two
+small scripts.
 
 ## Working on It
 
@@ -38,7 +38,7 @@ that path in front.
 | `src/*.md`, `src/api/*.md`    | The pages, at the URLs their paths give them                                 |
 | `lib/nav.ts`                  | The sidebar's sections, and the order of Previous and Next                   |
 | `src/_includes/`              | The layout: the navbar, the sidebar, the page and "On this page"             |
-| `src/assets/`                 | The stylesheet, the script (theme, menu, search, copy buttons) and the icon  |
+| `src/assets/`                 | The stylesheet, the scripts (theme, menu, search, copy buttons) and the icon |
 | `lib/markdown.ts`             | The Markdown: heading anchors, notes (`::: note`), Shiki, tables that scroll |
 | `lib/toc.ts`, `lib/search.ts` | "On this page", and the search index the build writes (`search-index.json`)  |
 | `eleventy.config.ts`          | Eleventy's configuration                                                     |

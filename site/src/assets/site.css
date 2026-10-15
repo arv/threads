@@ -16,8 +16,8 @@
   --border: 240 5.9% 85%;
   --input: 240 5.9% 90%;
   --radius: 0.5rem;
-  --highlight: 199 89% 40%;
-  --highlight-soft: 199 89% 40% / 12%;
+  /* dark enough for small text: 5.3:1 on inline code's background */
+  --highlight: 199 89% 32%;
 
   --prose-body: #3f3f46;
   --prose-headings: #18181b;
@@ -58,7 +58,6 @@
   --border: 240 3.7% 20%;
   --input: 240 3.7% 15.9%;
   --highlight: 199 89% 62%;
-  --highlight-soft: 199 89% 62% / 14%;
 
   --prose-body: #d4d4d8;
   --prose-headings: #fff;
@@ -143,8 +142,9 @@ svg {
   outline-offset: 2px;
 }
 
+/* the page's background on the accent: white in light mode, black in dark */
 mark {
-  color: #fff;
+  color: hsl(var(--background));
   border-radius: 0.25rem;
   padding: 0 0.15rem;
   background-color: hsl(var(--highlight));
@@ -971,10 +971,6 @@ kbd {
   align-items: center;
   gap: 0.5rem;
   font-weight: 800;
-}
-
-.note-emoji {
-  font-size: 1.25rem;
 }
 
 .prose .note-body p {

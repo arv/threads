@@ -1,6 +1,6 @@
 // "On this page": a page's h2s and h3s, with their text
 import {expect, it} from 'vite-plus/test';
-import {decode, toc} from './toc.ts';
+import {decode, textOf, toc} from './toc.ts';
 
 it('lists h2s and h3s, and not h4s', () => {
   const html = [
@@ -20,4 +20,12 @@ it('decodes entities in text and ids', () => {
     {level: 2, id: 'a&b', text: "Q&A <T> 'x'"},
   ]);
   expect(decode('&unknown; &nbsp;')).toBe('&unknown;  ');
+});
+
+it('keeps a line of code together, and blocks apart', () => {
+  expect(
+    textOf(
+      '<pre><code><span>new</span><span> Channel</span><span>&#x3C;</span><span>number</span><span>></span></code></pre><p>One</p><p>Two</p>',
+    ),
+  ).toBe('new Channel<number> One Two');
 });

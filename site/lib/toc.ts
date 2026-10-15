@@ -13,10 +13,15 @@ export function toc(html: string): TocEntry[] {
   }));
 }
 
-// the text of some HTML: its tags dropped, its entities decoded and its
-// whitespace collapsed
+// a tag that ends a block of text, rather than marking up a word in a line
+const blockTag =
+  /<\/?(?:p|li|ul|ol|dl|dt|dd|table|thead|tbody|tr|th|td|h[1-6]|div|pre|blockquote|br|hr)\b[^>]*>/gi;
+
+// the text of some HTML: its blocks apart, its other tags dropped (a line of
+// highlighted code is many spans), its entities decoded and its whitespace
+// collapsed
 export function textOf(html: string): string {
-  return decode(html.replace(/<[^>]*>/g, ' '))
+  return decode(html.replace(blockTag, ' ').replace(/<[^>]*>/g, ''))
     .replace(/\s+/g, ' ')
     .trim();
 }
