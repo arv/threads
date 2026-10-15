@@ -19,7 +19,12 @@ import {CellKind} from './context.ts';
 import type {FieldKind, Own, StructInfo} from './context.ts';
 import {IndexKind, ObjectFlags, SymbolFlags, TypeFlags} from './host.ts';
 import type {Signature, TsSymbol, Type} from './host.ts';
-import {getCellType, getFieldKind, isFieldType} from './layout.ts';
+import {
+  checkStructMethodType,
+  getCellType,
+  getFieldKind,
+  isFieldType,
+} from './layout.ts';
 import {Messages} from './messages.ts';
 import {
   FunctionFlags,
@@ -706,6 +711,26 @@ export function isStructMethod(c: Own, node: Node | undefined): boolean {
   );
 }
 
+// Find the exposed property type, including unique symbols and broad
+// computed keys represented by index signatures.
+export function structMethodType(
+  c: Own,
+  type: Type,
+  method: Node,
+): Type | undefined {
+  const symbol = c.host.symbolOfDeclaration(method);
+  const property =
+    symbol &&
+    c.host.checker.getPropertiesOfType(type).find(p => p.name === symbol.name);
+  if (property) return c.host.typeOfSymbol(property);
+  const key = structMethodKey(c, method);
+  if (key && typeof key !== 'string')
+    return c.host.checker
+      .getIndexInfosOfType(type)
+      .find(i => c.host.checker.isTypeAssignableTo(key, i.keyType))?.valueType;
+  return undefined;
+}
+
 export function isStructConstructor(c: Own, node: Node | undefined): boolean {
   return isStructMethod(c, node) && node!.name?.text === 'constructor';
 }
@@ -909,6 +934,11 @@ export function checkStructCall(c: Own, call: Node): void {
       )
         c.error(property, Messages.StructMethod);
       if (knownKey && key !== undefined) memberNames.add(key);
+      if (key !== 'constructor') {
+        const exposed = structMethodType(c, t, property);
+        if (exposed)
+          checkStructMethodType(c, property, c.host.typeOf(property), exposed);
+      }
       const checkSuper = (child: Node): void => {
         if (
           child.kind === K.SuperKeyword &&

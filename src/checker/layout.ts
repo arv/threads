@@ -45,6 +45,7 @@ import {
   structMethodKey,
   getStructTypeOfCall,
   structMethods,
+  structMethodType,
 } from './markers.ts';
 import {Messages} from './messages.ts';
 import {
@@ -78,7 +79,10 @@ const structCell = (kind: CellKind, s: StructInfo): CellType => ({
 
 // The shared struct whose instances have type t, if any: a `struct(...)` call
 // (whose values' type may be intersected with Cell).
-function getStructOfType(c: Own, t: Type | undefined): StructInfo | undefined {
+export function getStructOfType(
+  c: Own,
+  t: Type | undefined,
+): StructInfo | undefined {
   if (!t) return undefined;
   if (c.structOfType.has(t)) return c.structOfType.get(t);
   let result: StructInfo | undefined;
@@ -94,6 +98,41 @@ function getStructOfType(c: Own, t: Type | undefined): StructInfo | undefined {
   return result;
 }
 
+export function checkStructMethodType(
+  c: Own,
+  at: Node,
+  source: Type,
+  target: Type,
+): void {
+  const why = callableMismatch(c, source, target, false, newSeen(), true);
+  if (why)
+    c.error(
+      at,
+      Messages.LayoutMismatch,
+      c.host.typeToString(source),
+      c.host.typeToString(target),
+      why,
+    );
+}
+
+function checkStructMethodAccess(c: Own, access: Node): void {
+  const info = getStructMethodAccess(c, access);
+  if (!info) return;
+  const target = c.host.typeOf(access);
+  for (const member of nonNullishMembers(c, c.host.typeOf(info.receiver))) {
+    const decl = getStructOfType(c, member)?.decl;
+    if (!decl) continue;
+    for (const method of structMethods(decl)) {
+      const key = structMethodKey(c, method);
+      const requested = info.key ? c.host.typeOf(info.key) : info.name;
+      if (methodKeyMatches(c, requested, key)) {
+        const exposed = structMethodType(c, member, method);
+        if (exposed) checkStructMethodType(c, access, exposed, target);
+      }
+    }
+  }
+}
+
 // Direct calls and extracted methods use the compiler's raw calling convention.
 export interface StructMethodAccess {
   receiver: Node;
@@ -107,6 +146,16 @@ function methodKeyMatches(
   declared: string | Type | undefined,
 ): boolean {
   if (declared === name) return true;
+  if (typeof name !== 'string') {
+    if (name.isStringLiteralType())
+      return methodKeyMatches(c, name.value, declared);
+    if (name.isNumberLiteralType())
+      return methodKeyMatches(c, String(name.value), declared);
+    if (name.flags & TypeFlags.Union)
+      return c.host
+        .memberTypes(name)
+        .some(t => methodKeyMatches(c, t, declared));
+  }
   if (declared === undefined || typeof declared === 'string') return false;
   if (declared.isStringLiteralType())
     return typeof name === 'string'
@@ -867,20 +916,50 @@ function unfit(
         )
           continue;
         const other = properties.find(p => p.name === property.name);
-        if (!other) continue; // Missing members are TypeScript's diagnostic.
-        const why = callableMismatch(
-          c,
-          c.host.typeOfSymbol(other),
-          c.host.typeOfSymbol(property),
-          cast,
-          seen,
-          true,
+        const decl = c.host.declarationOf(
+          property.valueDeclaration ?? property.declarations[0],
         );
-        if (why) return `method '${property.name}' of '${from.name}': ${why}`;
+        const key = decl ? structMethodKey(c, decl) : property.name;
+        const candidates = other
+          ? [c.host.typeOfSymbol(other)]
+          : checker
+              .getIndexInfosOfType(source)
+              .filter(
+                i => key !== undefined && methodKeyMatches(c, key, i.keyType),
+              )
+              .map(i => i.valueType);
+        for (const candidate of candidates) {
+          const why = callableMismatch(
+            c,
+            candidate,
+            c.host.typeOfSymbol(property),
+            cast,
+            seen,
+            true,
+          );
+          if (why) return `method '${property.name}' of '${from.name}': ${why}`;
+        }
       }
       // A computed name typed string, number or symbol becomes an index
       // signature rather than a named property of the instance type.
       for (const into of checker.getIndexInfosOfType(target)) {
+        for (const property of properties) {
+          const decl = c.host.declarationOf(
+            property.valueDeclaration ?? property.declarations[0],
+          );
+          const key = decl ? structMethodKey(c, decl) : property.name;
+          if (key === undefined || !methodKeyMatches(c, key, into.keyType))
+            continue;
+          const why = callableMismatch(
+            c,
+            c.host.typeOfSymbol(property),
+            into.valueType,
+            cast,
+            seen,
+            true,
+          );
+          if (why) return `method '${property.name}' of '${from.name}': ${why}`;
+        }
         for (const out of checker.getIndexInfosOfType(source)) {
           if (!checker.isTypeAssignableTo(into.keyType, out.keyType)) continue;
           const why = callableMismatch(
@@ -1174,7 +1253,18 @@ function computeConversion(c: Own, node: Node): void {
       const init = node.initializer as Node | undefined;
       if (isBindingPattern(node.name)) {
         if (init) {
-          setTarget(c, init, false); // destructured through the handle
+          if (
+            node.name.kind === K.ObjectBindingPattern &&
+            getStructOfType(c, host.typeOf(init)) &&
+            (node.name.elements as Node[]).some(
+              e =>
+                !e.dotDotDotToken &&
+                host.callSignatures(host.typeOf(e.name)).length > 0,
+            )
+          ) {
+            c.structDestructures.set(init, node.name);
+            c.conversions.set(init, Conversion.StructDestructure);
+          } else setTarget(c, init, false); // destructured through the handle
         } else if (
           node.kind === K.Parameter ||
           (node.kind === K.VariableDeclaration &&
@@ -1286,6 +1376,7 @@ function computeConversion(c: Own, node: Node): void {
       return;
     }
     case K.PropertyAccessExpression: {
+      checkStructMethodAccess(c, node);
       const object = node.expression as Node;
       const t = host.typeOf(object);
       if (!isCellType(c, t)) return;
@@ -1314,6 +1405,7 @@ function computeConversion(c: Own, node: Node): void {
       return;
     }
     case K.ElementAccessExpression: {
+      checkStructMethodAccess(c, node);
       const object = node.expression as Node;
       const t = host.typeOf(object);
       if (!isCellType(c, t)) return;

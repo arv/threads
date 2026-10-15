@@ -63,13 +63,14 @@ this receiver restriction **non-generic**; the term does not refer to TypeScript
 type parameters. Struct inheritance is not supported here.
 
 Methods support computed property names such as `[methodName]()`, `[1 + 2]()`,
-and `[Symbol.iterator]()`. Names can evaluate to strings, numbers, or symbols;
-each name expression and its property-key coercion run once, in source order.
-Returning an iterator makes the struct usable with `for...of`, spread, and
-`Array.from`. These methods live on local prototypes and use no shared field
-storage. SharedVector implements snapshot iteration this way. Initializers use
-`constructor(...) { ... }` syntax; computed methods cannot declare a
-constructor.
+and `[Symbol.iterator]()`. Name values must be primitive strings, numbers, or
+symbols; each name expression and its property-key coercion run once, in source
+order. Returning an iterator makes the struct usable with `for...of`, spread,
+and `Array.from`. These methods live on local prototypes and use no shared field
+storage. SharedVector implements snapshot iteration this way. Compiled method
+bodies do not support `arguments`; use named parameters or rest parameters
+instead. Initializers use `constructor(...) { ... }` syntax; computed methods
+cannot declare a constructor.
 
 Declare a struct with a constructor or methods in a top-level `const`. Methods
 are fixed after declaration: they cannot be replaced or shadowed on an instance.

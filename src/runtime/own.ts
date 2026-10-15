@@ -902,9 +902,25 @@ const structInitializers = new WeakMap<
   {
     raw: (...args: any[]) => unknown;
     boxed: (this: MaybeCell, ...args: unknown[]) => unknown;
+    compiled: boolean;
   }
 >();
 const structDeclarations = new Map<string, number>();
+const erasedStructMethods = new WeakSet<StructMethod>();
+const erasedMethodAdapters = new WeakMap<
+  StructMethod,
+  Map<string, StructMethod>
+>();
+const extractedMethodAdapters = new WeakMap<StructMethod, StructMethod>();
+
+function boxStructArguments(args: unknown[], signature: StructMethodSignature) {
+  for (const i of signature.cells)
+    if (i < args.length) args[i] = box(args[i] as number | undefined);
+  if (signature.rest !== undefined)
+    for (let i = signature.rest; i < args.length; i++)
+      args[i] = box(args[i] as number | undefined);
+  return args;
+}
 
 export const structIdentity = (module: string, name: string) =>
   JSON.stringify([module, name]);
@@ -965,10 +981,11 @@ function attachStructMethods(
         );
       return a;
     };
-    if (!signature)
+    if (!signature) {
       raw[name] = (self: number, ...args: unknown[]) =>
         fn.apply(box(check(self)), args);
-    else if (signature.async)
+      erasedStructMethods.add(raw[name]);
+    } else if (signature.async)
       raw[name] = async (self: number, ...args: unknown[]) => {
         check(self);
         retain(self);
@@ -990,18 +1007,20 @@ function attachStructMethods(
         for (let i = signature.rest; i < args.length; i++)
           args[i] = unbox(args[i] as MaybeCell);
       const result = raw[name](self, ...args);
-      const boxed = (value: number) => {
+      const boxed = (value: unknown) => {
+        // A synchronous union return may already be a boxed handle.
+        if (typeof value !== 'number') return value;
         try {
           return box(value);
         } finally {
           release(value);
         }
       };
-      return signature.result
-        ? signature.promiseResult
-          ? result.then(boxed)
-          : boxed(result)
-        : result;
+      return signature.promiseResult && isThenable(result)
+        ? result.then(boxed)
+        : signature.result
+          ? boxed(result)
+          : result;
     };
     if (name === 'constructor') {
       const initialize = raw[name] as StructMethod;
@@ -1014,6 +1033,7 @@ function attachStructMethods(
             }
           : initialize,
         boxed: boxedMethod,
+        compiled: !!signature,
       });
     } else {
       values[name] = function (this: unknown, ...args: unknown[]) {
@@ -1029,7 +1049,11 @@ function attachStructMethods(
 
 // A compiled call uses its numeric receiver directly. Looking up behavior by
 // the actual type also preserves dispatch through compatible struct types.
-export function structMethod(self: number, name: PropertyKey) {
+export function structMethod(
+  self: number,
+  name: PropertyKey,
+  signature?: StructMethodSignature,
+) {
   name = structKey(name);
   if (!self) throw new TypeError('own: a struct method needs a receiver');
   const type = structType(I32[self >> 2]);
@@ -1039,13 +1063,83 @@ export function structMethod(self: number, name: PropertyKey) {
     throw new TypeError(
       `own: struct method '${String(name)}' is not loaded in this worker; import its defining module`,
     );
-  return method;
+  if (!signature || !erasedStructMethods.has(method)) return method;
+  let adapters = erasedMethodAdapters.get(method);
+  if (!adapters) erasedMethodAdapters.set(method, (adapters = new Map()));
+  const key = JSON.stringify(signature);
+  let adapted = adapters.get(key);
+  if (!adapted) {
+    const address = (value: MaybeCell) => {
+      const raw = unbox(value);
+      return raw === undefined ? undefined : retain(raw);
+    };
+    adapted = (self: number, ...args: unknown[]) => {
+      const result = method(self, ...boxStructArguments(args, signature));
+      return signature.promiseResult && isThenable(result)
+        ? result.then(address)
+        : signature.result
+          ? address(result)
+          : result;
+    };
+    adapters.set(key, adapted);
+  }
+  return adapted;
 }
 
-export function structMethodValue(self: number, name: PropertyKey) {
+export function structMethodValue(
+  self: number,
+  name: PropertyKey,
+  signature?: StructMethodSignature,
+) {
   name = structKey(name);
-  structMethod(self, name); // validate the receiver and module registration
-  return structMethodValues.get(structType(I32[self >> 2]))![name];
+  const method = structMethod(self, name, signature);
+  const type = structType(I32[self >> 2]);
+  if (!signature || !erasedStructMethods.has(structBehavior.get(type)![name]))
+    return structMethodValues.get(type)![name];
+  let extracted = extractedMethodAdapters.get(method);
+  if (!extracted) {
+    extracted = function (this: unknown, ...args: unknown[]) {
+      const receiver =
+        typeof this === 'number' ? this : cellAddress(this as MaybeCell);
+      if (!receiver || I32[receiver >> 2] !== type.kind)
+        throw new TypeError(
+          `own: '${String(name)}' needs a receiver of its struct type`,
+        );
+      return method(receiver, ...args);
+    };
+    extractedMethodAdapters.set(method, extracted);
+  }
+  return extracted;
+}
+
+// Raw constructors need to box shared arguments when their module was erased.
+export function structConstructor(
+  type: StructType,
+  signature: StructMethodSignature,
+) {
+  return (...args: unknown[]) =>
+    newStruct(
+      type,
+      ...(structInitializers.get(type)?.compiled
+        ? args
+        : boxStructArguments(args, signature)),
+    );
+}
+
+// Destructuring reads fields through the handle, and methods through the raw
+// extraction adapter used by an ordinary compiled property access.
+export function structDestructure(
+  self: number,
+  signatures: Record<string | symbol, StructMethodSignature>,
+) {
+  const handle = box(self)!;
+  return new Proxy(handle, {
+    get(target, key, receiver) {
+      if (Object.hasOwn(signatures, key))
+        return structMethodValue(self, key, signatures[key]);
+      return Reflect.get(target, key, receiver);
+    },
+  });
 }
 // `const Name = struct({a: f64, b: ref<Name>(), c: bool, d: str, e: i32, f: u8,
 // g: ref<Channel>()})`

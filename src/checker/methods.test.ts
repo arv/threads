@@ -92,6 +92,179 @@ function run(
 }
 
 describe('struct methods', () => {
+  it('adapts compiled calls to type-erased constructors and methods', () => {
+    const {output} = run(
+      {
+        'leaf.ts': `import {struct, f64} from '@arv/threads';
+export const Leaf = struct({value: f64, constructor(value = 7) { this.value = value; }}, 'interop/Leaf');`,
+        'erased.ts': `import {struct, ref, type Struct} from '@arv/threads';
+import {Leaf} from './leaf.ts'; type Leaf = Struct<typeof Leaf>;
+export const Holder = struct({
+  leaf: ref<Leaf>(),
+  constructor(leaf: Leaf) { this.leaf = leaf; },
+  read(value: Leaf): number { return value.value; },
+  echo(value: Leaf): Leaf { return value; },
+  make(): Leaf { return new Leaf(9); },
+}, 'interop/Holder');`,
+        'main.ts': `import {log} from '@arv/threads';
+import {Leaf} from './leaf.ts'; import {Holder} from './erased.ts';
+export function main() {
+  const leaf = new Leaf(), holder = new Holder(leaf);
+  const echo = holder.echo;
+  log(holder.leaf!.value, holder.read(leaf), holder.echo(leaf).value, holder.make().value, echo.call(holder, leaf).value);
+}
+`,
+      },
+      new Set(['erased.ts']),
+    );
+    expect(output.trim()).toBe('7 7 7 9 7');
+  });
+
+  it.each(['union', 'indexed', 'explicit result', 'explicit parameter'])(
+    'rejects incompatible method conventions in %s types',
+    kind => {
+      const setup =
+        kind === 'union'
+          ? `
+const A = struct({make(): XY { return new XY(); }}); type A = Struct<typeof A>;
+const B = struct({make(): unknown { return new XY(); }}); type B = Struct<typeof B>;
+function use(value: A | B): unknown { return value.make(); }
+`
+          : kind === 'indexed'
+            ? `
+const key: symbol = Symbol.iterator;
+interface Indexed { tag: number; [key: symbol]: () => XY; }
+const Indexed = struct<Indexed>({tag: f64, [key](): XY { return new XY(); }});
+type Named = {tag: number; [Symbol.iterator](): YX};
+const Named = struct<Named>({tag: f64, [Symbol.iterator](): YX { return new YX(); }});
+function use(value: Indexed) {}
+const value: Named = new Named();
+use(value);
+`
+            : kind === 'explicit result'
+              ? `
+interface Factory { make(): unknown; }
+const Factory = struct<Factory>({make(): XY { return new XY(); }});
+`
+              : `
+interface Factory { read(value: XY): number; }
+const Factory = struct<Factory>({read(value: unknown): number { return typeof value === 'object' ? 1 : 0; }});
+`;
+      const {result} = program({
+        'main.ts': `import {struct, f64, type Struct} from '@arv/threads';
+const XY = struct({x: f64, y: f64}); type XY = Struct<typeof XY>;
+const YX = struct({y: f64, x: f64}); type YX = Struct<typeof YX>;
+${setup}
+`,
+      });
+      expect(result.typeDiagnostics).toEqual([]);
+      expect(result.diagnostics.some(d => d.code === 96033)).toBe(true);
+    },
+  );
+
+  it.each([false, true])(
+    'preserves loose nullish reference comparisons when erased=%s',
+    erased => {
+      const {output} = run(
+        {
+          'main.ts': `import {struct, f64, log, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64}); type Leaf = Struct<typeof Leaf>;
+function read(value?: Leaf | null) {
+  log(value == null, value != null, value == undefined, value != undefined, value === null, value === undefined);
+}
+export function main() { read(); read(null); read(new Leaf()); }
+`,
+        },
+        erased,
+      );
+      expect(output.trim()).toBe(
+        'true false true false false true\ntrue false true false true false\nfalse true false true false false',
+      );
+    },
+  );
+
+  it('retains receivers used by nested computed method names in escaped arrows', () => {
+    const {output} = run({
+      'main.ts': `import {struct, f64, log} from '@arv/threads';
+const C = struct({value: f64, constructor(value: number) { this.value = value; },
+  later() { return () => ({[this.value]() { return 1; }}); },
+});
+export function main() {
+  const later = new C(7).later(), replacement = new C(99);
+  log(Object.keys(later()).join(','), replacement.value);
+}
+`,
+    });
+    expect(output.trim()).toBe('7 99');
+  });
+
+  it.each([false, true])(
+    'evaluates computed names before the supplied identity when erased=%s',
+    erased => {
+      const {output} = run(
+        {
+          'main.ts': `import {struct, log} from '@arv/threads';
+const events: string[] = [];
+function key(): 'read' { events.push('key'); return 'read'; }
+function identity(): string { events.push('identity'); return 'order/' + events.join(','); }
+const C = struct({[key()]() { return 7; }}, identity());
+export function main() { log(events.join(','), new C().read()); }
+`,
+        },
+        erased,
+      );
+      expect(output.trim()).toBe('key,identity 7');
+    },
+  );
+
+  it.each([false, true])(
+    'adapts destructured methods with shared arguments and results when erased=%s',
+    erased => {
+      const {output} = run(
+        {
+          'main.ts': `import {struct, f64, log, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64, constructor(value = 7) { this.value = value; }}, 'destructure/Leaf'); type Leaf = Struct<typeof Leaf>;
+const Factory = struct({
+  make(): Leaf { return new Leaf(); }, read(value: Leaf): number { return value.value; },
+  [Symbol.iterator](): ArrayIterator<number> { return [7].values(); },
+}, 'destructure/Factory');
+let calls = 0;
+function key(): 'make' { calls++; return 'make'; }
+export function main() {
+  const factory = new Factory(), {make, read: get} = factory;
+  const leaf = make.call(factory);
+  log(leaf.value, get.call(factory, leaf));
+  const {[key()]: second, [Symbol.iterator]: iterator} = factory;
+  log(second.call(factory).value, iterator.call(factory).next().value, calls);
+}
+`,
+        },
+        erased,
+      );
+      expect(output.trim()).toBe('7 7\n7 7 1');
+    },
+  );
+
+  it('preserves immediate boxed results from methods with promised reference alternatives', () => {
+    const {output} = run({
+      'main.ts': `import {struct, f64, log, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64, constructor() { this.value = 7; }}); type Leaf = Struct<typeof Leaf>;
+async function create(): Promise<Leaf> { return new Leaf(); }
+const Factory = struct({
+  maybe(flag: boolean): Leaf | Promise<Leaf> { return flag ? new Leaf() : create(); },
+  absent(flag: boolean): Promise<Leaf> | undefined { return flag ? create() : undefined; },
+});
+async function read(value: unknown) {
+  const factory = value as {maybe(flag: boolean): unknown; absent(flag: boolean): unknown};
+  log((factory.maybe(true) as {value: number}).value, factory.absent(false) === undefined);
+  log(((await factory.maybe(false)) as {value: number}).value);
+}
+export async function main() { await read(new Factory()); }
+`,
+    });
+    expect(output.trim()).toBe('7 true\n7');
+  });
+
   it('runs compiled and type-erased SharedVector modules in the same worker pool', () => {
     const vector = fs.readFileSync(
       path.join(checker, '../../playground/programs/shared-vector.ts'),

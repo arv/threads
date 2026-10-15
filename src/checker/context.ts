@@ -26,7 +26,13 @@ export interface StructInfo {
 }
 
 // How a value is converted where it flows (printer.OwnConversion).
-export const Conversion = {None: 0, Box: 1, Unbox: 2, Zero: 3} as const;
+export const Conversion = {
+  None: 0,
+  Box: 1,
+  Unbox: 2,
+  Zero: 3,
+  StructDestructure: 4,
+} as const;
 export type Conversion = (typeof Conversion)[keyof typeof Conversion];
 
 // The layout kind of a type (printer.OwnCellType).
@@ -76,6 +82,7 @@ export class Own {
   readonly structCalls = new Map<Node, StructInfo | undefined>();
   readonly structUnions = new Map<Type, StructInfo | undefined>();
   readonly conversions = new Map<Node, Conversion>();
+  readonly structDestructures = new Map<Node, Node>();
   readonly captures = new Map<SourceFile, CaptureInfo>();
   readonly cellTypes = new Map<Type, boolean>();
   readonly structOfType = new Map<Type, StructInfo | undefined>();

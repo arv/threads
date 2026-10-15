@@ -29,6 +29,8 @@ export const HELPERS = new Set([
   'structKey',
   'structMethod',
   'structMethodValue',
+  'structConstructor',
+  'structDestructure',
   'store',
   'storeStr',
   'strAt',

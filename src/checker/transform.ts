@@ -54,6 +54,7 @@ import MagicString from 'magic-string';
 import type {SourceFile} from 'typescript/ast';
 import {CellKind, Conversion} from './context.ts';
 import type {CellType} from './context.ts';
+import type {Signature, Type} from './host.ts';
 import {
   binary,
   block,
@@ -78,8 +79,8 @@ import {
   write,
 } from './ir.ts';
 import type {Edit, Ir, Names, Part, Scope, Src, Temp} from './ir.ts';
-import {isCellType} from './layout.ts';
-import {isStructConstructor, structReceiver} from './markers.ts';
+import {getStructOfType, isCellType, nonNullishMembers} from './layout.ts';
+import {isStructConstructor, structMethods, structReceiver} from './markers.ts';
 import {Count, Local} from './resolver.ts';
 import type {AtomicCall, Resolver, StructCall} from './resolver.ts';
 import {
@@ -141,6 +142,8 @@ const HELPERS = [
   '__structKey',
   '__structMethod',
   '__structMethodValue',
+  '__structConstructor',
+  '__structDestructure',
   '__store',
   '__storeStr',
   '__strAt',
@@ -639,7 +642,40 @@ class Lowering {
         const edits: Edit[] = [];
         forEachChild(node, child => {
           if (child === node.initializer || isErased(child)) return;
-          const ir = this.visit(child);
+          let ir = this.visit(child);
+          const metadata = this.destructuredMethods.get(node.parent);
+          const methodType = metadata && this.r.c.host.typeOf(node.name);
+          const signature =
+            methodType && this.r.c.host.callSignatures(methodType).length
+              ? (this.methodSignature(methodType) ??
+                raw('{cells: [], result: false}'))
+              : undefined;
+          if (
+            metadata &&
+            signature &&
+            child === node.propertyName &&
+            child.kind === K.ComputedPropertyName
+          ) {
+            const key = this.newTemp();
+            ir = this.update(child, [
+              [
+                child.expression,
+                paren(
+                  comma([
+                    this.assign(
+                      tempRef(key),
+                      this.call('__structKey', this.visit(child.expression)),
+                    ),
+                    this.assign(
+                      elem(tempRef(metadata), tempRef(key)),
+                      signature,
+                    ),
+                    tempRef(key),
+                  ]),
+                ),
+              ],
+            ]);
+          }
           if (!isIdentity(ir, child)) edits.push(this.editOf(child, ir));
         });
         const initializer = this.fullExpression(node.initializer, Ctx.AtOnce);
@@ -751,6 +787,37 @@ class Lowering {
   // Visits an expression, applying its box, unbox or null conversion.
   private visitExpression(node: Node, ctx: Ctx): Ir {
     switch (this.r.conversion(node)) {
+      case Conversion.StructDestructure: {
+        const pattern = this.r.c.structDestructures.get(node)!;
+        const metadata = this.newTemp();
+        this.destructuredMethods.set(pattern, metadata);
+        const properties: Part[] = ['{__proto__: null'];
+        for (const binding of pattern.elements as Node[]) {
+          if (binding.dotDotDotToken) continue;
+          const key = binding.propertyName ?? binding.name;
+          if (key.kind === K.ComputedPropertyName) continue;
+          const signature = this.methodSignature(
+            this.r.c.host.typeOf(binding.name),
+          );
+          if (signature)
+            properties.push(', [', str(key.text), ']: ', signature);
+          else if (
+            this.r.c.host.callSignatures(this.r.c.host.typeOf(binding.name))
+              .length
+          )
+            properties.push(
+              ', [',
+              str(key.text),
+              ']: {cells: [], result: false}',
+            );
+        }
+        properties.push('}');
+        return this.call(
+          '__structDestructure',
+          this.visitValue(node, Ctx.AtOnce),
+          this.assign(tempRef(metadata), gen(Prec.Primary, properties)),
+        );
+      }
       case Conversion.Box:
         // the raw value is used at once by `__box`; the handle holds a count
         // of its own
@@ -1694,10 +1761,64 @@ class Lowering {
         if (method) receiver = this.receivers.get(method);
       } else if (!isFunctionLike(child) || child.kind === K.ArrowFunction) {
         forEachChild(child, visit);
+      } else if (child.name?.kind === K.ComputedPropertyName) {
+        // A nested method's name runs in the enclosing scope; its body
+        // has its own receiver.
+        forEachChild(child.name, visit);
       }
     };
     forEachChild(node, visit);
     return receiver;
+  }
+
+  private destructuredMethods = new WeakMap<Node, Temp>();
+
+  private structSignature(
+    signature: Signature,
+    constructor = false,
+    async = false,
+  ) {
+    const host = this.r.c.host;
+    const cells: number[] = [];
+    let rest: number | undefined;
+    const parameters = signature.getParameters();
+    for (let i = 0; i < parameters.length; i++) {
+      const parameter = parameters[i]!;
+      const decl = host.declarationOf(parameter.valueDeclaration);
+      let type = host.typeOfSymbol(parameter);
+      if (decl?.dotDotDotToken) type = host.typeArguments(type)[0]!;
+      if (type && isCellType(this.r.c, type)) {
+        if (decl?.dotDotDotToken) rest = i;
+        else cells.push(i);
+      }
+    }
+    const result = host.checker.getReturnTypeOfSignature(signature);
+    const cellResult = !constructor && isCellType(this.r.c, result);
+    const promiseResult =
+      !constructor &&
+      !cellResult &&
+      isCellType(this.r.c, host.awaitedType(result));
+    return {
+      cells,
+      result: cellResult,
+      ...(async && !constructor ? {async: true} : {}),
+      ...(promiseResult ? {promiseResult: true} : {}),
+      ...(rest === undefined ? {} : {rest}),
+    };
+  }
+
+  private methodSignature(type: Type): Ir | undefined {
+    const signature = this.r.c.host.callSignatures(type)[0];
+    if (!signature) return undefined;
+    const metadata = this.structSignature(signature);
+    if (
+      !metadata.cells.length &&
+      metadata.rest === undefined &&
+      !metadata.result &&
+      !metadata.promiseResult
+    )
+      return undefined;
+    return raw(JSON.stringify(metadata));
   }
 
   // An arrow function whose concise body becomes `{ var _a; return E; }`
@@ -1760,6 +1881,9 @@ class Lowering {
             receiver = this.temporary(this.call('__retain', receiver));
           const self = this.copiable(receiver, temps);
           const args = this.visitArguments(node, false).map(([, ir]) => ir!);
+          const signature = this.methodSignature(
+            this.r.c.host.typeOf(node.expression),
+          );
           return this.sequence(
             temps,
             call(
@@ -1767,6 +1891,7 @@ class Lowering {
                 '__structMethod',
                 self,
                 method.key ? this.visit(method.key) : str(method.name),
+                ...(signature ? [signature] : []),
               ),
               [self, ...args],
             ),
@@ -1782,6 +1907,7 @@ class Lowering {
         if (lowered) return lowered;
         const method = this.r.structMethodAccess(node);
         if (method) {
+          const signature = this.methodSignature(this.r.c.host.typeOf(node));
           let receiver = this.receiver(
             method.receiver,
             Ctx.Argument,
@@ -1793,11 +1919,33 @@ class Lowering {
             '__structMethodValue',
             receiver,
             method.key ? this.visit(method.key) : str(method.name),
+            ...(signature ? [signature] : []),
           );
         }
         break;
       }
       case K.BinaryExpression:
+        if (
+          node.operatorToken.kind === K.EqualsEqualsToken ||
+          node.operatorToken.kind === K.ExclamationEqualsToken
+        ) {
+          const c = this.r.c,
+            host = c.host;
+          const left = host.typeOf(node.left),
+            right = host.typeOf(node.right);
+          const leftCell = isCellType(c, left),
+            rightCell = isCellType(c, right);
+          if (
+            (leftCell &&
+              (rightCell || nonNullishMembers(c, right).length === 0)) ||
+            (rightCell && nonNullishMembers(c, left).length === 0)
+          )
+            return binary(
+              binary(this.visit(node.left), '??', num(0)),
+              node.operatorToken.kind === K.EqualsEqualsToken ? '==' : '!=',
+              binary(this.visit(node.right), '??', num(0)),
+            );
+        }
         if (isAssignmentOperator(node.operatorToken.kind)) {
           const lowered = this.lowerAssignment(node, ctx);
           if (lowered) return lowered;
@@ -1853,6 +2001,7 @@ class Lowering {
   // ["a", "next", ...], [1], "fr...")`: the reference fields' indexes, and
   // the fields' kinds if any is other than a number or a reference.
   private sharedStruct(structCall: StructCall): Ir {
+    const evaluated: Ir[] = [];
     const layout = structCall.layout;
     const fields = arrayLiteral(layout.fields.map(str));
     const refs: Ir[] = [];
@@ -1939,37 +2088,12 @@ class Lowering {
         }
         visited.edits.sort((a, b) => a.start - b.start || a.end - b.end);
         methods.push(visited);
-        const cells: number[] = [];
-        let rest: number | undefined;
-        const parameters = (method.parameters as Node[]).filter(
-          p => !isThisParameter(p),
-        );
-        for (let i = 0; i < parameters.length; i++) {
-          const p = parameters[i]!;
-          let t = host.typeOf(p);
-          if (p.dotDotDotToken) t = host.typeArguments(t)[0]!;
-          if (t && isCellType(this.r.c, t)) {
-            if (p.dotDotDotToken) rest = i;
-            else cells.push(i);
-          }
-        }
         const signature = host.checker.getSignatureFromDeclaration(method);
-        const result = host.checker.getReturnTypeOfSignature(signature);
-        const constructor = isStructConstructor(this.r.c, method);
-        const cellResult = !constructor && isCellType(this.r.c, result);
-        const promisedCellResult =
-          !constructor &&
-          !cellResult &&
-          isCellType(this.r.c, host.awaitedType(result));
-        const metadata = {
-          cells,
-          result: cellResult || promisedCellResult,
-          ...(!constructor && getFunctionFlags(method) & FunctionFlags.Async
-            ? {async: true}
-            : {}),
-          ...(promisedCellResult ? {promiseResult: true} : {}),
-          ...(rest === undefined ? {} : {rest}),
-        };
+        const metadata = this.structSignature(
+          signature,
+          isStructConstructor(this.r.c, method),
+          !!(getFunctionFlags(method) & FunctionFlags.Async),
+        );
         signatures.push(
           gen(Prec.Primary, [key, ': ', raw(JSON.stringify(metadata))]),
         );
@@ -1980,9 +2104,15 @@ class Lowering {
           ...members.flatMap((m, i) => [i ? ',\n' : '', m]),
           '\n}',
         ]);
-      args.push(object(methods), object(signatures));
+      let behavior = object(methods);
+      if (structCall.node.arguments[1]) {
+        const temp = this.newTemp();
+        evaluated.push(this.assign(tempRef(temp), behavior));
+        behavior = tempRef(temp);
+      }
+      args.push(behavior, object(signatures));
     }
-    return this.call('__sharedStruct', ...args);
+    return this.sequence(evaluated, this.call('__sharedStruct', ...args));
   }
 
   // `atomic.add(s, "f", V)` as `Atomics.add(__I32, (S >> 2) + 2 + 2 * k, V)`,
@@ -2249,12 +2379,31 @@ class Lowering {
   // n)`.
   private lowerNew(node: Node): Ir | undefined {
     const cell = this.r.cellType(node);
-    if (cell.kind === CellKind.Struct)
+    if (cell.kind === CellKind.Struct) {
+      const decl = getStructOfType(this.r.c, this.r.c.host.typeOf(node))?.decl;
+      const constructor =
+        decl && structMethods(decl).find(m => isStructConstructor(this.r.c, m));
+      const signature =
+        constructor &&
+        this.structSignature(
+          this.r.c.host.checker.getSignatureFromDeclaration(constructor),
+          true,
+        );
+      if (signature && (signature.cells.length || signature.rest !== undefined))
+        return call(
+          this.call(
+            '__structConstructor',
+            this.visit(node.expression),
+            raw(JSON.stringify(signature)),
+          ),
+          this.visitArguments(node, false).map(([, ir]) => ir!),
+        );
       return this.call(
         '__newStruct',
         this.visit(node.expression),
         ...this.visitArguments(node, false).map(([, ir]) => ir!),
       );
+    }
     const args = node.arguments as Node[] | undefined;
     if (cell.kind < CellKind.ArrayOfNumber || !args || args.length !== 2)
       return undefined;
