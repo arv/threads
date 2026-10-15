@@ -1342,10 +1342,12 @@ export function capture<F extends object>(fn: F, ...ps: number[]) {
 }
 // a counted spawn argument: retained for the thread, which releases it when its
 // function returns
+const countedAddresses = new WeakMap<object, number>();
 class CountedArg {
   declare a: number;
   constructor(a: number) {
     this.a = a;
+    countedAddresses.set(this, a);
   }
 }
 export const countedRef: (a: number) => CountedArg = a =>
@@ -1361,13 +1363,10 @@ let countedInto: number[] | null = null;
 export const __isCounted: (v: unknown) => boolean = v =>
   v instanceof CountedArg;
 function addressForRollback(v: unknown): number | undefined {
-  // Both instanceof and the address read can invoke proxy traps. Rollback
-  // must not replace the original error or skip later counted arguments.
-  try {
-    return v instanceof CountedArg ? v.a : undefined;
-  } catch {
-    return undefined;
-  }
+  // Identity lookup invokes no proxy traps or getters: those can recursively
+  // send or spawn during cleanup. Only wrappers we created own a count here;
+  // a proxy around one leaves that count with its original wrapper.
+  return countedAddresses.get(v as object);
 }
 
 // boxing: where a struct or SharedArray value (an address) flows into `any` ,
