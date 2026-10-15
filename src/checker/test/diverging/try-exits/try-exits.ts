@@ -508,3 +508,34 @@ export function looseObjects() {
   let xs = [1];
   try { consume(xs); void (someObj == otherObj); void (someObj != otherObj); xs = [2]; } finally { use(xs); }  // fine
 }
+// a constructor that may be a local class or another keeps both
+export function mixedConstructor(flag: boolean, Borrowed: new () => { items: number[] }, ch: Channel<number[]>) {
+  class Fresh { items = [1]; }
+  const K = flag ? Fresh : Borrowed;
+  ch.send(new K().items);                                     // error: it may be the caller's
+}
+// a class's name holds the class it is given last
+export function reassignedDeclaration(ch: Channel<number[]>) {
+  const xs = [1];
+  class C { items = [2]; }
+  // @ts-expect-error: TypeScript refuses it, JavaScript does not
+  C = class { items = xs; };
+  ch.send(xs);
+  return new C();                                             // error: its initializer captures xs
+}
+// instance code may reach its class as `this.constructor`
+export function implicitStatic(ch: Channel<number[]>) {
+  class C { static xs = [1]; items = (this.constructor as typeof C).xs; }
+  const a = new C(), b = new C();
+  ch.send(a.items);
+  use(b.items);                                               // error: both are C.xs
+}
+// every class a base may be
+export function baseAlternatives(flag: boolean, ch: Channel<number[]>) {
+  const xs = [1];
+  let Base = class { items = [2]; };
+  if (flag) Base = class { items = xs; };
+  class Derived extends Base {}
+  ch.send(xs);
+  return new Derived();                                       // error: the second base captures xs
+}

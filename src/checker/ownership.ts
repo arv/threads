@@ -65,6 +65,10 @@ interface Value {
   // for Consumed: the regions of the values it may have held when consumed,
   // each with whether it was consumed holding that one on some paths only
   readonly origins?: readonly Origin[];
+  // for InRegion: the classes defined in the function it may be, and whether
+  // it may be another constructor too (a value with no classes may be any)
+  readonly ctors?: readonly Node[];
+  readonly otherCtor?: boolean;
 }
 
 interface Origin {
@@ -212,8 +216,17 @@ class State {
 
   // Merges two values into one: the union of their regions.
   mergeValues(a: Value, b: Value): Value {
-    if (a.kind === ValueKind.InRegion && b.kind === ValueKind.InRegion)
-      return regionValue(this.union(a.region, b.region));
+    if (a.kind === ValueKind.InRegion && b.kind === ValueKind.InRegion) {
+      const merged = regionValue(this.union(a.region, b.region));
+      if (!a.ctors && !b.ctors) return merged;
+      // a class from either side, and any other constructor either may be
+      const other = (v: Value) => !v.ctors || !!v.otherCtor;
+      return {
+        ...merged,
+        ctors: [...new Set([...(a.ctors ?? []), ...(b.ctors ?? [])])],
+        otherCtor: other(a) || other(b),
+      };
+    }
     if (a.kind === ValueKind.InRegion) return a;
     if (b.kind === ValueKind.InRegion) return b;
     return sharedValue;
@@ -1322,8 +1335,9 @@ class Analyzer {
   }
 
   // Reports whether a class's instance code (its methods, accessors,
-  // constructor and instance fields) names the class itself.
-  instancesNameTheirClass(cls: Node): boolean {
+  // constructor and instance fields) reaches the class itself: by its name,
+  // `this.constructor` or `new.target` .
+  instancesReachTheirClass(cls: Node): boolean {
     let result = this.namesTheirClass.get(cls);
     if (result !== undefined) return result;
     const self = this.c.host.symbolOfDeclaration(cls);
@@ -1331,6 +1345,16 @@ class Analyzer {
     let found = false;
     const visit = (node: Node): boolean => {
       if (found || isTypeNode(node)) return found;
+      if (
+        (node.kind === K.MetaProperty && node.keywordToken === K.NewKeyword) ||
+        (node.kind === K.PropertyAccessExpression &&
+          node.name.text === 'constructor' &&
+          skipOuterExpressions(node.expression as Node, OEK.All).kind ===
+            K.ThisKeyword)
+      ) {
+        found = true;
+        return found;
+      }
       if (node.kind === K.Identifier && isOwnValueReference(node)) {
         const symbol = this.symbolOfIdentifier(node);
         if (symbol && id !== undefined && this.idOf(symbol) === id)
@@ -1482,7 +1506,11 @@ class FunctionAnalysis {
         // analyzed on its own, but defined here: its heritage, computed keys,
         // decorators and static members are evaluated as it is; its name
         // holds the class from here, with what its static fields hold
-        const cls = this.closureValue(node, s);
+        const closure = this.closureValue(node, s);
+        const cls: Value =
+          closure.kind === ValueKind.InRegion
+            ? {...closure, ctors: [node]}
+            : closure;
         if (cls.kind === ValueKind.InRegion)
           this.classes.push({region: cls.region, node});
         const symbol = this.a.c.host.symbolOfDeclaration(node);
@@ -2104,7 +2132,11 @@ class FunctionAnalysis {
       case K.ArrowFunction:
         return this.closureValue(node, s);
       case K.ClassExpression: {
-        const v = this.closureValue(node, s);
+        const closure = this.closureValue(node, s);
+        const v: Value =
+          closure.kind === ValueKind.InRegion
+            ? {...closure, ctors: [node]}
+            : closure;
         if (v.kind === ValueKind.InRegion)
           this.classes.push({region: v.region, node});
         // its own name, if it has one, is the class inside it
@@ -2536,7 +2568,8 @@ class FunctionAnalysis {
         const symbol = a.symbolOfIdentifier(target);
         if (!symbol) return;
         if (a.isLocalTo(symbol, this.node)) {
-          s.vars.set(symbol, a.normalize(symbol, v));
+          // a class is kept as one, though its name is code (a class's)
+          s.vars.set(symbol, v.ctors ? v : a.normalize(symbol, v));
           return;
         }
         s.mergeValues(this.lookup(symbol, s), v);
@@ -2957,7 +2990,7 @@ class FunctionAnalysis {
       const expr =
         arg.kind === K.SpreadElement ? (arg.expression as Node) : arg;
       const v = this.eval(arg, s); // a spread is iterated, which may throw
-      const param = this.sendingParameter(params, places[i]!);
+      const param = this.sendingParameterOf(arg, params, places[i]!);
       if (param && a.isSendingTypeNode(param.type)) {
         this.sendArgument(v, expr, param, name, consuming, s);
         return;
@@ -3011,6 +3044,32 @@ class FunctionAnalysis {
     });
   }
 
+  // The `Sending` parameter an argument's value is sent to, if any: a
+  // spread's container is taken to be when a value of it that may reach one
+  // is no primitive or shared value (its elements are in its region).
+  sendingParameterOf(
+    arg: Node,
+    params: Node[],
+    place: {from: number; to: number},
+  ): Node | undefined {
+    if (arg.kind !== K.SpreadElement)
+      return this.sendingParameter(params, place);
+    const shape = spreadShape(this.a.c, this.a.typeOf(arg.expression));
+    for (const value of shape.values) {
+      if (this.a.isPrimitiveOrSharedStructType(value.type)) continue;
+      // the spread's own first place is place.from to its last less what
+      // it fills after it
+      const lastStart =
+        shape.max === Infinity ? Infinity : place.to - shape.max + 1;
+      const param = this.sendingParameter(params, {
+        from: place.from + value.from,
+        to: lastStart + value.to,
+      });
+      if (param) return param;
+    }
+    return undefined;
+  }
+
   // A `Sending` parameter an argument may go to, at one of its places.
   sendingParameter(
     params: Node[],
@@ -3039,10 +3098,7 @@ class FunctionAnalysis {
     // an instance of a class defined here holds what the class's code
     // captures (its bases' too), not the class itself: its static state, and
     // the other instances, are no part of it
-    const classes = this.classesDefinedAs(node.expression, v, s);
-    for (const cls of classes) regions.push(...this.instanceCaptures(cls, s));
-    if (classes.length === 0 && v.kind === ValueKind.InRegion)
-      regions.push(v.region);
+    regions.push(...this.instanceRegions(v, s));
     const decl = a.signatureDeclarationOf(node);
     const params = signatureParameters(decl);
     const name = calleeName(node.expression);
@@ -3052,7 +3108,7 @@ class FunctionAnalysis {
       const expr =
         arg.kind === K.SpreadElement ? (arg.expression as Node) : arg;
       const value = this.eval(arg, s); // a spread is iterated, which may throw
-      const param = this.sendingParameter(params, places[i]!);
+      const param = this.sendingParameterOf(arg, params, places[i]!);
       if (param && a.isSendingTypeNode(param.type)) {
         this.sendArgument(value, expr, param, name, consuming, s);
         return;
@@ -3079,65 +3135,27 @@ class FunctionAnalysis {
     return regionValue(s.find(r));
   }
 
-  // The classes a `new` 's callee may be, of those defined in this function:
-  // the one a name that is never given another refers to (a class's, a
-  // const's), else every one whose value's region the callee's value is in
-  // (after a join, it may be either).
-  classesDefinedAs(callee: Node, v: Value, s: State): Node[] {
-    const host = this.a.c.host;
-    const expr = skipOuterExpressions(callee, OEK.All);
-    if (expr.kind === K.Identifier) {
-      const symbol = this.a.symbolOfIdentifier(expr);
-      const decl = symbol && host.valueDeclaration(symbol);
-      const fixed =
-        decl?.kind === K.ClassDeclaration
-          ? decl
-          : decl?.kind === K.VariableDeclaration &&
-              (decl.parent as Node).flags & NodeFlags.Const &&
-              decl.initializer &&
-              skipOuterExpressions(decl.initializer, OEK.All).kind ===
-                K.ClassExpression
-            ? skipOuterExpressions(decl.initializer, OEK.All)
-            : undefined;
-      if (fixed && this.classes.some(c => c.node === fixed)) return [fixed];
-    }
+  // The regions a new instance shares, of a constructor value: for each class
+  // defined here it may be, a fresh region of what the class's code captures
+  // (with the class, where its instance code reaches the class's static
+  // state), and its bases'; for any other constructor it may be, the value
+  // itself.
+  instanceRegions(v: Value, s: State, seen = new Set<Node>()): Region[] {
     if (v.kind !== ValueKind.InRegion) return [];
-    const root = s.find(v.region);
-    return [
-      ...new Set(
-        this.classes.filter(c => s.find(c.region) === root).map(c => c.node),
-      ),
-    ];
-  }
-
-  // The regions a new instance of a class shares: what its code captures, a
-  // fresh region of them, and what its bases' does (or a base that is no
-  // class defined here, as a whole).
-  instanceCaptures(node: Node, s: State): Region[] {
     const regions: Region[] = [];
-    const seen = new Set<Node>();
-    for (let n: Node | undefined = node; n && !seen.has(n);) {
+    if (!v.ctors || v.otherCtor) regions.push(v.region);
+    for (const n of v.ctors ?? []) {
+      if (seen.has(n)) continue;
       seen.add(n);
       const own = this.closureValue(n, s);
       if (own.kind === ValueKind.InRegion) regions.push(own.region);
-      // code of its instances that names the class reaches its static state
-      if (this.a.instancesNameTheirClass(n)) {
+      if (this.a.instancesReachTheirClass(n)) {
         const cls = [...this.classes].reverse().find(c => c.node === n);
         if (cls) regions.push(cls.region);
       }
       const base = this.bases.get(n);
-      if (!base) break;
-      const baseClass =
-        base.kind === ValueKind.InRegion
-          ? this.classes.find(c => s.find(c.region) === s.find(base.region))
-              ?.node
-          : undefined;
-      if (baseClass && baseClass !== n) n = baseClass;
-      else {
-        if (base.kind === ValueKind.InRegion && !s.isCounted(base))
-          regions.push(base.region);
-        break;
-      }
+      if (base && !(base.kind === ValueKind.InRegion && s.isCounted(base)))
+        regions.push(...this.instanceRegions(base, s, seen));
     }
     return regions;
   }

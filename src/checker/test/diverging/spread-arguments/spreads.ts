@@ -103,3 +103,13 @@ export function instantiated() {
   forwardLong(...numbers);         // error: numbers for the i32 tail
   forwardTyped(...numbers);        // error
 }
+// what a spread sends is its values that reach a Sending parameter: numbers,
+// which are no one's, leave it as it was
+declare function label(name: number, value: Sending<number>): void;
+declare class Labeled { constructor(name: number, value: Sending<number>); }
+export function spreadPrimitives() {
+  const args: [number, number] = [0, 1];
+  label(...args);
+  new Labeled(...args);
+  use(args);                       // fine
+}
