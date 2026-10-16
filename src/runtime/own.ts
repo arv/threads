@@ -1004,7 +1004,16 @@ function attachStructMethods(
           release(self);
         }
       };
-    else raw[name] = fn;
+    else
+      raw[name] = (self: number, ...args: unknown[]) => {
+        check(self);
+        retain(self);
+        try {
+          return fn(self, ...args);
+        } finally {
+          release(self);
+        }
+      };
     // An extracted method in compiled code still has ordinary, unbound
     // `this`, but its explicit arguments and result use the compiler's ABI.
     const boxedMethod = function (this: MaybeCell, ...args: unknown[]) {

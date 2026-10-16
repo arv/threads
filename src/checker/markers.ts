@@ -31,6 +31,9 @@ import {
   getCellType,
   getFieldKind,
   isFieldType,
+  isCellType,
+  nonNullishMembers,
+  spreadShape,
 } from './layout.ts';
 import {Messages} from './messages.ts';
 import {
@@ -944,12 +947,34 @@ export function checkStructCall(c: Own, call: Node): void {
       for (const parameter of property.parameters as Node[]) {
         if (!parameter.dotDotDotToken) continue;
         const type = c.host.typeOf(parameter);
-        if (!c.host.checker.isTupleType(type)) continue;
-        const flags = (c.host.typeTarget(type) as any)?.elementFlags as
-          | number[]
-          | undefined;
-        if (flags?.slice(0, -1).some(f => f & ElementFlags.Variable))
-          c.error(parameter, Messages.StructRestTuple);
+        const members =
+          type.flags & TypeFlags.Union ? c.host.memberTypes(type) : [type];
+        for (const member of members) {
+          if (!c.host.checker.isTupleType(member)) continue;
+          const flags = (c.host.typeTarget(member) as any)?.elementFlags as
+            | number[]
+            | undefined;
+          if (flags?.slice(0, -1).some(f => f & ElementFlags.Variable)) {
+            c.error(parameter, Messages.StructRestTuple);
+            break;
+          }
+        }
+        const values = spreadShape(c, type).values;
+        if (
+          values.some((a, i) =>
+            values
+              .slice(i + 1)
+              .some(
+                b =>
+                  a.from <= b.to &&
+                  b.from <= a.to &&
+                  nonNullishMembers(c, a.type).length > 0 &&
+                  nonNullishMembers(c, b.type).length > 0 &&
+                  isCellType(c, a.type) !== isCellType(c, b.type),
+              ),
+          )
+        )
+          c.error(parameter, Messages.StructRestRepresentation);
       }
       if (key !== 'constructor') {
         const exposed = structMethodType(c, t, property);

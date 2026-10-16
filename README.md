@@ -409,7 +409,12 @@ Methods can also be template tags. Declaration patterns such as
 `const {method} = instance` preserve method calling conventions; destructuring
 assignments such as `({method} = instance)` are rejected. Tuple rest parameters
 support fixed positions followed by a variadic tail; fixed elements after a
-variadic element are not supported.
+variadic element are not supported. Union alternatives must agree on the
+shared-reference representation at overlapping positions.
+
+Extracted method types must preserve shared argument and result representations.
+Use the declaring struct type for views of methods with shared arguments or
+results; ordinary structural interfaces for those methods are rejected.
 
 `new S(...args)` zeroes all fields before running its synchronous constructor.
 Constructor arguments are inferred, return values are discarded, and a thrown

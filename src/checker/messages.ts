@@ -165,6 +165,10 @@ export const Messages = {
     code: 96044,
     text: 'A shared struct rest tuple must have fixed positions followed by a variadic tail; fixed elements after a variadic element are not supported.',
   },
+  StructRestRepresentation: {
+    code: 96045,
+    text: 'Overlapping alternatives of a shared struct rest tuple must use the same shared-reference representation at each position.',
+  },
 } as const;
 
 export type Message = (typeof Messages)[keyof typeof Messages];

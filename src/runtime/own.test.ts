@@ -11,6 +11,44 @@ const move = (v: unknown) => {
 };
 
 describe('struct methods', () => {
+  it.each([false, true])(
+    'retains a raw synchronous receiver through reentrant release with throw=%s',
+    throws => {
+      let replacement = 0;
+      const Counter = own.sharedStruct(
+        'ReentrantReceiver',
+        ['value'],
+        [],
+        '',
+        `tests/reentrant-receiver/${throws}`,
+        {
+          read(self: number) {
+            own.release(self);
+            replacement = own.newStruct(Counter);
+            own.F64[(replacement >> 3) + 1] = 99;
+            const value = own.F64[(self >> 3) + 1];
+            if (throws) throw new Error(String(value));
+            return value;
+          },
+        },
+        {read: {cells: [], result: false}},
+      );
+      const self = own.newStruct(Counter);
+      own.F64[(self >> 3) + 1] = 7;
+      const before = T.heapStats();
+      try {
+        const read = () => own.structMethod(self, 'read')(self);
+        if (throws) expect(read).toThrow('7');
+        else expect(read()).toBe(7);
+        const after = T.heapStats();
+        expect(after.allocated - before.allocated).toBe(1);
+        expect(after.freed - before.freed).toBe(1);
+      } finally {
+        own.release(replacement);
+      }
+    },
+  );
+
   it('supports computed string and numeric names in uncompiled code', () => {
     const numeric: number = 100;
     const C = T.struct(

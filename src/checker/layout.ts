@@ -42,6 +42,7 @@ import {
   getStructRegistry,
   isAssignableToCell,
   isStructConstructor,
+  isStructMethod,
   structMethodKey,
   getStructTypeOfCall,
   structMethods,
@@ -1056,6 +1057,45 @@ function layoutMismatch(
   cast: boolean,
   seen: Seen = newSeen(),
 ): string | undefined {
+  // A boxed struct's prototype wrapper uses handles. An ordinary interface
+  // whose methods use shared addresses cannot call that wrapper directly.
+  if (
+    getCellType(c, source).kind === CellKind.Struct &&
+    !isCellType(c, target)
+  ) {
+    for (const member of nonNullishMembers(c, target)) {
+      const checker = c.host.checker;
+      if (
+        isCellType(c, member) ||
+        !nonNullishMembers(c, source).some(from =>
+          checker.isTypeAssignableTo(from, member),
+        )
+      )
+        continue;
+      const methods = [
+        ...checker.getPropertiesOfType(member).map(p => c.host.typeOfSymbol(p)),
+        ...checker.getIndexInfosOfType(member).map(i => i.valueType),
+      ];
+      if (
+        methods.some(type =>
+          c.host.callSignatures(type).some(signature => {
+            const result = checker.getReturnTypeOfSignature(signature);
+            if (
+              isCellType(c, result) ||
+              isCellType(c, c.host.awaitedType(result))
+            )
+              return true;
+            for (let i = 0; i < signatureParameterCount(c, signature); i++) {
+              const parameter = c.host.parameterTypeAt(signature, i);
+              if (parameter && isCellType(c, parameter)) return true;
+            }
+            return false;
+          }),
+        )
+      )
+        return 'a structural method view with shared-reference parameters or results needs the declaring struct type';
+    }
+  }
   // an ordinary object where a struct goes, as what a function returns or is
   // called with, or what a promise resolves to (as a value of its own, it is
   // reported by checkLayoutTarget), whatever arrays beside it are
@@ -1178,8 +1218,10 @@ function callableMismatch(
                   assignable(returnOf(f), returnOf(to)),
               );
         if (!from) continue;
+        const rawMethod =
+          method || isStructMethod(c, host.declarationOf(from.declaration));
         if (
-          method &&
+          rawMethod &&
           (isCellType(c, returnOf(from)) !== isCellType(c, returnOf(to)) ||
             isCellType(c, host.awaitedType(returnOf(from))) !==
               isCellType(c, host.awaitedType(returnOf(to))))
@@ -1200,7 +1242,7 @@ function callableMismatch(
           to,
           cast,
           seen,
-          method ||
+          rawMethod ||
             (construct &&
               (isCellType(c, returnOf(from)) || isCellType(c, returnOf(to)))),
         );

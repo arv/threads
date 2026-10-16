@@ -155,7 +155,10 @@ export type Struct<S> = S extends StructType<infer T, any[]> ? T & Cell : never;
  * name expressions and key coercions run once, in source order.
  * Methods can be template tags. Extract methods with property access or a
  * declaration binding pattern; method destructuring assignments are unsupported.
- * Rest tuples support fixed positions followed by a variadic tail.
+ * Rest tuples support fixed positions followed by a variadic tail; union
+ * alternatives must agree on shared-reference representations where they overlap.
+ * Extracted callable types must preserve shared argument/result representations.
+ * Use the declaring struct type for method views with shared arguments/results.
  * Compiled method bodies do not support arguments; use named or rest parameters.
  * A synchronous constructor may initialize the zeroed instance. Its arguments
  * are inferred and its return value is discarded. For an explicit T, specify

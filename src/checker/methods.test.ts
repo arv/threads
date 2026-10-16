@@ -92,6 +92,74 @@ function run(
 }
 
 describe('struct methods', () => {
+  it.each(['read', 'make'])(
+    'diagnoses structural views whose %s method uses shared references',
+    kind => {
+      const view =
+        kind === 'read'
+          ? '{read(leaf: Leaf): number}'
+          : kind === 'make'
+            ? '{make(): Leaf}'
+            : '{[key: string]: (leaf: Leaf) => number}';
+      const {result} = program({
+        'main.ts': `import {struct, f64, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64}); type Leaf = Struct<typeof Leaf>;
+const C = struct({${kind === 'make' ? 'make(): Leaf { return new Leaf(); }' : 'read(leaf: Leaf) { return leaf.value; }'}});
+function use(value: ${view}) {}
+export function main() { use(new C()); }
+`,
+      });
+      expect(result.typeDiagnostics).toEqual([]);
+      expect(result.diagnostics.some(d => d.code === 96033)).toBe(true);
+    },
+  );
+
+  it.each(['[...Leaf[], number]', '[...Leaf[], number] | [number]'])(
+    'diagnoses unsupported trailing elements in rest type %s',
+    rest => {
+      const {result} = program({
+        'main.ts': `import {struct, f64, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64}); type Leaf = Struct<typeof Leaf>;
+const C = struct({read(...args: ${rest}) { return args.length; }});
+`,
+      });
+      expect(result.typeDiagnostics).toEqual([]);
+      expect(result.diagnostics.some(d => d.code === 96044)).toBe(true);
+    },
+  );
+
+  it.each(['[Leaf] | [number]', '[Leaf, ...Leaf[]] | [Leaf, number]'])(
+    'diagnoses overlapping rest representations for %s',
+    rest => {
+      const {result} = program({
+        'main.ts': `import {struct, f64, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64}); type Leaf = Struct<typeof Leaf>;
+const C = struct({read(...args: ${rest}) { return args.length; }});
+`,
+      });
+      expect(result.typeDiagnostics).toEqual([]);
+      expect(result.diagnostics.some(d => d.code === 96045)).toBe(true);
+    },
+  );
+
+  it.each([
+    'const make: () => unknown = factory.make;',
+    'const original = factory.make; const make: () => unknown = original;',
+    'function use(fn: () => unknown) {} use(factory.make);',
+    'const read: (leaf: Leaf) => number = factory.read;',
+  ])('checks extracted callable assignment conventions: %s', assignment => {
+    const {result} = program({
+      'main.ts': `import {struct, f64, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64}); type Leaf = Struct<typeof Leaf>;
+const Factory = struct({make(): Leaf { return new Leaf(); }, read(value: unknown) { return typeof value === 'object' ? 1 : 0; }});
+const factory = new Factory();
+${assignment}
+`,
+    });
+    expect(result.typeDiagnostics).toEqual([]);
+    expect(result.diagnostics.some(d => d.code === 96033)).toBe(true);
+  });
+
   it('checks constructor aliases for shared parameter representations', () => {
     const {result} = program({
       'main.ts': `import {struct, f64, type Struct} from '@arv/threads';
