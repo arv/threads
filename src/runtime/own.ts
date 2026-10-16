@@ -962,13 +962,18 @@ function attachStructMethods(
       throw new TypeError(
         `own: struct method '${String(name)}' is not a function`,
       );
+    const generator =
+      fn.constructor.name === 'GeneratorFunction' ||
+      fn.constructor.name === 'AsyncGeneratorFunction';
     if (
       name === 'constructor' &&
-      (fn.constructor.name === 'AsyncFunction' ||
-        fn.constructor.name === 'GeneratorFunction' ||
-        fn.constructor.name === 'AsyncGeneratorFunction')
+      (fn.constructor.name === 'AsyncFunction' || generator)
     )
       throw new TypeError('own: a struct constructor must be synchronous');
+    if (generator)
+      throw new TypeError(
+        `own: struct method '${String(name)}' must not be a generator`,
+      );
   }
   for (const [name, fn] of entries) {
     const signature = signatures?.[name];

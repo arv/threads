@@ -58,6 +58,8 @@ export function struct<F extends Fields>(
   identity = '',
 ) {
   const names = Reflect.ownKeys(fields);
+  if (names.some(k => k === 'constructor' && typeof fields[k] !== 'function'))
+    throw new TypeError('threads: a struct constructor must be a method');
   if (names.some(k => typeof k === 'symbol' && typeof fields[k] !== 'function'))
     throw new TypeError('threads: struct fields must have string names');
   const keys = names.filter(

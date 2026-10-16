@@ -11,6 +11,34 @@ const move = (v: unknown) => {
 };
 
 describe('struct methods', () => {
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'rejects erased generator methods with async=%s and symbol key=%s',
+    (async, symbol) => {
+      const read = async
+        ? async function* () {
+            yield 1;
+          }
+        : function* () {
+            yield 1;
+          };
+      expect(() =>
+        T.struct(
+          {[symbol ? Symbol.iterator : 'read']: read},
+          `tests/rejected-generator/${async}/${symbol}`,
+        ),
+      ).toThrow(/struct method.*generator/);
+    },
+  );
+
+  it.each([T.f64, T.ref()])('rejects erased constructor fields: %j', field => {
+    expect(() => T.struct({constructor: field})).toThrow(/constructor.*method/);
+  });
+
   it('preserves explicit module URLs outside bundled struct identities', () => {
     const url = 'file:///example/counter.ts';
     expect(own.structIdentity(url)).toBe(url);
