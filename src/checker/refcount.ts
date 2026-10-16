@@ -187,7 +187,9 @@ export function getChannelElementType(
   return c.host.typeArguments(t)[0];
 }
 
-// Every possible channel element must use the address representation.
+// Every non-nullish receiver variant must have address-represented elements.
+// isCellType includes nullable counted payloads: their null/undefined is 0,
+// like every raw counted position (REFCOUNT.md, "null").
 export function hasCountedChannelElements(c: Own, t: Type): boolean {
   const members = nonNullishMembers(c, t);
   return (

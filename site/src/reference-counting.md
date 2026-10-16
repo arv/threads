@@ -270,7 +270,10 @@ things:
    returns a Disposable for `using` rather than taking a function.
 
 9. **null.** In raw positions, null and undefined are 0, and `x === null`
-   becomes `x === 0`.
+   becomes `x === 0`. This includes nullable counted channel payloads. A widened
+   `Channel<unknown>` uses boxed/native decoding when the distinction between
+   sent null and undefined is needed; `select` and `recvOk` then preserve that
+   distinction and the ok flag in their ordinary tuples.
 
 10. **Quiescent points in loops.** A loop whose body reads or stores a reference
     field ends each iteration with `__quiescent()`. That way neither a writer

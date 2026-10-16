@@ -6,6 +6,8 @@ import {
   SharedSet,
   type Shared,
   share,
+  select,
+  selectAsync,
   log,
   struct,
   type Sending,
@@ -49,6 +51,56 @@ function boxedReceivers(): boolean {
   a.close();
   b.close();
   return boxedReceiver(a) && boxedLoop(b);
+}
+function nativeSelectSource(): Channel<unknown> {
+  const source = new Channel<Lock | Shared<{n: number}> | null | undefined>(4);
+  source.send(new Lock());
+  source.send(share({n: 7}));
+  source.send(null);
+  source.send(void 0);
+  source.close();
+  return source;
+}
+type Selected = [number, unknown, boolean];
+function validSelectedValues(
+  lock: Selected,
+  blob: Selected,
+  nullable: Selected,
+  missing: Selected,
+  closed: Selected,
+): boolean {
+  return (
+    lock[1] instanceof Lock &&
+    lock[2] &&
+    (blob[1] as {n: number}).n === 7 &&
+    blob[2] &&
+    nullable[1] === null &&
+    nullable[2] &&
+    missing[1] === void 0 &&
+    missing[2] &&
+    closed[1] === void 0 &&
+    !closed[2]
+  );
+}
+function nativeSyncSelectValues(): boolean {
+  const ch = nativeSelectSource();
+  return validSelectedValues(
+    select(ch),
+    select(ch),
+    select(ch),
+    select(ch),
+    select(ch),
+  );
+}
+async function nativeSelectValues(): Promise<boolean> {
+  const ch = nativeSelectSource();
+  return validSelectedValues(
+    await selectAsync(ch),
+    await selectAsync(ch),
+    await selectAsync(ch),
+    await selectAsync(ch),
+    await selectAsync(ch),
+  );
 }
 function nullSends(): boolean {
   const ch = new Channel<Lock | null | undefined>(2);
@@ -401,6 +453,16 @@ export function allocatingStore(root: Node): void {
 }
 export async function main() {
   const results: Record<string, unknown> = {};
+  try {
+    results.nativeSyncSelectValues = nativeSyncSelectValues();
+  } catch (e) {
+    results.nativeSyncSelectValues = String(e);
+  }
+  try {
+    results.nativeSelectValues = await nativeSelectValues();
+  } catch (e) {
+    results.nativeSelectValues = String(e);
+  }
   try {
     results.cellDataMap = cellDataMap();
   } catch (e) {

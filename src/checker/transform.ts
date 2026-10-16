@@ -802,7 +802,9 @@ class Lowering {
             .some((n: Node) => this.r.assignsIn(n, id))
         )
           value = this.temporary(this.call('__retain', value));
-        return this.call('__cellView', value);
+        // Native argument views do not transfer raw payloads into select's
+        // ordinary tuple. The checker rejects counted tuple element types.
+        return this.call('__cellView', value, raw('false'), raw('false'));
       }
     }
     if (

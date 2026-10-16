@@ -347,7 +347,8 @@ export class Channel {
     const v = await receiveAsync(this.$cell >> 2, this.$raw);
     return v === DONE ? [this.$raw ? 0 : undefined, false] : [v, true];
   }
-  // without waiting: the next value, EMPTY, or DONE
+  // Without waiting: the next boxed/native value, EMPTY, or DONE. Select
+  // returns ordinary tuples, so polling never transfers raw counted values.
   poll() {
     const c = this.$cell >> 2;
     lock(c + LOCK);

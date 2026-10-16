@@ -486,6 +486,10 @@ export declare class SharedSet<T> implements Cell {
  * `select` gives the same ok, third (`for...of` ends at the close alone). So a
  * `Channel<void>` signals by `close()` , which wakes every receiver, or is read
  * with `recvOk` .
+ *
+ * Compiled counted payloads use raw addresses: null and undefined both use 0,
+ * as in every counted position. Use a widened `Channel<unknown>` receiver to
+ * preserve the distinction between sent null and undefined as native values.
  */
 export declare class Channel<T> implements Cell {
   readonly [cellBrand]: true;
@@ -512,9 +516,11 @@ export declare class Channel<T> implements Cell {
    * `recv` , with whether a value came: `[value, true]` for the next value,
    * which the caller now owns, even an undefined one; `[undefined, false]` once
    * closed and empty. `const [v, ok] = ch.recvOk();` As with `select` , the
-   * ownership checker refuses it on a channel of shared structs or
-   * SharedArrays, whose count the tuple, an ordinary array, could not hold:
-   * `recv` and `for...of` receive those.
+   * ownership checker refuses it on a channel of counted values (shared
+   * structs, SharedArrays, channels, locks, conditions or immutable shared
+   * values), including nullable unions: the ordinary tuple cannot hold their
+   * raw counts. Use `recv` or `for...of`, or a widened `Channel<unknown>` for
+   * boxed/native tuple values.
    */
   recvOk(): [value: Sending<T> | undefined, ok: boolean];
   /** `recvOk`, without blocking. */
@@ -544,8 +550,10 @@ export declare function go<A extends unknown[]>(
  * value, and whether a value came, as `recvOk` 's ok: `[index, value, true]` ,
  * or `[index, undefined, false]` for a closed channel. Without ok, a sent
  * undefined and a close look the same. The ownership checker refuses it on
- * channels of shared structs or SharedArrays, whose count the tuple, an
- * ordinary array, could not hold.
+ * channels of counted values (shared structs, SharedArrays, channels, locks,
+ * conditions or immutable shared values), including nullable unions: the
+ * ordinary tuple cannot hold their raw counts. A widened `Channel<unknown>`
+ * returns boxed/native values, preserving null, undefined and the ok flag.
  */
 export declare function select<T>(
   ...channels: Channel<T>[]

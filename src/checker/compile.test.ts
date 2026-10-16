@@ -400,6 +400,8 @@ describe('what the lowering moves, as it runs', () => {
     );
     expect(run.status, run.stderr).toBe(0);
     expect(JSON.parse(run.stdout.trim())).toEqual({
+      nativeSyncSelectValues: true,
+      nativeSelectValues: true,
       cellDataMap: true,
       inheritedReceiver: true,
       boxedReceivers: true,

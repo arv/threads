@@ -58,6 +58,29 @@ function checkProgram(files: Record<string, string[]>): string[] {
 }
 
 describe('threads-check', () => {
+  it('rejects counted select and recvOk tuples, including nullable cell payloads', () => {
+    for (const type of [
+      'Lock',
+      'Lock | null | undefined',
+      'Shared<{n: number}>',
+      'Shared<{n: number}> | null | undefined',
+    ]) {
+      const diagnostics = checkProgram({
+        'select.ts': [
+          'import {Channel, Lock, type Shared, select, selectAsync} from "threads";',
+          `type Value = ${type};`,
+          'function sync(ch: Channel<Value>) { select(ch); ch.recvOk(); }',
+          'async function async(ch: Channel<Value>) { await selectAsync(ch); await ch.recvOkAsync(); }',
+        ],
+      });
+      expect(diagnostics, type).toHaveLength(4);
+      expect(
+        diagnostics.every(d => d.includes('TS96021')),
+        type,
+      ).toBe(true);
+    }
+  });
+
   it('reports native method forwarding and overloaded callbacks instead of emitting incompatible representations', () => {
     const diagnostics = checkProgram({
       'callbacks.ts': [
