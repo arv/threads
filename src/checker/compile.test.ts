@@ -368,6 +368,49 @@ describe('what the lowering moves, as it runs', () => {
 describe('counting lowering review regressions', () => {
   const cases = [
     {
+      name: 'keeps function var receives alive through iterations and a post-loop read',
+      source: `const channel = new Channel<P>(2);
+      function f() {
+        channel.send(new P()); channel.send(new P()); channel.close();
+        for (var p of channel) {
+          p.x = 233;
+          const pressure = new P(); pressure.x = 99;
+        }
+        const q = new P(); q.x = 99;
+        return p!.x;
+      }
+      export function main() {
+        const before = heapStats();
+        const result = f();
+        const after = heapStats();
+        log(JSON.stringify([result,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[233,0]',
+    },
+    {
+      name: 'keeps a function var receive alive after a caught loop-body exception',
+      source: `const channel = new Channel<P>(1);
+      function f() {
+        channel.send(new P()); channel.close();
+        try {
+          for (var p of channel) {
+            p.x = 239; throw new Error('stop');
+          }
+        } catch {}
+        const q = new P(); q.x = 99;
+        return p!.x;
+      }
+      export function main() {
+        const before = heapStats();
+        const result = f();
+        const after = heapStats();
+        log(JSON.stringify([result,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[239,0]',
+    },
+    {
       name: 'queues a switch capture declared after its binding in the same clause',
       source: `function f() {
         switch (0) {

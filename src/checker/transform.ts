@@ -2260,9 +2260,10 @@ class Lowering {
     ]);
   }
 
-  // A loop's body. A for-of variable that owns each value (received from a
-  // channel) is released when the iteration ends, and the iteration ends at
-  // a quiescent point if the loop reads or stores a reference field.
+  // Lexical receive bindings are released when their iteration ends.
+  // ownedLocalsOfList excludes hoisted var bindings: replacement releases
+  // their previous receive, and the function cleanup releases the last one.
+  // A loop that reads/stores references ends iterations at a quiescent point.
   private visitLoopBody(body: Node, loop: Node): Ir {
     let visited = embedded(this.visit(body))!;
     if (
