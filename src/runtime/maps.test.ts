@@ -328,6 +328,42 @@ describe('as compiled code calls it', () => {
     }
   });
 
+  it('balances computed lookup keys on hits, insertion and callback failure', () => {
+    const cell = new T.Lock(),
+      blob = T.share({n: 7});
+    for (const [key, address] of [
+      [cell, cell.$cell],
+      [blob, own.__sharedAddress(blob)!],
+    ] as const) {
+      const before = count(address);
+      const map = new T.SharedMap<unknown, number>();
+      expect(
+        map.getOrInsertComputed(own.countedRef(address), received => {
+          expect(received).toBe(key);
+          return 7;
+        }),
+      ).toBe(7);
+      expect(count(address)).toBe(before + 1);
+      for (let i = 0; i < 3; i++) {
+        expect(
+          map.getOrInsertComputed(own.countedRef(address), () => {
+            throw new Error('hit must not call callback');
+          }),
+        ).toBe(7);
+        expect(count(address)).toBe(before + 1);
+      }
+      map.clear();
+      own.__collect();
+      expect(count(address)).toBe(before);
+      expect(() =>
+        map.getOrInsertComputed(own.countedRef(address), () => {
+          throw new Error('callback failed');
+        }),
+      ).toThrow('callback failed');
+      expect(count(address)).toBe(before);
+    }
+  });
+
   it('releases a transferred computed key when its callback throws', () => {
     const key = new T.Lock(),
       map = new T.SharedMap<unknown, number>();

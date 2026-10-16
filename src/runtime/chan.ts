@@ -178,6 +178,7 @@ const EMPTY = Symbol('empty'),
 // holding the lock: the next message's value (unlocking), or EMPTY, or DONE
 // when closed and empty. functions, not private methods: another thread's
 // handle for a channel is made by own.ts, from the class's prototype
+// Passing undefined (as native handles do) also applies this default.
 function take(c: number, raw = false): unknown {
   if (I32[c + COUNT] === 0) return I32[c + CLOSED] !== 0 ? DONE : EMPTY;
   const h = I32[c + HEAD],

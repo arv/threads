@@ -146,20 +146,22 @@ describe('counted built-in cells', () => {
       ch => T.select(ch)[1],
       async ch => (await T.selectAsync(ch))[1],
     ];
-    for (const read of readers) {
-      const ch = own.newCell(T.Channel, 1),
-        p = own.newCell(T.Lock);
-      channel(ch).send(own.countedRef(p));
-      own.release(p);
-      channel(ch).close();
-      // Also exercises prototype-created handles whose $raw is undefined.
-      const native = Object.assign(Object.create(T.Channel.prototype), {
-        $cell: ch,
-      });
-      const value = await read(native);
-      expect(value).toBeInstanceOf(T.Lock);
-      expect(count(p)).toBe(1);
-      own.release(ch);
+    for (const Kind of [T.Lock, T.Condition]) {
+      for (const read of readers) {
+        const ch = own.newCell(T.Channel, 1),
+          p = own.newCell(Kind);
+        channel(ch).send(own.countedRef(p));
+        own.release(p);
+        channel(ch).close();
+        // Also exercises prototype-created handles whose $raw is undefined.
+        const native = Object.assign(Object.create(T.Channel.prototype), {
+          $cell: ch,
+        });
+        const value = await read(native);
+        expect(value).toBeInstanceOf(Kind);
+        expect(count(p)).toBe(1);
+        own.release(ch);
+      }
     }
   });
 

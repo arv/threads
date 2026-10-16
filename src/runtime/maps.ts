@@ -663,6 +663,8 @@ export class SharedMap<K = unknown, V = unknown> {
       // The callback and insertion use a native handle. Return the incoming
       // transferred count here, whether lookup, callback or insertion fails.
       key = plain(key) as K;
+      // RETAIN from encode describes a future insertion; only store
+      // increments that count. Probing a native key acquires no count.
       if (encode(key, true, false)) {
         const m = this.$cell,
           l = lo,
