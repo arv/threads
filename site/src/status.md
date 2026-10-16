@@ -32,6 +32,11 @@ today:
   and counted. A string is freed once no field, element, map or message refers
   to it.
 - **Closures don't cross threads.** A thread runs a top-level function.
+- **Struct constructors and methods run locally.** Each worker must import the
+  defining module before constructing instances or calling methods. Only fields
+  occupy shared memory. Constructors are synchronous; methods may be async.
+  Struct inheritance, accessors, and private members are not supported. See
+  [Shared Memory](/api/shared-memory/#methods).
 - **A SharedMap or SharedSet has one lock.** Every call takes it for a moment,
   so threads that change one map all the time wait for each other. A thread with
   many changes should make them in a Map of its own, and merge once.

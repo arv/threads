@@ -32,7 +32,8 @@ interface Ref<T> extends Field {
   readonly kind: 'ref';
   readonly to?: T;
 }
-type Fields = Record<string, Field>;
+type Method = (...args: any[]) => any;
+type Fields = Record<PropertyKey, Field | Function>;
 // what a field holds, as a struct's handles read and write it
 type Scalars = {
   f64: number;
@@ -47,15 +48,41 @@ type FieldValue<F> =
     : F extends {kind: infer K extends keyof Scalars}
       ? Scalars[K]
       : never;
-type Instance<F extends Fields> = {-readonly [K in keyof F]: FieldValue<F[K]>};
-export function struct<F extends Fields>(fields: F, name = 'Struct') {
-  const keys = Object.keys(fields),
-    kinds = keys.map(k => letters[fields[k].kind]).join('');
+type Instance<F extends Fields> = {
+  -readonly [
+    K in keyof F as K extends 'constructor' ? never : K
+  ]: F[K] extends Function ? F[K] : FieldValue<F[K]>;
+};
+export function struct<F extends Fields>(
+  fields: F & ThisType<Instance<F>>,
+  identity = '',
+) {
+  const names = Reflect.ownKeys(fields);
+  if (names.some(k => k === 'constructor' && typeof fields[k] !== 'function'))
+    throw new TypeError('threads: a struct constructor must be a method');
+  if (names.some(k => typeof k === 'symbol' && typeof fields[k] !== 'function'))
+    throw new TypeError('threads: struct fields must have string names');
+  const keys = names.filter(
+      (k): k is string =>
+        typeof k === 'string' && typeof fields[k] !== 'function',
+    ),
+    methods = Object.fromEntries(
+      names
+        .filter(k => typeof fields[k] === 'function')
+        .map(k => [k, fields[k]]),
+    ) as Record<string | symbol, Method>,
+    kinds = keys.map(k => letters[(fields[k] as Field).kind]).join('');
+  if (Reflect.ownKeys(methods).length !== 0 && !identity)
+    throw new TypeError(
+      'threads: an uncompiled struct with a constructor or methods needs a module-qualified identity as its second argument',
+    );
   return sharedStruct<Instance<F>>(
-    name,
+    'Struct',
     keys,
     keys.flatMap((k, i) => (fields[k] === REF ? [i] : [])),
     /^[fr]*$/.test(kinds) ? '' : kinds,
+    identity,
+    methods,
   );
 }
 

@@ -151,27 +151,56 @@ each one under the same name with two leading underscores
 (`retain as __retain`), so that none of them clash with the program's own names.
 The rules below quote them that way.
 
-| Function                                  | What it does                                                                                                                                                                                          |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sharedStruct(name, fields, refs, kinds)` | Declares a struct type. `refs` lists the indexes of the reference fields. `kinds` has a letter per field: `f` f64, `i` i32, `u` u8, `b` bool, `s` str, `r` reference, `c` channel, lock or condition. |
-| `newStruct(T)`, `newSharedArray(T, n)`    | Allocates a zeroed block with count 1, owned by the caller.                                                                                                                                           |
-| `retain(p)`                               | Adds 1 to the count and returns p. Does nothing for 0.                                                                                                                                                |
-| `release(p)`                              | Subtracts 1 from the count. At 0, frees the block and releases its reference fields. Does nothing for 0.                                                                                              |
-| `store(i, v)`                             | Stores a reference at i32 index i. Takes over v's count, defers the old value's decrement, and returns v.                                                                                             |
-| `storeStr(i, s)`, `strAt(p)`              | `storeStr` stores a string field or element at i32 index i. It counts s's interned string, defers the old one's decrement, and returns s. `strAt` returns the string at address p.                    |
-| `countedRef(v)`                           | Passes a counted argument to `spawn`, `go` or a channel's `send`. Retains v either for the thread, which releases it when its function returns, or for the message, whose receiver owns it.           |
-| `moved(v)`                                | Wraps a counted result that a callback returns to the runtime, such as a SharedMap's getOrInsertComputed's callback. The result carries its count already.                                            |
-| `quiescent()`                             | Marks a quiescent point.                                                                                                                                                                              |
-| `box(p)`                                  | Returns this thread's handle for p. The handle holds a count of its own, and a FinalizationRegistry releases it when the handle is collected.                                                         |
-| `unbox(v)`, `cellAddress(v)`              | `unbox` returns the handle's address, borrowed. `cellAddress` returns a lasting cell's address (a channel's, a lock's or a condition's). Both return 0 for null.                                      |
-| `capture(fn, ...ps)`                      | Retains each address for a closure that captures them. They're released when the closure is collected.                                                                                                |
-| `F64`, `I32`, `U8`, `outOfBounds`         | The shared heap's views, which field and element accesses index into, and what an out-of-range index reads (it throws).                                                                               |
-| `heapStats()`                             | Reports the heap bytes in use, the blocks allocated and freed, and the decrements pending.                                                                                                            |
-| `collectCycles(timeout)`                  | Stops every other thread at a quiescent point, frees the cycles nothing outside them refers to, and returns how many blocks it freed (see [Cycles](#cycles)).                                         |
+| Function                                                                    | What it does                                                                                                                                                                                                                                                                      |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sharedStruct(name, fields, refs, kinds, identity?, methods?, signatures?)` | Declares a struct type. `refs` lists reference-field indexes. `kinds` has a letter per field: `f` f64, `i` i32, `u` u8, `b` bool, `s` str, `r` reference, `c` channel, lock or condition. Optional identity and behavior metadata correlate declarations and adapt local methods. |
+| `newStruct(T, ...args)`                                                     | Allocates a zeroed block with count 1, runs its optional constructor, and returns the caller-owned address. On an exception, releases that ownership.                                                                                                                             |
+| `newSharedArray(T, n)`                                                      | Allocates a zeroed array with count 1, owned by the caller. Inline struct elements do not run constructors.                                                                                                                                                                       |
+| `structIdentity(module, name)`                                              | Identifies a declaration by its module and binding name, independently of its field layout.                                                                                                                                                                                       |
+| `structMethod(p, name, signature?)`                                         | Finds a method on the receiver's actual struct type. Compiled code calls it with p as its first argument. Optional signature metadata adapts shared arguments/results when the defining module was type-erased.                                                                   |
+| `structMethodValue(p, name, signature?)`                                    | Gets an unbound method value for compiled code. Its receiver must be of the declaring struct type; explicit arguments and results use the compiled calling convention.                                                                                                            |
+| `structConstructor(T, signature)`                                           | Adapts shared constructor arguments when the defining module was type-erased; compiled constructors keep their address ABI.                                                                                                                                                       |
+| `structDestructure(p, signatures)`                                          | Reads fields through the handle and supplies raw method values for compiled object binding patterns.                                                                                                                                                                              |
+| `retain(p)`                                                                 | Adds 1 to the count and returns p. Does nothing for 0.                                                                                                                                                                                                                            |
+| `release(p)`                                                                | Subtracts 1 from the count. At 0, frees the block and releases its reference fields. Does nothing for 0.                                                                                                                                                                          |
+| `store(i, v)`                                                               | Stores a reference at i32 index i. Takes over v's count, defers the old value's decrement, and returns v.                                                                                                                                                                         |
+| `storeStr(i, s)`, `strAt(p)`                                                | `storeStr` stores a string field or element at i32 index i. It counts s's interned string, defers the old one's decrement, and returns s. `strAt` returns the string at address p.                                                                                                |
+| `countedRef(v)`                                                             | Passes a counted argument to `spawn`, `go` or a channel's `send`. Retains v either for the thread, which releases it when its function returns, or for the message, whose receiver owns it.                                                                                       |
+| `moved(v)`                                                                  | Wraps a counted result that a callback returns to the runtime, such as a SharedMap's getOrInsertComputed's callback. The result carries its count already.                                                                                                                        |
+| `quiescent()`                                                               | Marks a quiescent point.                                                                                                                                                                                                                                                          |
+| `box(p)`                                                                    | Returns this thread's handle for p, null for 0, and undefined unchanged. The handle holds a count of its own, released when it is collected.                                                                                                                                      |
+| `unbox(v)`, `cellAddress(v)`                                                | `unbox` returns the handle's address, borrowed. `cellAddress` returns a lasting cell's address (a channel's, a lock's or a condition's). Both return 0 for null. `unbox` preserves undefined for default parameters; `cellAddress` converts undefined field values to 0.          |
+| `capture(fn, ...ps)`                                                        | Retains each address for a closure that captures them. They're released when the closure is collected.                                                                                                                                                                            |
+| `F64`, `I32`, `U8`, `outOfBounds`                                           | The shared heap's views, which field and element accesses index into, and what an out-of-range index reads (it throws).                                                                                                                                                           |
+| `heapStats()`                                                               | Reports the heap bytes in use, the blocks allocated and freed, and the decrements pending.                                                                                                                                                                                        |
+| `collectCycles(timeout)`                                                    | Stops every other thread at a quiescent point, frees the cycles nothing outside them refers to, and returns how many blocks it freed (see [Cycles](#cycles)).                                                                                                                     |
 
 Freed blocks go to free lists by size, with a per-thread cache over global
 lists. Allocation takes from these lists before it bumps the shared cursor.
 Large blocks are reused only at the same size.
+
+Constructors and methods are local functions, outside the shared layout. The
+`structKey(value)` helper performs property-key coercion once, so computed
+method names and their calling-convention metadata use the same string or
+symbol. The compiler lowers `this` to an explicit receiver address and records
+which arguments and results need conversion for boxed callers. An explicit
+`import.meta.url` inside a struct identity uses the bundler's stable module key
+in compiled page and worker bundles; outside a bundle it remains the module URL.
+Constructors always use the allocated instance; returned expressions are
+evaluated and discarded. A constructor that throws releases the allocation's
+initial count. References published to shared fields or captured by closures
+retain their own counts. Boxed handles hold their own counts until garbage
+collection, including a handle published by a constructor that later throws.
+Releasing the initial allocation count does not revoke an escaped handle.
+
+An arrow that captures a method's `this` keeps the receiver alive through
+`capture`. A compiled synchronous invocation retains its receiver until it
+returns or throws. A method declared `async` uses an async wrapper that retains
+its receiver and shared arguments, including rest tuple elements, awaits the
+call, and releases those references in `finally`. Synchronous methods return
+their results directly. Receiving an address does not load its behavior: the
+worker must import the defining module before constructing the struct or calling
+its methods.
 
 ## What the Compiler Emits
 

@@ -10,6 +10,299 @@ const move = (v: unknown) => {
   return own.__unmessage(a, bytes);
 };
 
+describe('struct methods', () => {
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'rejects erased generator methods with async=%s and symbol key=%s',
+    (async, symbol) => {
+      const read = async
+        ? async function* () {
+            yield 1;
+          }
+        : function* () {
+            yield 1;
+          };
+      expect(() =>
+        T.struct(
+          {[symbol ? Symbol.iterator : 'read']: read},
+          `tests/rejected-generator/${async}/${symbol}`,
+        ),
+      ).toThrow(/struct method.*generator/);
+    },
+  );
+
+  it.each([T.f64, T.ref()])('rejects erased constructor fields: %j', field => {
+    expect(() => T.struct({constructor: field})).toThrow(/constructor.*method/);
+  });
+
+  it('preserves explicit module URLs outside bundled struct identities', () => {
+    const url = 'file:///example/counter.ts';
+    expect(own.structIdentity(url)).toBe(url);
+    expect(own.structIdentity(url, 'Counter')).toBe(
+      JSON.stringify([url, 'Counter']),
+    );
+  });
+
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'preserves an escaped failed-constructor handle with compiled=%s and raw caller=%s',
+    (compiled, raw) => {
+      type Value = {value: number; $cell: number};
+      let escaped: Value | undefined;
+      const publish = (value: Value) => {
+        escaped = value;
+      };
+      const Broken = own.sharedStruct<{value: number}>(
+        'FailedConstructorHandle',
+        ['value'],
+        [],
+        '',
+        `tests/failed-constructor-handle/${compiled}/${raw}`,
+        compiled
+          ? {
+              constructor(self: number) {
+                own.F64[(self >> 3) + 1] = 7;
+                publish(own.box(self) as Value);
+                throw new Error('failed');
+              },
+            }
+          : {
+              constructor(this: Value) {
+                this.value = 7;
+                publish(this);
+                throw new Error('failed');
+              },
+            },
+        compiled ? {constructor: {cells: [], result: false}} : undefined,
+      );
+      expect(() => (raw ? own.newStruct(Broken) : new Broken())).toThrow(
+        'failed',
+      );
+      expect(escaped!.value).toBe(7);
+      // Only the live handle's count remains; the allocation's initial
+      // ownership was released with either calling convention.
+      expect(own.I32[(escaped!.$cell >> 2) + 1]).toBe(1);
+      expect(own.box(escaped!.$cell)).toBe(escaped);
+    },
+  );
+
+  it.each([false, true])(
+    'retains a raw synchronous receiver through reentrant release with throw=%s',
+    throws => {
+      let replacement = 0;
+      const Counter = own.sharedStruct(
+        'ReentrantReceiver',
+        ['value'],
+        [],
+        '',
+        `tests/reentrant-receiver/${throws}`,
+        {
+          read(self: number) {
+            own.release(self);
+            replacement = own.newStruct(Counter);
+            own.F64[(replacement >> 3) + 1] = 99;
+            const value = own.F64[(self >> 3) + 1];
+            if (throws) throw new Error(String(value));
+            return value;
+          },
+        },
+        {read: {cells: [], result: false}},
+      );
+      const self = own.newStruct(Counter);
+      own.F64[(self >> 3) + 1] = 7;
+      const before = T.heapStats();
+      try {
+        const read = () => own.structMethod(self, 'read')(self);
+        if (throws) expect(read).toThrow('7');
+        else expect(read()).toBe(7);
+        const after = T.heapStats();
+        expect(after.allocated - before.allocated).toBe(1);
+        expect(after.freed - before.freed).toBe(1);
+      } finally {
+        own.release(replacement);
+      }
+    },
+  );
+
+  it('supports computed string and numeric names in uncompiled code', () => {
+    const numeric: number = 100;
+    const C = T.struct(
+      {
+        value: T.f64,
+        ['read'](): number {
+          return this.value;
+        },
+        [numeric](): number {
+          return this.value + 1;
+        },
+      },
+      'tests/computed-names',
+    );
+    const c = new C();
+    c.value = 7;
+    expect(c.read()).toBe(7);
+    expect(c[100]()).toBe(8);
+    expect(C.fields).toEqual(['value']);
+  });
+
+  it('installs symbol methods on uncompiled prototypes and preserves them through transport', () => {
+    const Range = T.struct(
+      {
+        value: T.f64,
+        [Symbol.iterator](): ArrayIterator<number> {
+          return [this.value, this.value + 1].values();
+        },
+      },
+      'tests/iterable-range',
+    );
+    const r = new Range();
+    r.value = 4;
+    expect([...r]).toEqual([4, 5]);
+    expect([...(move(r) as typeof r)]).toEqual([4, 5]);
+    expect(Range.fields).toEqual(['value']);
+    expect(
+      Object.getOwnPropertyDescriptor(Range.prototype, Symbol.iterator),
+    ).toMatchObject({
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+    expect(() => r[Symbol.iterator].call({} as typeof r)).toThrow(/not a cell/);
+    expect(() =>
+      T.struct({
+        [Symbol.iterator]() {
+          return [1].values();
+        },
+      }),
+    ).toThrow(/module-qualified identity/);
+  });
+
+  it('runs uncompiled constructors on zeroed handles, ignoring return overrides', () => {
+    const Counter = T.struct(
+      {
+        value: T.f64,
+        constructor(value = 3) {
+          expect(this.value).toBe(0);
+          this.value = value;
+          this.add(1);
+          return {value: 99};
+        },
+        add(n: number) {
+          this.value += n;
+        },
+      },
+      'tests/constructed-counter',
+    );
+    const c = new Counter(8);
+    expect(c.value).toBe(9);
+    expect(new Counter().value).toBe(4);
+    expect(Counter.fields).toEqual(['value']);
+    expect(Object.getPrototypeOf(c).constructor).toBe(Counter);
+  });
+
+  it('adapts compiled constructors for handle callers and rejects async initializers', () => {
+    const Counter = own.sharedStruct<{value: number}>(
+      'ConstructedRaw',
+      ['value'],
+      [],
+      '',
+      'tests/constructed-raw',
+      {
+        constructor(self: number, value: number) {
+          own.F64[(self >> 3) + 1] = value;
+        },
+      },
+      {constructor: {cells: [], result: false}},
+    );
+    expect(new Counter(42).value).toBe(42);
+    const a = own.newStruct(Counter, 7);
+    try {
+      expect(own.F64[(a >> 3) + 1]).toBe(7);
+    } finally {
+      own.release(a);
+    }
+    expect(() =>
+      T.struct({async constructor() {}}, 'tests/async-constructor'),
+    ).toThrow(/must be synchronous/);
+  });
+
+  it('uses local methods on handles over shared fields', () => {
+    const Counter = T.struct(
+      {
+        value: T.f64,
+        add(n: number): number {
+          this.value += n;
+          return this.value;
+        },
+      },
+      'tests/local-counter',
+    );
+    const c = new Counter();
+    expect(Counter.fields).toEqual(['value']);
+    expect(c.add(3)).toBe(3);
+    expect((move(c) as typeof c).add(4)).toBe(7);
+    expect(c.value).toBe(7);
+    expect(() => Object.defineProperty(c, 'add', {value: () => 0})).toThrow(
+      TypeError,
+    );
+    expect(() => c.add.call({value: 0} as typeof c, 1)).toThrow(/not a cell/);
+    expect(
+      Object.getOwnPropertyDescriptor(Counter.prototype, 'add'),
+    ).toMatchObject({
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+  });
+
+  it('adds behavior to a reconstructed type without replacing old handles', () => {
+    const identity = 'tests/reconstructed-counter';
+    const Bare = own.sharedStruct<{value: number}>(
+      'Remote',
+      ['value'],
+      [],
+      '',
+      identity,
+    );
+    const c = new Bare();
+    c.value = 40;
+    const proto = Object.getPrototypeOf(c);
+    const Counter = T.struct(
+      {
+        value: T.f64,
+        read(): number {
+          return this.value + 2;
+        },
+      },
+      identity,
+    );
+    expect(Counter).toBe(Bare);
+    expect(Object.getPrototypeOf(c)).toBe(proto);
+    expect((c as InstanceType<typeof Counter>).read()).toBe(42);
+    expect(() =>
+      own.sharedStruct('Other', ['other'], [], '', identity),
+    ).toThrow(/different layout/);
+  });
+
+  it('requires an identity when declaring uncompiled behavior', () => {
+    expect(() =>
+      T.struct({
+        read() {
+          return 1;
+        },
+      }),
+    ).toThrow(/module-qualified identity/);
+  });
+});
+
 describe('moving values', () => {
   it('copies what it moves', () => {
     const v = () => ({

@@ -200,19 +200,22 @@ describe('compile, where the fork does not', () => {
     expect(fixes).toContain('__newSharedArray((calls++, Number, 8), n)');
   });
 
-  it('puts the import on a line of its own after a directive', () => {
+  it('puts helper imports after directives and source dependencies', () => {
     for (const eol of ['\n', '\r\n']) {
-      const dir = project({'app.ts': `"use client"${eol}${APP}`});
-      const [file] = compile(path.join(dir, 'tsconfig.json'), {
+      const dir = project({
+        'app.ts': `"use client"${eol}import './init.js';${eol}${APP}`,
+        'init.js': 'export {};',
+      });
+      const file = compile(path.join(dir, 'tsconfig.json'), {
         runtime: 'threads',
         api,
-      }).files;
-      expect(file!.code).toMatch(
-        new RegExp(
-          `^"use client"${eol}\\n?import \\{ [^\\n]* \\} from "threads";\\n`,
-        ),
+      }).files.find(f => f.fileName.endsWith('app.ts'))!;
+      expect(file.code.startsWith(`"use client"${eol}`)).toBe(true);
+      expect(file.code).toMatch(/^import \{ [^\n]* \} from "threads";\n/m);
+      expect(file.code.indexOf("import './init.js';")).toBeLessThan(
+        file.code.indexOf('import { F64 as __F64'),
       );
-      expect(() => toJavaScript(file!)).not.toThrow();
+      expect(() => toJavaScript(file)).not.toThrow();
     }
   });
 

@@ -315,7 +315,7 @@ joining a thread, or an atomic operation is what orders them.
 
 |                                                                          |                                                                                                                                                                                                                                   |
 | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `struct({ x: f64, n: i32, done: bool, name: str, next: ref<T>() })`      | A shared struct type. `new S()` makes a zeroed one, and `Struct<typeof S>` is the type of its values.                                                                                                                             |
+| `struct({ x: f64, n: i32, done: bool, name: str, next: ref<T>() })`      | A shared struct type. `new S(...args)` zeroes its fields, then runs its optional constructor. `Struct<typeof S>` is the instance type.                                                                                            |
 | `f64`, `i32`, `u8`, `bool`, `str`, `ref<T>()`                            | Field kinds: a number, a 32-bit integer, a byte, a boolean, a string (interned), and a reference to a struct, a SharedArray, a Channel, a Lock or a Condition (or null).                                                          |
 | `new SharedArray(Number \| i32 \| u8 \| Boolean \| String \| S, length)` | A fixed-length array of numbers, i32s, bytes, booleans, strings or structs, stored inline.                                                                                                                                        |
 | `atomic.add(s, "field", v)`, `atomic.add(array, i, v)`                   | An atomic operation on an `i32` field or on an element of a `SharedArray<i32>`: `load`, `store`, `add`, `sub`, `and`, `or`, `xor`, `exchange`, `compareExchange`, `wait` and `notify`. Compiled, it's that `Atomics` call itself. |
@@ -350,6 +350,80 @@ function deposit(account: Struct<typeof Account>, amount: number) {
   account.deposits++;
 }
 ```
+
+Structs can also declare constructors and methods alongside field markers:
+
+```ts
+const Counter = struct({
+  value: f64,
+  constructor(value = 0) {
+    this.value = value;
+  },
+  add(amount: number): number {
+    this.value += amount;
+    return this.value;
+  },
+});
+type Counter = Struct<typeof Counter>;
+
+const counter = new Counter(10);
+counter.add(3);
+```
+
+Methods live on each worker's local prototype; only fields use shared memory.
+Compiled calls pass the address directly. Declare structs with a constructor or
+methods in top-level `const`s, and import their defining modules in workers that
+construct them or call their methods. Methods are fixed after declaration and do
+not lock automatically. Code run with only its types erased supplies a stable,
+module-qualified identity as the second argument to `struct`. See
+[Shared Memory](site/src/api/shared-memory.md#methods) and the
+[SharedVector example](playground/programs/shared-vector.ts).
+
+An extracted method keeps ordinary, unbound `this`. Use `call`, `apply`, or
+`bind` with an instance of its declaring struct:
+
+```ts
+const add = counter.add;
+add.call(counter, 2);
+const boundAdd = add.bind(counter);
+boundAdd(1);
+```
+
+A missing receiver, a plain object, or an instance of another struct is
+rejected. The
+[TC39 structs proposal](https://github.com/tc39/proposal-structs#structs) uses
+**non-generic** for this receiver restriction; the term does not refer to
+TypeScript type parameters. Struct inheritance, getters, setters, generators,
+`super`, and private members are not supported.
+
+Methods support computed property names such as `[methodName]()`, `[1 + 2]()`,
+and `[Symbol.iterator]()`. Name values must be primitive strings, numbers, or
+symbols; each name expression and its property-key coercion run once, in source
+order. Returning an iterator makes the struct usable with `for...of`, spread,
+and `Array.from`. These methods live on local prototypes and use no shared field
+storage. SharedVector implements snapshot iteration this way. Compiled method
+bodies do not support `arguments`; use named parameters or rest parameters
+instead.
+
+Methods can also be template tags. Declaration patterns such as
+`const {method} = instance` preserve method calling conventions; destructuring
+assignments such as `({method} = instance)` are rejected. Tuple rest parameters
+support fixed positions followed by a variadic tail; fixed elements after a
+variadic element are not supported. Union alternatives must agree on the
+shared-reference representation at overlapping positions.
+
+Extracted method types must preserve shared argument and result representations.
+Use the declaring struct type for views of methods with shared arguments or
+results; ordinary structural interfaces for those methods are rejected.
+
+`new S(...args)` zeroes all fields before running its synchronous constructor.
+Constructor arguments are inferred, return values are discarded, and a thrown
+constructor releases its ownership while preserving references it published.
+Constructors cannot declare type parameters. For an explicit instance interface,
+a second type argument describes constructor arguments:
+`struct<Node, [value: number]>(...)`. `StructType<T, Args>` describes that
+constructor. Inline `SharedArray` elements are zeroed without running user
+constructors.
 
 Structs and SharedArrays are reference counted, and they're freed when no thread
 can reach them. To declare a struct that refers to its own type, use an
@@ -498,6 +572,11 @@ today:
   and counted. A string is freed once no field, element, map or message refers
   to it.
 - **Closures don't cross threads.** A thread runs a top-level function.
+- **Struct constructors and methods run locally.** Each worker must import the
+  defining module before constructing instances or calling methods. Only fields
+  occupy shared memory. Constructors are synchronous; methods may be async.
+  Struct inheritance, accessors, and private members are not supported. See
+  [Shared Memory](site/src/api/shared-memory.md#methods).
 - **A SharedMap or SharedSet has one lock.** Every call takes it for a moment,
   so threads that change one map all the time wait for each other. A thread with
   many changes should make them in a Map of its own, and merge once.

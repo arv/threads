@@ -141,6 +141,39 @@ const compiles = (server: ViteDevServer) =>
   ).compiles;
 
 describe('the Vite plugin, compiling with threads-check', () => {
+  it.each([false, true])(
+    'keys method-only struct modules consistently for page and worker bundles with explicit identity=%s',
+    async explicit => {
+      const root = project({
+        'index.html': INDEX,
+        'tsconfig.json': tsconfig(),
+        'src/main.ts': page('./app.ts'),
+        'src/counter.ts': `import {struct, f64} from '@arv/threads';
+export const Counter = struct({value: f64, add(n: number) { this.value += n; return this.value; }}${explicit ? ', `${import.meta.url}#Counter`' : ''});`,
+        'src/app.ts': `import {log} from '@arv/threads';
+import {Counter} from './counter.ts';
+export function main() { log(new Counter().add(1)); }`,
+      });
+      const server = await serve(root);
+      try {
+        const result =
+          await server.environments.client.transformRequest('/src/counter.ts');
+        expect(result?.code).toContain(
+          explicit
+            ? '__structIdentity("src/counter.ts")'
+            : '__structIdentity("src/counter.ts", "Counter")',
+        );
+        expect(result?.code).toContain('__F64[');
+        expect(result?.code).not.toContain('__register(');
+      } finally {
+        await server.close();
+      }
+      const code = await bundle(root);
+      expect(code).toContain('src/counter.ts');
+      expect(code).toContain('structMethod');
+    },
+  );
+
   it('lowers a struct program, with a source map from its TypeScript', async () => {
     const root = project({
       'index.html': INDEX,

@@ -145,6 +145,30 @@ export const Messages = {
     code: 96039,
     text: "'{0}' is a CommonJS module: threads-check compiles ES modules only.",
   },
+  StructMethod: {
+    code: 96040,
+    text: 'A shared struct method must be a non-generator method in a top-level const struct declaration, without super; $cell and field names are reserved, and constructors must be synchronous and non-generic.',
+  },
+  StructMethodWrite: {
+    code: 96041,
+    text: 'Shared struct methods are fixed by their declaration and cannot be replaced.',
+  },
+  StructConstructor: {
+    code: 96042,
+    text: 'A shared struct constructor must be declared with constructor(...) { ... }.',
+  },
+  StructMethodAssignment: {
+    code: 96043,
+    text: 'Extract shared struct methods with a declaration binding pattern or a property access; destructuring assignments of methods are not supported.',
+  },
+  StructRestTuple: {
+    code: 96044,
+    text: 'A shared struct rest tuple must have fixed positions followed by a variadic tail; fixed elements after a variadic element are not supported.',
+  },
+  StructRestRepresentation: {
+    code: 96045,
+    text: 'Overlapping alternatives of a shared struct rest tuple must use the same shared-reference representation at each position.',
+  },
 } as const;
 
 export type Message = (typeof Messages)[keyof typeof Messages];

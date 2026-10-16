@@ -3,7 +3,7 @@
 // are, from sources the compiler tells apart and a scan of the text would not,
 // the Vite plugin's tests check with threads-check itself
 import {describe, expect, it} from 'vite-plus/test';
-import {registeredIn, registration} from './compiled.ts';
+import {keyRegistration, registeredIn, registration} from './compiled.ts';
 
 const RUNTIME = '@arv/threads';
 // the compiled code of a program that registers main and gen
@@ -15,6 +15,30 @@ __register(import.meta.url, { main, gen });
 //# sourceMappingURL=program.js.map`;
 
 describe('registration', () => {
+  it('finds compiler helpers after a source import of register', () => {
+    const code = `import { register as sourceRegister } from "${RUNTIME}";\n${EMIT}`;
+    expect(registeredIn(code, RUNTIME)).toEqual(['main', 'gen']);
+    expect(keyRegistration(code, RUNTIME, 'src/app.ts')).toContain(
+      '__register("src/app.ts", { main, gen });',
+    );
+  });
+
+  it('normalizes an explicit struct identity URL without changing other module URLs', () => {
+    const source = `import { structIdentity as __id } from "${RUNTIME}";
+const key = \`\${__id(import.meta.url)}#Counter\`;
+const url = import.meta.url;`;
+    const code = keyRegistration(source, RUNTIME, 'src/counter.ts');
+    expect(code).toContain('__id("src/counter.ts")');
+    expect(code).toContain('const url = import.meta.url;');
+  });
+
+  it('gives struct declarations the same module identity in page and worker bundles', () => {
+    const source = `import { structIdentity as __id } from "${RUNTIME}";
+const key = __id(import.meta.url, "Counter");`;
+    expect(keyRegistration(source, RUNTIME, 'src/counter.ts')).toContain(
+      '__id("src/counter.ts", "Counter")',
+    );
+  });
   it('registers what the compiled code registers', () => {
     expect(registeredIn(EMIT, RUNTIME)).toEqual(['main', 'gen']);
     const {tail, added} = registration('', RUNTIME, EMIT);

@@ -121,14 +121,15 @@ export declare const str: Field<string>;
 export declare function ref<T>(): Field<T | null>;
 
 /**
- * What `struct(...)` returns: `new S()` makes a zeroed struct in shared memory.
+ * What `struct(...)` returns: construction zeroes every field before running
+ * the optional constructor with its arguments.
  */
-export interface StructType<T> {
-  new (): T & Cell;
+export interface StructType<T, A extends any[] = []> {
+  new (...args: A): T & Cell;
   readonly fields: readonly string[];
 }
 /** The value type of a struct type: `type Body = Struct<typeof Body>`. */
-export type Struct<S> = S extends StructType<infer T> ? T & Cell : never;
+export type Struct<S> = S extends StructType<infer T, any[]> ? T & Cell : never;
 
 /**
  * Declares a shared struct: fields at fixed places in shared memory, which
@@ -142,15 +143,70 @@ export type Struct<S> = S extends StructType<infer T> ? T & Cell : never;
  *
  *     interface Node { value: number; next: Node | null }
  *     const Node = struct<Node>({ value: f64, next: ref<Node>() });
+ *
+ * Methods may be declared alongside fields. They use the instance as `this`
+ * and live on each worker's local prototype. Declare these structs in
+ * top-level consts, import their module in each worker, and order concurrent
+ * writes explicitly. Method definitions cannot be replaced.
+ * Extracted methods have unbound this and require a receiver from the same
+ * struct declaration. Struct inheritance is not supported.
+ * Methods may use computed string, numeric, or symbol keys, including
+ * Symbol.iterator. Name values must be primitive strings, numbers, or symbols;
+ * name expressions and key coercions run once, in source order.
+ * Methods can be template tags. Extract methods with property access or a
+ * declaration binding pattern; method destructuring assignments are unsupported.
+ * Rest tuples support fixed positions followed by a variadic tail; union
+ * alternatives must agree on shared-reference representations where they overlap.
+ * Extracted callable types must preserve shared argument/result representations.
+ * Use the declaring struct type for method views with shared arguments/results.
+ * Compiled method bodies do not support arguments; use named or rest parameters.
+ * A synchronous constructor may initialize the zeroed instance. Its arguments
+ * are inferred and its return value is discarded. For an explicit T, specify
+ * the constructor argument tuple with struct<T, Args>(...).
+ * Constructors cannot declare type parameters. Inline SharedArray elements
+ * are zeroed without running constructors.
  */
-export declare function struct<F extends Record<string, Field<any>>>(
-  fields: F,
-): StructType<{
-  -readonly [K in keyof F]: F[K] extends Field<infer V> ? V : never;
-}>;
-export declare function struct<T>(fields: {
-  [K in keyof T]-?: Field<T[K]>;
-}): StructType<T>;
+// Function deliberately has no contextual call signature: a callable
+// constraint makes TypeScript infer `this` before unannotated method returns.
+type StructMember = Field<any> | Function;
+type StructInstance<F> = {
+  -readonly [
+    K in keyof F as K extends 'constructor' ? never : K
+  ]: F[K] extends Field<infer V> ? V : F[K];
+};
+type StructArguments<F> = F extends {constructor: (...args: infer A) => any}
+  ? A
+  : [];
+/** Methods live on each worker's local prototype, outside shared memory.
+ * When running without compilation, supply a module-qualified identity for
+ * a declaration with a constructor or methods. The compiler supplies one otherwise.
+ * In compiled Vite builds, import.meta.url used directly in this identity
+ * becomes a stable source-module key shared by page and worker bundles.
+ */
+export declare function struct<F extends Record<PropertyKey, StructMember>>(
+  members: F & ThisType<StructInstance<F> & Cell>,
+  identity?: string,
+): StructType<
+  {
+    -readonly [
+      K in keyof F as K extends 'constructor' ? never : K
+    ]: F[K] extends Field<infer V> ? V : F[K];
+  },
+  StructArguments<F>
+>;
+/** For an explicit instance type, supply A when construction accepts arguments. */
+export declare function struct<T, A extends any[] = []>(
+  members: {
+    [K in keyof T]-?: T[K] extends (...args: any[]) => any ? T[K] : Field<T[K]>;
+  } & {constructor: (...args: A) => void} & ThisType<T & Cell>,
+  identity?: string,
+): StructType<T, A>;
+export declare function struct<T>(
+  members: {
+    [K in keyof T]-?: T[K] extends (...args: any[]) => any ? T[K] : Field<T[K]>;
+  } & ThisType<T & Cell>,
+  identity?: string,
+): StructType<T>;
 
 /**
  * A fixed-length array in shared memory: of numbers (`Number`), of i32s
@@ -158,6 +214,7 @@ export declare function struct<T>(fields: {
  * (`String`, interned as `str` fields are), or of shared structs stored inline.
  * Every thread reads and writes the same elements, with no copying; a Lock, a
  * Channel or an atomic operation orders them.
+ * Struct elements are zero-initialized without invoking user constructors.
  */
 export interface SharedArray<T, L = ElementLayout<T>> extends Cell {
   readonly length: number;
@@ -185,7 +242,7 @@ export declare const SharedArray: {
   new (type: StringConstructor, length: number): SharedArray<string>;
   new (type: IntegerField<i32, 'i32'>, length: number): SharedArray<i32>;
   new (type: IntegerField<u8, 'u8'>, length: number): SharedArray<u8>;
-  new <T>(type: StructType<T>, length: number): SharedArray<T & Cell>;
+  new <T>(type: StructType<T, any[]>, length: number): SharedArray<T & Cell>;
 };
 
 // ---- atomic operations ----

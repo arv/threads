@@ -25,6 +25,12 @@ export const HELPERS = new Set([
   'release',
   'retain',
   'sharedStruct',
+  'structIdentity',
+  'structKey',
+  'structMethod',
+  'structMethodValue',
+  'structConstructor',
+  'structDestructure',
   'store',
   'storeStr',
   'strAt',
@@ -32,20 +38,22 @@ export const HELPERS = new Set([
 ]);
 
 // The local names of the helpers that compiled code imports from `runtime` :
-// the specifiers of its first import of nothing but helpers.
+// the specifiers of its last import of nothing but helpers. The compiler
+// appends that import after the source's existing module dependencies.
 export function helpersOf(
   code: string,
   runtime: string,
 ): Record<string, string> {
+  let helpers: Record<string, string> = {};
   for (const m of code.matchAll(/^import \{ ([^}]*) \} from "([^"]*)";$/gm)) {
     if (m[2] !== runtime) continue;
-    const pairs = m[1].split(',').map(s => s.trim().split(/\s+as\s+/));
-    if (pairs.every(([name]) => HELPERS.has(name)))
-      return Object.fromEntries(
+    const pairs = m[1]!.split(',').map(s => s.trim().split(/\s+as\s+/));
+    if (pairs.every(([name]) => name !== undefined && HELPERS.has(name)))
+      helpers = Object.fromEntries(
         pairs.map(([name, local]) => [name, local ?? name]),
       );
   }
-  return {};
+  return helpers;
 }
 
 // A name like `name` that no identifier in `source` has, as TypeScript makes
@@ -61,7 +69,18 @@ export function uniqueName(source: string, name: string) {
 // its last statement, under whatever name it imported register as) with `key`
 // in place of import.meta.url.
 export function keyRegistration(code: string, runtime: string, key: string) {
-  const register = helpersOf(code, runtime).register;
+  const helpers = helpersOf(code, runtime);
+  if (helpers.structIdentity) {
+    code = code.replaceAll(
+      `${helpers.structIdentity}(import.meta.url,`,
+      `${helpers.structIdentity}(${JSON.stringify(key)},`,
+    );
+    code = code.replaceAll(
+      `${helpers.structIdentity}(import.meta.url)`,
+      `${helpers.structIdentity}(${JSON.stringify(key)})`,
+    );
+  }
+  const register = helpers.register;
   if (!register) return code;
   const call = `${register}(import.meta.url, {`,
     at = code.lastIndexOf(call);
