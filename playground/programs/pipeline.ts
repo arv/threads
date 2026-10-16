@@ -79,11 +79,12 @@ export function main() {
     b = new Channel<Item>(64);
   go(produce, a, 0, 1000);
   go(produce, b, 1000, 1000);
-  let open = [a, b],
-    fromA = 0,
+  let open: unknown[] = [a, b];
+  let fromA = 0,
     fromB = 0;
   while (open.length > 0) {
-    const [i, item] = select(...open);
+    const [i, item] =
+      open.length === 2 ? select(a, b) : select(open[0] as Channel<Item>);
     if (item === undefined) open = open.filter((_, k) => k !== i);
     else if (item.id < 1000) fromA++;
     else fromB++;

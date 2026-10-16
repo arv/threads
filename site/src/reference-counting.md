@@ -18,10 +18,10 @@ it, and
 is the same test written by hand. The playground's "Reference counting under a
 race" runs it in a browser
 ([programs/refcount.ts](https://github.com/arv/threads/blob/main/playground/programs/refcount.ts)).
-Shared structs, SharedArrays, SharedMaps, SharedSets and interned strings are
-freed when nothing refers to them, and `collectCycles()` frees cycles of them.
-Other cells (`Lock`, `Condition`, `Channel`) and shared values are still never
-freed.
+Shared structs, SharedArrays, SharedMaps, SharedSets, Channels, Locks,
+Conditions, immutable shared values and interned strings are freed when nothing
+refers to them. `collectCycles()` also frees cycles through channel buffers and
+shared values.
 
 :::
 
@@ -44,11 +44,14 @@ none, because borrowed addresses aren't counted.
 
 Each kind of block starts with a header of i32 words:
 
-| Block                           | Words (i32)                                                                      |
-| ------------------------------- | -------------------------------------------------------------------------------- |
-| struct                          | `[kind][count]`, then field k in slot k (8 bytes at byte 8 + 8k)                 |
-| SharedArray                     | `[kind = 23][length][element size][count]`, then the elements from byte 16       |
-| struct element of a SharedArray | `[kind][back]`, where back is the array's address minus the element's (negative) |
+| Block                           | Words (i32)                                                                             |
+| ------------------------------- | --------------------------------------------------------------------------------------- |
+| struct                          | `[kind][count]`, then field k in slot k (8 bytes at byte 8 + 8k)                        |
+| SharedArray                     | `[kind = 23][length][element size][count]`, then the elements from byte 16              |
+| struct element of a SharedArray | `[kind][back]`, where back is the array's address minus the element's (negative)        |
+| Lock / Condition                | `[kind][count][state or sequence][-]` (16 bytes)                                        |
+| Channel                         | `[kind][count][slots][-]`, then synchronization words and the message ring from byte 56 |
+| immutable shared value          | `[kind = 27][count][blob bytes][-]`, then its immutable wire-format blob from byte 16   |
 
 A struct element of a SharedArray has no count of its own. Its lifetime is its
 array's, so retaining or releasing an element counts its array.
@@ -56,11 +59,10 @@ array's, so retaining or releasing an element counts its array.
 Each field of a struct fills one 8-byte slot:
 
 - **A number field** is an f64: `__F64[(p >> 3) + 1 + k]`.
-- **A reference field** holds a struct or a SharedArray, or either with
-  `| null`. It's an i32 address in the low half of its slot,
-  `__I32[(p >> 2) + 2 + 2 * k]`, and 0 for null.
-- **A field that holds a Channel, a Lock or a Condition** is an address too, but
-  it isn't counted. Those cells last as long as the program.
+- **A reference field** holds a struct, SharedArray, Channel, Lock, Condition or
+  immutable shared value, possibly with `| null`. It holds a counted i32 address
+  in the low half of its slot, `__I32[(p >> 2) + 2 + 2 * k]`, and 0 for null.
+  Overwriting any of these fields defers the old value's decrement.
 
 ## The Race, and Deferred Decrements
 
@@ -151,43 +153,57 @@ each one under the same name with two leading underscores
 (`retain as __retain`), so that none of them clash with the program's own names.
 The rules below quote them that way.
 
-| Function                                  | What it does                                                                                                                                                                                          |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sharedStruct(name, fields, refs, kinds)` | Declares a struct type. `refs` lists the indexes of the reference fields. `kinds` has a letter per field: `f` f64, `i` i32, `u` u8, `b` bool, `s` str, `r` reference, `c` channel, lock or condition. |
-| `newStruct(T)`, `newSharedArray(T, n)`    | Allocates a zeroed block with count 1, owned by the caller.                                                                                                                                           |
-| `retain(p)`                               | Adds 1 to the count and returns p. Does nothing for 0.                                                                                                                                                |
-| `release(p)`                              | Subtracts 1 from the count. At 0, frees the block and releases its reference fields. Does nothing for 0.                                                                                              |
-| `store(i, v)`                             | Stores a reference at i32 index i. Takes over v's count, defers the old value's decrement, and returns v.                                                                                             |
-| `storeStr(i, s)`, `strAt(p)`              | `storeStr` stores a string field or element at i32 index i. It counts s's interned string, defers the old one's decrement, and returns s. `strAt` returns the string at address p.                    |
-| `countedRef(v)`                           | Passes a counted argument to `spawn`, `go` or a channel's `send`. Retains v either for the thread, which releases it when its function returns, or for the message, whose receiver owns it.           |
-| `moved(v)`                                | Wraps a counted result that a callback returns to the runtime, such as a SharedMap's getOrInsertComputed's callback. The result carries its count already.                                            |
-| `quiescent()`                             | Marks a quiescent point.                                                                                                                                                                              |
-| `box(p)`                                  | Returns this thread's handle for p. The handle holds a count of its own, and a FinalizationRegistry releases it when the handle is collected.                                                         |
-| `unbox(v)`, `cellAddress(v)`              | `unbox` returns the handle's address, borrowed. `cellAddress` returns a lasting cell's address (a channel's, a lock's or a condition's). Both return 0 for null.                                      |
-| `capture(fn, ...ps)`                      | Retains each address for a closure that captures them. They're released when the closure is collected.                                                                                                |
-| `F64`, `I32`, `U8`, `outOfBounds`         | The shared heap's views, which field and element accesses index into, and what an out-of-range index reads (it throws).                                                                               |
-| `heapStats()`                             | Reports the heap bytes in use, the blocks allocated and freed, and the decrements pending.                                                                                                            |
-| `collectCycles(timeout)`                  | Stops every other thread at a quiescent point, frees the cycles nothing outside them refers to, and returns how many blocks it freed (see [Cycles](#cycles)).                                         |
+| Function                                                                      | What it does                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sharedStruct(name, fields, refs, kinds)`                                     | Declares a struct type. `refs` lists the indexes of the reference fields. `kinds` has a letter per field: `f` f64, `i` i32, `u` u8, `b` bool, `s` str, `r` counted reference (including channels, locks, conditions and shared values). |
+| `newStruct(T)`, `newSharedArray(T, n)`, `newCell(T, ...args)`, `newShared(v)` | Allocates a zeroed block with count 1, owned by the caller.                                                                                                                                                                             |
+| `retain(p)`                                                                   | Adds 1 to the count and returns p. Does nothing for 0.                                                                                                                                                                                  |
+| `release(p)`                                                                  | Subtracts 1 from the count. At 0, frees the block and releases its reference fields. Does nothing for 0.                                                                                                                                |
+| `store(i, v)`                                                                 | Stores a reference at i32 index i. Takes over v's count, defers the old value's decrement, and returns v.                                                                                                                               |
+| `storeStr(i, s)`, `strAt(p)`                                                  | `storeStr` stores a string field or element at i32 index i. It counts s's interned string, defers the old one's decrement, and returns s. `strAt` returns the string at address p.                                                      |
+| `countedRef(v)`                                                               | Passes a counted argument to `spawn`, `go` or a channel's `send`. Retains v either for the thread, which releases it when its function returns, or for the message, whose receiver owns it.                                             |
+| `moved(v)`                                                                    | Wraps a counted result that a callback returns to the runtime, such as a SharedMap's getOrInsertComputed's callback. The result carries its count already.                                                                              |
+| `quiescent()`                                                                 | Marks a quiescent point.                                                                                                                                                                                                                |
+| `box(p)`                                                                      | Returns this thread's handle for p. The handle holds a count of its own, and a FinalizationRegistry releases it when the handle is collected.                                                                                           |
+| `unbox(v)`, `cellAddress(v)`                                                  | `unbox` returns the handle's address, borrowed. `cellAddress` also returns a cell or immutable value's address. Both return 0 for null.                                                                                                 |
+| `capture(fn, ...ps)`                                                          | Retains each address for a closure that captures them. They're released when the closure is collected.                                                                                                                                  |
+| `F64`, `I32`, `U8`, `outOfBounds`                                             | The shared heap's views, which field and element accesses index into, and what an out-of-range index reads (it throws).                                                                                                                 |
+| `heapStats()`                                                                 | Reports the heap bytes in use, the blocks allocated and freed, and the decrements pending.                                                                                                                                              |
+| `collectCycles(timeout)`                                                      | Stops every other thread at a quiescent point, frees the cycles nothing outside them refers to, and returns how many blocks it freed (see [Cycles](#cycles)).                                                                           |
 
 Freed blocks go to free lists by size, with a per-thread cache over global
 lists. Allocation takes from these lists before it bumps the shared cursor.
 Large blocks are reused only at the same size.
 
+A channel releases every unread message when its last count ends. Senders,
+receivers and selects retain their channels throughout a wait. A lock's hold
+retains the lock until disposal, and a condition wait retains both the condition
+and its lock through reacquisition. These counts are roots during cycle
+collection, so a blocked operation cannot lose its cell.
+
+Immutable values count their strings, cells and nested shared values. Each
+thread weakly caches its frozen copies; a live copy holds a count until its
+FinalizationRegistry runs. Compiled `Shared<T>` locals hold raw blob addresses,
+while property reads materialize a copy. Reading an immutable value therefore
+has the same delayed handle cleanup as boxing other counted values.
+
 ## What the Compiler Emits
 
-Every expression of a counted type (a struct or SharedArray, possibly `| null`)
-is one of three things:
+Every expression of a counted type (a struct, SharedArray, Channel, Lock,
+Condition or object-valued `Shared<T>`, possibly `| null`) is one of three
+things:
 
-- **Owned (+1).** These are `new S()`, `new SharedArray(...)`, `__retain(E)`, a
-  call to a function compiled here whose declared return type is counted, and a
-  call to a declared function whose result is `Sending<T>` (a channel's
-  `recv()`, `join()`).
+- **Owned (+1).** These are `new S()`, `new SharedArray(...)`,
+  `new Channel(...)`, `new Lock()`, `new Condition()`, object-valued
+  `share(...)`, `__retain(E)`, a call to a function compiled here whose declared
+  return type is counted, and a call to a declared function whose result is
+  `Sending<T>` (a channel's `recv()`, `join()`).
 - **A stable borrow.** These are a parameter, a counted local that's never
   reassigned, `A[i]` where A is a stable borrow, and `__unbox(v)`.
 - **An unstable borrow.** These are a reference field read `e.f`, `A[i]` where A
   is an unstable borrow, and the result of any other call. A generic or declared
   function adds no count. An unstable borrow is valid only until the thread's
-  next quiescent point, so it's never held across a call.
+  next quiescent point, so it's never held across a call or allocation.
 
 ### Rules
 
@@ -214,11 +230,11 @@ is one of three things:
 
 4. **Arguments.** Parameters borrow. An unstable borrow passed to a function is
    retained around the call, because the callee may reach a quiescent point.
-   Helpers and intrinsics don't need this.
+   Allocating helpers can collect on a full heap, so they need this too.
 
 5. **Field stores.** `e.f = E` becomes `__store((e >> 2) + 2 + 2k, E')`, where
    E' is E if E is owned, and `__retain(E)` otherwise. If `e` is an unstable
-   borrow and E contains a call, `e` is retained first.
+   borrow and E contains a call or allocation, `e` is retained first.
 
 6. **Field reads.** `e.f` becomes `__I32[(e >> 2) + 2 + 2k]`.
 
@@ -236,6 +252,10 @@ is one of three things:
    - A callback whose type in the runtime has a `Sending` result
      (getOrInsertComputed's) returns a counted value as `__moved(E)`, with its
      count.
+   - Map and set entries tag cells and shared blobs separately from ordinary
+     numbers. Native reads and callbacks receive handles; the compiler unboxes
+     counted results and adapts callback parameters. Named computed callbacks
+     transfer their owned results through the same protocol as inline callbacks.
    - A map or set holds a count on each counted key and value. It defers the
      decrement of one it drops, and releases the rest when it's freed.
    - A `for...of` over a channel owns each value and releases it at the end of
@@ -250,7 +270,10 @@ is one of three things:
    returns a Disposable for `using` rather than taking a function.
 
 9. **null.** In raw positions, null and undefined are 0, and `x === null`
-   becomes `x === 0`.
+   becomes `x === 0`. This includes nullable counted channel payloads. A widened
+   `Channel<unknown>` uses boxed/native decoding when the distinction between
+   sent null and undefined is needed; `select` and `recvOk` then preserve that
+   distinction and the ok flag in their ordinary tuples.
 
 10. **Quiescent points in loops.** A loop whose body reads or stores a reference
     field ends each iteration with `__quiescent()`. That way neither a writer
@@ -316,14 +339,16 @@ from outside the heap. A collection goes like this:
    queue that a full heap left on its thread) only keeps more blocks alive.
 3. **Subtract the heap's own references.** The collector walks every block that
    can hold a reference: structs with reference fields, SharedArrays of them,
-   maps and sets. A bitmap in the heap's last 64th, one bit per 8 bytes, marks
-   where each one starts. For each block, it takes the count and subtracts the
-   references the other blocks hold on it: reference fields, struct elements'
-   fields, and map and set entries. A reference to an element counts its array.
+   maps, sets, channels and immutable shared values. A bitmap in the heap's last
+   64th, one bit per 8 bytes, marks where each one starts. For each block, it
+   takes the count and subtracts the references the other blocks hold on it:
+   reference fields, struct elements' fields, map and set entries, channel
+   buffers and shared values' nested references. A reference to an element
+   counts its array.
 4. **Mark from the roots.** A block with some count left is held from outside
    the heap: by a thread's local or handle, a thread's arguments, a message in
-   flight or a shared value. It's a root. Everything a root reaches through
-   references stays.
+   flight, or an active send, receive, select, lock hold or condition wait. It's
+   a root. Everything a root reaches through references stays.
 5. **Free the rest.** What's left is garbage: cycles, and blocks that only
    cycles reach. The collector gives back the counts they hold outside the
    garbage (strings, and blocks something else holds as well), and then frees
@@ -336,23 +361,25 @@ returns 0. That happens with a long loop that touches no reference field, with
 uncompiled code, and with a thread that spins on a value that a parked thread
 would change.
 
-Nothing collects on its own yet. An allocation can happen in the middle of
-runtime code, often under a lock, so it can't simply stop the world when the
-heap runs low. Call `collectCycles()` where a program drops structures that may
-hold cycles.
-
-Only counted blocks are collected. Channels, locks, conditions and shared values
-aren't counted, so a block that one of them holds stays. Counting them needs new
-compiler emit.
+When a recyclable allocation would exhaust the heap, the allocator attempts a
+cycle collection with a 50 ms timeout, then retries once. This runs only outside
+internal runtime locks: collecting under a string-table or map lock could
+re-enter that lock while releasing garbage. A locked allocation still throws
+when it cannot fit. Compiled code retains borrowed field receivers across
+allocations, including struct and SharedArray construction; runtime helper
+callers must also hold counts across potentially collecting allocations. Call
+`collectCycles()` explicitly where a program drops structures that may hold
+cycles to reclaim them before the heap fills.
 
 ## Limits
 
 Reference counting here has real limits. Here's what to keep in mind:
 
-- **Cycles wait for a collection.** Counting never frees a cycle, and nothing
-  calls `collectCycles()` on its own yet (see [Cycles](#cycles)). A collection
-  stops every thread for a moment, and gives up if one doesn't reach a quiescent
-  point in time.
+- **Cycles wait for a collection.** Counting never frees a cycle. An allocation
+  failure outside internal runtime locks triggers one bounded attempt; programs
+  can also call `collectCycles()` explicitly (see [Cycles](#cycles)). A
+  collection stops every thread for a moment, and gives up if one doesn't reach
+  a quiescent point in time.
 - **Handles and closures are released late, or not at all in Node.** The same
   goes for a thread that's never joined, and its result. They go once the
   thread's `Thread` is collected.
@@ -368,6 +395,12 @@ Reference counting here has real limits. Here's what to keep in mind:
     stay.
   - Compiled code counts without handles. Handles are only for `any`, `unknown`
     and uncompiled code.
+- **Native method forwarding.** Invoke runtime cell, map and set methods
+  directly. Taking these methods as values, including forwarding them through
+  `call`, `apply` or `bind`, is rejected (96040): those calls cannot adapt
+  counted arguments, callbacks and results. A native container callback with
+  multiple signatures is rejected when any signature needs counted adaptation
+  (96041); use a callback with one signature.
 - **Exceptions.** `finally` releases owned locals, but owned temporaries in a
   statement that throws leak.
 - **Races are the program's to avoid.** A channel's `send` moves a value, but

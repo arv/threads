@@ -30,3 +30,4 @@ flow.ts(135,51): error TS96009: 'x' cannot be returned as 'Sending<T>': it may b
 flow.ts(139,8): error TS96007: 'got' cannot be sent: it may be referenced by the caller. Declare the parameter 'Sending<T>' to take ownership.
 flow.ts(143,8): error TS96007: 'b' cannot be sent: it may be referenced by the caller. Declare the parameter 'Sending<T>' to take ownership.
 flow.ts(150,5): error TS96001: 'top' cannot be used here: it was sent to 'send' on line 149.
+flow.ts(124,14): error TS96022: A 'for-of' or 'for-in' variable cannot have type '{ readonly v: number; readonly next?: ... | undefined; } & { readonly [sharedBrand]?: undefined; }': its value is an address in the shared heap.

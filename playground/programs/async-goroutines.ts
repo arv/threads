@@ -68,7 +68,7 @@ function advance(r: Replica, txid: i32) {
   atomic.store(r, 'txid', txid);
   const changed = r.changed;
   r.changed = new Channel<void>();
-  changed?.close();
+  if (changed) changed.close();
 }
 
 // a request: waits until the replica has what it needs, and answers

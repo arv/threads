@@ -53,7 +53,9 @@ describe('channels', () => {
     // as compiled code sends a struct: its address, as __countedRef(p), so the
     // message carries a count, which the receiver owns and releases
     const N = own.sharedStruct('Received', ['v']);
-    const ch = new T.Channel(1);
+    const ch = own.cellView(own.newCell(T.Channel, 1)) as InstanceType<
+      typeof T.Channel
+    >;
     for (const receive of [() => ch.recv(), () => ch.recvOk()[0]]) {
       const a = own.newStruct(N);
       ch.send(own.countedRef(a));
@@ -66,6 +68,7 @@ describe('channels', () => {
       expect(T.heapStats().freed - freed).toBe(1);
       expect(runtime.I32[a >> 2]).toBe(runtime.K_FREE);
     }
+    own.release(ch.$cell);
   });
 
   it('select the channel with a value', () => {
@@ -114,7 +117,7 @@ describe('channels', () => {
     expect(bumped).toEqual([false, true]);
     // the select's records are out of the channels' lists
     for (const ch of [x, y, other])
-      expect(runtime.I32[(ch.$cell >> 2) + 11]).toBe(0);
+      expect(runtime.I32[(ch.$cell >> 2) + 13]).toBe(0);
     expect(other.recv()).toBe('elsewhere');
   });
 

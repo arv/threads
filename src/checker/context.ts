@@ -78,6 +78,7 @@ export class Own {
   readonly conversions = new Map<Node, Conversion>();
   readonly captures = new Map<SourceFile, CaptureInfo>();
   readonly cellTypes = new Map<Type, boolean>();
+  readonly sharedValueTypes = new Map<Type, boolean>();
   readonly structOfType = new Map<Type, StructInfo | undefined>();
   readonly sharedArrayElements = new Map<Type, Type | undefined>();
   readonly runtimeExportNames = new Map<unknown, string>();

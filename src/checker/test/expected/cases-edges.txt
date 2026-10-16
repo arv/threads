@@ -22,3 +22,5 @@ edges.ts(128,7): error TS96002: 'xs' cannot be used here: it may have been sent 
 edges.ts(130,18): error TS96007: 'o[k]!' cannot be sent: it may be referenced by the caller. Declare the parameter 'Sending<T>' to take ownership.
 edges.ts(136,10): error TS96003: 'ys' cannot be used here: it shares objects with 'zs', which was sent to 'send' on line 135.
 edges.ts(145,21): error TS96009: 'mine' cannot be returned as 'Sending<T>': it may be referenced by the caller.
+edges.ts(115,14): error TS96022: A 'for-of' or 'for-in' variable cannot have type 'readonly number[] & { readonly [sharedBrand]?: undefined; }': its value is an address in the shared heap.
+edges.ts(144,16): error TS96023: 'c' cannot be captured by a method or a class: its value is a counted address in the shared heap, which only functions and arrow functions can hold.

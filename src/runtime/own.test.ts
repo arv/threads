@@ -65,6 +65,62 @@ describe('moving values', () => {
     expect(() => own.__message(() => {})).toThrow(/cannot send a function/);
   });
 
+  it('shares plain $cell properties as frozen data, including null prototypes and arrays', () => {
+    const cell = new T.Lock();
+    const values = [
+      {$cell: 1, nested: {n: 2}},
+      {$cell: cell.$cell, nested: {n: 3}},
+      Object.assign(Object.create(null), {$cell: 1, nested: {n: 4}}),
+      Object.assign([{n: 5}], {$cell: 1}),
+    ];
+    for (const value of values) {
+      expect(T.share(value)).toBe(value);
+      expect(Object.isFrozen(value)).toBe(true);
+      expect(own.__sharedAddress(value)).toBeDefined();
+      expect(
+        Object.isFrozen(Array.isArray(value) ? value[0] : value.nested),
+      ).toBe(true);
+    }
+    expect(T.share(cell)).toBe(cell);
+    expect(Object.isFrozen(cell)).toBe(false);
+  });
+
+  it('unboxes shared $cell data to its blob and stores it in reference fields', () => {
+    const cell = new T.Lock();
+    const value = T.share({$cell: cell.$cell, nested: {n: 9}});
+    const address = own.__sharedAddress(value)!;
+    expect(own.unbox(value)).toBe(address);
+    const Holder = T.struct({value: T.ref<typeof value>()}, 'CellDataHolder');
+    const holder = new Holder();
+    holder.value = value;
+    expect(holder.value).toBe(value);
+    expect(holder.value!.nested.n).toBe(9);
+  });
+
+  it('keeps real runtime handles shared without freezing or copying them', () => {
+    const Node = T.struct({value: T.i32}, 'ShareHandle');
+    const handles = [
+      new T.Lock(),
+      new T.Condition(),
+      new T.Channel(1),
+      new T.SharedMap(),
+      new T.SharedSet(),
+      new T.SharedArray(Number, 1),
+      new Node(),
+      own.sharedFloat64Array(1),
+    ];
+    for (const handle of handles) {
+      expect(T.share(handle)).toBe(handle);
+      expect(Object.isFrozen(handle)).toBe(false);
+      expect(own.newShared(handle)).toBe(handle.$cell);
+      own.release(handle.$cell);
+    }
+    const data = T.share({$cell: handles[0].$cell});
+    const address = own.newShared(data);
+    expect(address).toBe(own.__sharedAddress(data));
+    own.release(address);
+  });
+
   it('shares a value frozen, deeply', () => {
     const shared = T.share({a: [1, {b: 2}]});
     expect(Object.isFrozen(shared)).toBe(true);
@@ -1290,7 +1346,7 @@ describe('a wait that throws', () => {
     const ch = new T.Channel();
     throwing(() => expect(() => T.select(ch)).toThrow(TypeError));
     expect(runtime.I32[QS_1]).not.toBe(IDLE);
-    expect(runtime.I32[(ch.$cell >> 2) + 11]).toBe(0); // its list of selects
+    expect(runtime.I32[(ch.$cell >> 2) + 13]).toBe(0); // its list of selects
   });
 });
 
@@ -1358,7 +1414,7 @@ describe('the rest', () => {
     }
     // disposing a hold twice releases the lock once: not someone else's hold
     const state = () =>
-      runtime.I32[((lock as unknown as {$cell: number}).$cell >> 2) + 1];
+      runtime.I32[((lock as unknown as {$cell: number}).$cell >> 2) + 2];
     const first = lock.hold();
     first[Symbol.dispose]();
     const second = lock.hold();

@@ -68,9 +68,82 @@ const fn = (name: string) => {
 };
 
 describe('compile', () => {
+  it('retains unstable channel fields across collecting arguments and computed keys', () => {
+    const dir = project({
+      'app.ts': `import {Channel, struct, ref, f64, select} from 'threads';
+const Node = struct({n: f64});
+const Holder = struct({channel: ref<Channel<InstanceType<typeof Node>>>()});
+export function send(holder: InstanceType<typeof Holder>) { holder.channel!.send(new Node()); }
+export function computed(holder: InstanceType<typeof Holder>, method: () => 'send') { holder.channel![method()](new Node()); }
+export function selected(holder: InstanceType<typeof Holder>, later: () => Channel<unknown>) { select(holder.channel!, later()); }
+`,
+    });
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+      check: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    const code = toJavaScript(
+      result.files.find(f => f.fileName.endsWith('/app.ts'))!,
+    ).code;
+    for (const name of ['send', 'computed', 'selected']) {
+      const start = code.indexOf('function ' + name + '(');
+      const body = code.slice(start, code.indexOf('\n}\n', start) + 2);
+      expect(body).toMatch(/__cellView\(\(?_[a-z]+ = __retain\(__I32\[/);
+      expect(body).toMatch(/__release\(_[a-z]+\)/);
+    }
+  });
+
+  it('counts unboxed map results before entries are cleared or results are returned', () => {
+    const dir = project({
+      'app.ts': `import {SharedMap, Lock} from 'threads';
+export function read(map: SharedMap<string, Lock>) { const value = map.get('k')!; map.clear(); return value; }
+export function insert(map: SharedMap<string, Lock>) { return map.getOrInsert('k', new Lock()); }
+export function computed(map: SharedMap<string, Lock>) { return map.getOrInsertComputed('k', () => new Lock()); }
+`,
+    });
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+      check: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    const code = toJavaScript(
+      result.files.find(f => f.fileName.endsWith('/app.ts'))!,
+    ).code;
+    expect(code).toContain('__retain(__unbox(map.get(');
+    expect(code).toContain('__retain(__unbox(map.getOrInsert(');
+    expect(code).toContain('__retain(__unbox(map.getOrInsertComputed(');
+  });
+
+  it('leaves primitive share results uncounted, including discarded and returned values', () => {
+    const dir = project({
+      'app.ts': `import {share} from 'threads';
+export function primitive(n: number, text: string, flag: boolean) {
+  share(n);
+  const value = share(n);
+  return [value, share(8), share(text), share(flag), share(null), share(void 0)];
+}
+`,
+    });
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+      check: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    const code = toJavaScript(
+      result.files.find(f => f.fileName.endsWith('/app.ts'))!,
+    ).code;
+    expect(code).toContain('share(n)');
+    expect(code).toContain('share(8)');
+    expect(code).not.toMatch(/__(?:retain|release|newShared)\(/);
+  });
+
   it('imports the helpers it uses and registers the top-level functions', () => {
     expect(js).toMatch(
-      /^import \{ F64 as __F64, I32 as __I32, U8 as __U8, capture as __capture, .*register as __register, .*\} from "threads";$/m,
+      /^import \{ F64 as __F64, I32 as __I32, U8 as __U8, .*capture as __capture, .*register as __register, .*\} from "threads";$/m,
     );
     expect(js).toMatch(
       /__register\(import\.meta\.url, \{[^}]*\blabeled,[^}]*\breceiveOne\b/,
@@ -160,6 +233,26 @@ describe('compile', () => {
 });
 
 describe('compile, where the fork does not', () => {
+  it('compiles the playground channel examples with counted channel ownership', () => {
+    for (const name of ['async-goroutines', 'pipeline']) {
+      const source = fs
+        .readFileSync(
+          path.join(checker, '../../playground/programs', `${name}.ts`),
+          'utf8',
+        )
+        .replaceAll("'@arv/threads'", "'threads'");
+      const dir = project({'app.ts': source}, {lib: ['es2022', 'dom']});
+      const result = compile(path.join(dir, 'tsconfig.json'), {
+        runtime: 'threads',
+        api,
+        check: true,
+        types: true,
+      });
+      expect(result.diagnostics, name).toEqual([]);
+      expect(result.typeDiagnostics, name).toEqual([]);
+    }
+  });
+
   it("runs an owned parameter's default around a concise body that is a closure", () => {
     expect(fixes).toContain(
       'export const later = (p) => {\n\tp = p === void 0 ? __newStruct(Node) : __retain(p);',
@@ -278,6 +371,97 @@ describe('compile, where the fork does not', () => {
 });
 
 describe('what the lowering moves, as it runs', () => {
+  it('preserves boxed map values, mixed sharing, narrowed properties and escaping channel iterators', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-boundaries-'));
+    dirs.push(out);
+    const result = compile(path.join(checker, 'test/run/tsconfig.json'), {
+      runtime: '@arv/threads',
+      api,
+      check: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    const file = result.files.find(f => f.fileName.endsWith('/boundaries.ts'))!;
+    const code = toJavaScript(file).code;
+    // Hold the field receiver before the potentially collecting allocation.
+    expect(code).toContain(
+      '__store(((_a = __retain(__I32[(root >> 2) + 2])) >> 2) + 2, __newStruct(Node));\n\t__release(_a);',
+    );
+    expect(code).toContain('__callbackView(makeLock, 0, false, true)');
+    fs.writeFileSync(path.join(out, 'boundaries.js'), code);
+    const run = spawnSync(
+      process.execPath,
+      [
+        path.join(checker, '../run.ts'),
+        path.join(out, 'boundaries.js'),
+        '--threads=1',
+        '--pool=0',
+      ],
+      {encoding: 'utf8', timeout: 60_000},
+    );
+    expect(run.status, run.stderr).toBe(0);
+    expect(JSON.parse(run.stdout.trim())).toEqual({
+      nativeSyncSelectValues: true,
+      nativeSelectValues: true,
+      cellDataMap: true,
+      inheritedReceiver: true,
+      boxedReceivers: true,
+      nullSends: true,
+      asyncNullSends: true,
+      closedReceive: true,
+      asyncClosedReceive: true,
+      nullishMapEntries: true,
+      keyLookups: true,
+      computedKeyCallback: true,
+      conditionalReceives: true,
+      conditionalIteration: true,
+      fallback: true,
+      widenedCallbacks: true,
+      computedCallback: true,
+      unionReceivers: true,
+      asyncUnionReceivers: true,
+      parenthesizedReceive: true,
+      callbacks: 18,
+      nullable: true,
+      calleeEffects: true,
+      countedMap: true,
+      iteratorValue: true,
+      maps: 9,
+      iterators: 16,
+      asyncIterators: 6,
+      mixed: 9,
+      narrowed: 1,
+      unknown: true,
+      union: 10,
+      asyncUnknown: true,
+      unknownIteration: true,
+    });
+  }, 60_000);
+
+  it('counts cells and immutable values through constructors, returns and reference fields', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-cells-'));
+    dirs.push(out);
+    const result = compile(path.join(checker, 'test/run/tsconfig.json'), {
+      runtime: '@arv/threads',
+      api,
+      check: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    const file = result.files.find(f => f.fileName.endsWith('/cells.ts'))!;
+    fs.writeFileSync(path.join(out, 'cells.js'), toJavaScript(file).code);
+    const run = spawnSync(
+      process.execPath,
+      [
+        path.join(checker, '../run.ts'),
+        path.join(out, 'cells.js'),
+        '--threads=1',
+        '--pool=0',
+      ],
+      {encoding: 'utf8', timeout: 60_000},
+    );
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout.trim()).toBe('cells left 0 bounded true');
+  }, 60_000);
+
   it('runs defaults in order, reads what they read, keeps functions and closures with their bindings, frees field initializers, and releases what a throwing default leaves', () => {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-moved-'));
     dirs.push(out);

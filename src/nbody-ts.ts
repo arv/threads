@@ -58,7 +58,7 @@ function makeBodies(): Sending<Body[]> {
 
 // new velocities for this thread's bodies, from everyone's positions (all:
 // every snapshot, in body order)
-function accelerate(mine: Body[], all: Shared<Pos[]>) {
+function accelerate(mine: Body[], all: readonly Readonly<Pos>[]) {
   const n = all.length;
   for (let i = 0; i < mine.length; i++) {
     const b = mine[i];
@@ -135,8 +135,8 @@ function wait(b: Barrier) {
 type Board = SharedMap<number, Shared<Pos[]>>;
 
 // everyone's positions, in body order
-function positions(board: Board, threads: number): Shared<Pos>[] {
-  const all: Shared<Pos>[] = [];
+function positions(board: Board, threads: number): Readonly<Pos>[] {
+  const all: Readonly<Pos>[] = [];
   for (let t = 0; t < threads; t++) for (const p of board.get(t)!) all.push(p);
   return all;
 }

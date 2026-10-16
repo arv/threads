@@ -115,7 +115,7 @@ function worker(
 function simulate(threads: number): number {
   const bodies = makeBodies(),
     done = new Channel<number>(threads);
-  const nexts: Channel<number>[] = [];
+  const nexts: unknown[] = [];
   for (let t = 0; t < threads; t++) {
     const next = new Channel<number>(1);
     nexts.push(next);
@@ -130,7 +130,7 @@ function simulate(threads: number): number {
   }
   for (let phase = 0; phase < 2 * STEPS; phase++) {
     for (let k = 0; k < threads; k++) done.recv();
-    for (const next of nexts) next.send(phase);
+    for (const next of nexts) (next as Channel<number>).send(phase);
   }
   return energy(bodies);
 }

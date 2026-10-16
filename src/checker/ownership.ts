@@ -22,7 +22,12 @@ import type {SourceFile} from 'typescript/ast';
 import type {Own} from './context.ts';
 import {IndexKind, SymbolFlags, TypeFlags} from './host.ts';
 import type {NodeHandle, Signature, TsSymbol, Type} from './host.ts';
-import {getSharedArrayElementType, isCellType, spreadShape} from './layout.ts';
+import {
+  getSharedArrayElementType,
+  isCellType,
+  isSharedValueType,
+  spreadShape,
+} from './layout.ts';
 import {getTypeMarker, isCellBranded, isConsumeCall} from './markers.ts';
 import {Messages} from './messages.ts';
 import type {Message} from './messages.ts';
@@ -1201,7 +1206,16 @@ export class Analyzer {
   isArrayExpression(expr: Node): boolean {
     const t = this.typeOf(expr);
     return (
-      this.c.host.checker.isArrayType(t) || this.c.host.checker.isTupleType(t)
+      this.c.host.checker.isArrayType(t) ||
+      this.c.host.checker.isTupleType(t) ||
+      (!!(t.flags & TypeFlags.Intersection) &&
+        this.c.host
+          .memberTypes(t)
+          .some(
+            m =>
+              this.c.host.checker.isArrayType(m) ||
+              this.c.host.checker.isTupleType(m),
+          ))
     );
   }
 
@@ -1211,7 +1225,8 @@ export class Analyzer {
   // or something read out of such a value).
   isImmutableShared(expr: Node): boolean {
     return (
-      !this.isPrimitiveOrSharedStructType(this.typeOf(expr)) &&
+      (!this.isPrimitiveOrSharedStructType(this.typeOf(expr)) ||
+        isSharedValueType(this.c, this.typeOf(expr))) &&
       this.isDeclaredSharedExpression(expr)
     );
   }
@@ -2852,7 +2867,11 @@ class FunctionAnalysis {
   // Reports a write to a property or element of a shared value. Fields of
   // shared struct instances are mutable cells, so writing them is allowed.
   checkWrite(target: Node, object: Node, obj: Value): void {
-    if (obj.kind !== ValueKind.Shared || !this.a.isImmutableShared(object))
+    if (
+      (obj.kind !== ValueKind.Shared &&
+        !isSharedValueType(this.a.c, this.a.typeOf(object))) ||
+      !this.a.isImmutableShared(object)
+    )
       return;
     this.a.report(
       target,
@@ -3002,7 +3021,8 @@ class FunctionAnalysis {
     if (
       receiverExpr &&
       arrayMutators.has(name) &&
-      receiver.kind === ValueKind.Shared &&
+      (receiver.kind === ValueKind.Shared ||
+        isSharedValueType(a.c, a.typeOf(receiverExpr))) &&
       a.isArrayExpression(receiverExpr) &&
       a.isImmutableShared(receiverExpr)
     ) {

@@ -1,4 +1,4 @@
-// Reference counting (ownrefcount.go): a shared struct or SharedArray is freed
+// Reference counting (ownrefcount.go): a counted shared allocation is freed
 // when nothing refers to it, and the emit adds the increments and decrements.
 // The checker reports what counting cannot follow:
 //
@@ -55,6 +55,8 @@ import {
   isTypeNode,
   K,
   NodeFlags,
+  OEK,
+  skipOuterExpressions,
   skipParentheses,
 } from './syntax.ts';
 import type {Node} from './syntax.ts';
@@ -168,7 +170,7 @@ export function isAmbientHandle(
 
 // The element type of a channel, if t is one: the runtime's `Channel<T>` (or
 // `ChannelCell<T>`). By the runtime's export, not by name: a class named
-// Channel declared elsewhere is not one (isLastingCellFieldType does the same).
+// Channel declared elsewhere is not one (isRuntimeCellType does the same).
 export function getChannelElementType(
   c: Own,
   t: Type | undefined,
@@ -185,12 +187,23 @@ export function getChannelElementType(
   return c.host.typeArguments(t)[0];
 }
 
+// Every non-nullish receiver variant must have address-represented elements.
+// isCellType includes nullable counted payloads: their null/undefined is 0,
+// like every raw counted position (REFCOUNT.md, "null").
+export function hasCountedChannelElements(c: Own, t: Type): boolean {
+  const members = nonNullishMembers(c, t);
+  return (
+    members.length > 0 &&
+    members.every(member => isCellType(c, getChannelElementType(c, member)))
+  );
+}
+
 // Reports whether a for-of statement receives counted values from a channel:
 // its variable owns each.
 export function isChannelReceiveLoop(c: Own, loop: Node): boolean {
   return (
     loop.kind === K.ForOfStatement &&
-    isCellType(c, getChannelElementType(c, c.host.typeOf(loop.expression)))
+    hasCountedChannelElements(c, c.host.typeOf(loop.expression))
   );
 }
 
@@ -574,8 +587,68 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
       }
     }
   };
+  const runtimeClasses = new Set([
+    'Channel',
+    'ChannelCell',
+    'Lock',
+    'Condition',
+    'SharedMap',
+    'SharedSet',
+  ]);
   const visit = (node: Node): boolean => {
     if (isTypeNode(node)) return false;
+    if (
+      isAccessExpression(node) ||
+      (node.kind === K.Identifier && isOwnReferencePosition(node))
+    ) {
+      const signature = host.callSignatures(host.typeOf(node))[0];
+      const handle = signature?.declaration;
+      const method =
+        handle && c.isRuntimePath(handle.path)
+          ? host.declarationOf(handle)
+          : undefined;
+      const owner = (method?.parent as Node | undefined)?.name?.text;
+      if (runtimeClasses.has(owner)) {
+        let callee = node;
+        while (
+          callee.parent &&
+          skipOuterExpressions(callee.parent as Node, OEK.All) ===
+            skipOuterExpressions(callee, OEK.All)
+        )
+          callee = callee.parent as Node;
+        const invocation = callee.parent as Node | undefined;
+        const name = `${owner}.${method?.name?.text ?? 'iterator'}`;
+        if (
+          invocation?.kind !== K.CallExpression ||
+          invocation.expression !== callee
+        ) {
+          c.error(node, Messages.IndirectRuntimeMethod, name);
+        } else if (
+          method?.name?.text === 'forEach' ||
+          method?.name?.text === 'getOrInsertComputed'
+        ) {
+          const callback =
+            invocation.arguments[method.name.text === 'forEach' ? 0 : 1];
+          const signatures = callback
+            ? host.callSignatures(host.typeOf(callback))
+            : [];
+          const needsAdaptation = signatures.some(
+            signature =>
+              signature.parameters.some((_parameter, index) =>
+                isCellType(c, host.parameterTypeAt(signature, index)),
+              ) ||
+              isCellType(
+                c,
+                host.awaitedType(
+                  host.checker.getReturnTypeOfSignature(signature),
+                ),
+              ),
+          );
+          if (signatures.length > 1 && needsAdaptation)
+            c.error(callback, Messages.OverloadedRuntimeCallback, name);
+        }
+      }
+    }
     switch (node.kind) {
       case K.Identifier:
         if (getAssignmentTarget(node)) {
@@ -748,7 +821,9 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
         if (
           node.kind === K.ForOfStatement &&
           !node.awaitModifier &&
-          getChannelElementType(c, host.typeOf(node.expression)) &&
+          nonNullishMembers(c, host.typeOf(node.expression)).some(member =>
+            getChannelElementType(c, member),
+          ) &&
           getFunctionFlags(getContainingFunction(node)) & FunctionFlags.Async
         ) {
           reportBlocking(c, node.expression, 'for...of', 'for await');

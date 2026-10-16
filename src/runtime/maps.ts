@@ -20,10 +20,11 @@
 // address (0 for ""), a cell's handle's, a shared value's. strings are
 // interned, as a `str` field's are, so two equal strings are one address, and
 // the map holds a count on each (runtime.ts $intern): a string no map, field or
-// message refers to goes. compiled code passes a shared struct or SharedArray
-// as its address, a number, and reads one back as that: the map keeps it as
-// that number, and the compiler's __countedRef(p) (set's parameters are a `Sending`
-// rest parameter, as spawn's are) says it is an address. the map holds a count
+// message refers to goes. compiled code passes counted addresses through
+// __countedRef(p) (set's parameters are a `Sending` rest parameter, as spawn's
+// are). The map tags these as cells or blobs, so a native reader can distinguish
+// them from ordinary numbers, and the compiler unboxes counted results.
+// The map holds a count
 // on each cell and string in it, a flag in the entry saying which of its words
 // do (REFCOUNT.md); a map is counted too, as a SharedArray is, and freeing it
 // gives back what it held. an object or array stored moves in (the ownership
@@ -36,6 +37,7 @@ import {
   release,
   retain,
   __sharedAddress,
+  __sharedCellAddress,
   share,
   __tracked,
 } from './own.ts';
@@ -56,7 +58,8 @@ import {
 // a map's block: [0 kind][1 count][2 lock][3 table][4 size][5 generation, one
 // more with each rehash][6, 7 insertions so far, an f64]
 const K_SHARED_MAP = 25,
-  K_SHARED_SET = 26;
+  K_SHARED_SET = 26,
+  K_SHARED = 27; // immutable blob kind, shared with own.ts
 const HEADER = 32,
   LOCK = 2,
   TABLE = 3,
@@ -153,13 +156,17 @@ function encode(v: unknown, key: boolean, adding: boolean): boolean {
       }
       if (__isCounted(v)) {
         // compiled code's address, with a count for the map
-        scratch[0] = (v as {a: number}).a;
-        lo = bits[0];
-        hi = bits[1];
-        held = ADOPT;
+        lo = (v as {a: number}).a;
+        hi =
+          lo === 0
+            ? BOX | (T_NULL << 11)
+            : I32[lo >> 2] === K_SHARED
+              ? BOX | (T_SHARED << 11)
+              : CELL_HI;
+        held = lo === 0 ? 0 : ADOPT;
         return true;
       }
-      const c = (v as {$cell?: number}).$cell;
+      const c = __sharedCellAddress(v);
       if (c !== undefined) {
         lo = c;
         hi = CELL_HI;
@@ -174,6 +181,7 @@ function encode(v: unknown, key: boolean, adding: boolean): boolean {
       if (s !== undefined) {
         lo = s;
         hi = BOX | (T_SHARED << 11);
+        held = RETAIN;
         return true;
       }
     }
@@ -223,19 +231,12 @@ function keyed(
 }
 // gives back the count a word encode made came with, which the map does not
 // keep (its key was there already)
-function unheld(l: number, h: number, how: number) {
+function unheld(l: number, _h: number, how: number) {
   if (how !== ADOPT) return;
-  if (h === STR_HI) {
-    release(l);
-    return;
-  }
-  bits[0] = l;
-  bits[1] = h;
-  release(scratch[0]);
+  release(l);
 }
-// what a key or value is to the code that passed it: compiled code's __countedRef(p)
-// is p
-const plain = (v: unknown) => (__isCounted(v) ? (v as {a: number}).a : v);
+// Native callbacks always receive handles; the compiler adapts counted parameters.
+const plain = (v: unknown) => (__isCounted(v) ? box((v as {a: number}).a) : v);
 // a value word, as its f64 and its two i32s, as a value of this thread: a map's
 // methods read the words they return under its lock, and decode them once it
 // is released. decoding a shared value builds this thread's copy of it, which
@@ -263,7 +264,9 @@ function decodeWord(f: number, h: number, p: number): unknown {
 // what a held word at at refers to: a string, a handle's cell (boxed), or an
 // address kept as a number
 const heldAddress = (at: number) =>
-  I32[(at >> 2) + 1] === CELL_HI || I32[(at >> 2) + 1] === STR_HI
+  I32[(at >> 2) + 1] === CELL_HI ||
+  I32[(at >> 2) + 1] === STR_HI ||
+  I32[(at >> 2) + 1] === (BOX | (T_SHARED << 11))
     ? I32[at >> 2]
     : F64[at >> 3];
 const KEY_HELD = 1,
@@ -553,26 +556,36 @@ export class SharedMap<K = unknown, V = unknown> {
     if (!encode(key, true, false)) return undefined;
     const m = this.$cell,
       l = lo,
-      h = hi;
-    $lock((m >> 2) + LOCK);
-    const t = I32[(m >> 2) + TABLE],
-      i = find(t, MAP_ENTRY, l, h),
-      at = i < 0 ? 0 : entriesAt(t) + i * MAP_ENTRY + 8,
-      wf = F64[at >> 3],
-      wh = I32[(at >> 2) + 1],
-      wp = I32[at >> 2];
-    $unlock((m >> 2) + LOCK);
-    return (i < 0 ? undefined : decodeWord(wf, wh, wp)) as V | undefined;
+      h = hi,
+      how = held;
+    try {
+      $lock((m >> 2) + LOCK);
+      const t = I32[(m >> 2) + TABLE],
+        i = find(t, MAP_ENTRY, l, h),
+        at = i < 0 ? 0 : entriesAt(t) + i * MAP_ENTRY + 8,
+        wf = F64[at >> 3],
+        wh = I32[(at >> 2) + 1],
+        wp = I32[at >> 2];
+      $unlock((m >> 2) + LOCK);
+      return (i < 0 ? undefined : decodeWord(wf, wh, wp)) as V | undefined;
+    } finally {
+      unheld(l, h, how);
+    }
   }
   has(key: K): boolean {
     if (!encode(key, true, false)) return false;
     const m = this.$cell,
       l = lo,
-      h = hi;
-    $lock((m >> 2) + LOCK);
-    const found = find(I32[(m >> 2) + TABLE], MAP_ENTRY, l, h) >= 0;
-    $unlock((m >> 2) + LOCK);
-    return found;
+      h = hi,
+      how = held;
+    try {
+      $lock((m >> 2) + LOCK);
+      const found = find(I32[(m >> 2) + TABLE], MAP_ENTRY, l, h) >= 0;
+      $unlock((m >> 2) + LOCK);
+      return found;
+    } finally {
+      unheld(l, h, how);
+    }
   }
   set(key: K, value: V): this {
     encode(value, false, true);
@@ -645,36 +658,49 @@ export class SharedMap<K = unknown, V = unknown> {
    * threads adding the same key get the one value.
    */
   getOrInsertComputed(key: K, callback: (key: K) => V): V {
-    if (encode(key, true, false)) {
-      const m = this.$cell,
-        l = lo,
-        h = hi,
-        how = held;
-      $lock((m >> 2) + LOCK);
-      const t = I32[(m >> 2) + TABLE],
-        i = find(t, MAP_ENTRY, l, h),
-        at = i < 0 ? 0 : entriesAt(t) + i * MAP_ENTRY + 8,
-        wf = F64[at >> 3],
-        wh = I32[(at >> 2) + 1],
-        wp = I32[at >> 2];
-      $unlock((m >> 2) + LOCK);
-      if (i >= 0) {
-        unheld(l, h, how);
-        return decodeWord(wf, wh, wp) as V;
+    const transferred = __isCounted(key) ? (key as {a: number}).a : 0;
+    try {
+      // The callback and insertion use a native handle. Return the incoming
+      // transferred count here, whether lookup, callback or insertion fails.
+      key = plain(key) as K;
+      // RETAIN from encode describes a future insertion; only store
+      // increments that count. Probing a native key acquires no count.
+      if (encode(key, true, false)) {
+        const m = this.$cell,
+          l = lo,
+          h = hi;
+        $lock((m >> 2) + LOCK);
+        const t = I32[(m >> 2) + TABLE],
+          i = find(t, MAP_ENTRY, l, h),
+          at = i < 0 ? 0 : entriesAt(t) + i * MAP_ENTRY + 8,
+          wf = F64[at >> 3],
+          wh = I32[(at >> 2) + 1],
+          wp = I32[at >> 2];
+        $unlock((m >> 2) + LOCK);
+        if (i >= 0) {
+          return decodeWord(wf, wh, wp) as V;
+        }
       }
+      return this.getOrInsert(key, callback(key));
+    } finally {
+      release(transferred);
     }
-    return this.getOrInsert(key, callback(plain(key) as K));
   }
   delete(key: K): boolean {
     if (!encode(key, true, false)) return false;
     const m = this.$cell,
       l = lo,
-      h = hi;
-    $lock((m >> 2) + LOCK);
+      h = hi,
+      how = held;
     try {
-      return remove(m, MAP_ENTRY, l, h);
+      $lock((m >> 2) + LOCK);
+      try {
+        return remove(m, MAP_ENTRY, l, h);
+      } finally {
+        $unlock((m >> 2) + LOCK);
+      }
     } finally {
-      $unlock((m >> 2) + LOCK);
+      unheld(l, h, how);
     }
   }
   clear(): void {
@@ -726,11 +752,16 @@ export class SharedSet<T = unknown> {
     if (!encode(value, true, false)) return false;
     const m = this.$cell,
       l = lo,
-      h = hi;
-    $lock((m >> 2) + LOCK);
-    const found = find(I32[(m >> 2) + TABLE], SET_ENTRY, l, h) >= 0;
-    $unlock((m >> 2) + LOCK);
-    return found;
+      h = hi,
+      how = held;
+    try {
+      $lock((m >> 2) + LOCK);
+      const found = find(I32[(m >> 2) + TABLE], SET_ENTRY, l, h) >= 0;
+      $unlock((m >> 2) + LOCK);
+      return found;
+    } finally {
+      unheld(l, h, how);
+    }
   }
   add(value: T): this {
     encode(value, true, true);
@@ -752,12 +783,17 @@ export class SharedSet<T = unknown> {
     if (!encode(value, true, false)) return false;
     const m = this.$cell,
       l = lo,
-      h = hi;
-    $lock((m >> 2) + LOCK);
+      h = hi,
+      how = held;
     try {
-      return remove(m, SET_ENTRY, l, h);
+      $lock((m >> 2) + LOCK);
+      try {
+        return remove(m, SET_ENTRY, l, h);
+      } finally {
+        $unlock((m >> 2) + LOCK);
+      }
     } finally {
-      $unlock((m >> 2) + LOCK);
+      unheld(l, h, how);
     }
   }
   clear(): void {

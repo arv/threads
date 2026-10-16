@@ -2,9 +2,12 @@ import {
   __message,
   __unmessage,
   __newCell,
-  __cellKind,
+  __countedCellKind,
+  __messageHeld,
+  retain,
+  __tracked,
   __start,
-  __isCounted,
+  __dropMessage,
   release,
 } from './own.ts';
 import type {ThreadFn} from './own.ts';
@@ -40,24 +43,24 @@ import {
   $resumed,
 } from './runtime.ts';
 
-// [0 kind][1 slots][2 lock][3 seq][4 head][5 tail][6 count][7 closed][8 sent][9
-// received][10 unbuffered][11 selects] then the ring from word 12: a slot is
+// [0 kind][1 references][2 slots][3 -][4 lock][5 seq][6 head][7 tail][8 count]
+// [9 closed][10 sent][11 received][12 unbuffered][13 selects], then word 14: a slot is
 // [message address][bytes]. seq changes with every change, and waiters wait on
 // it. an unbuffered channel has one slot, and its sender also waits for the
 // receiver. selects: the first of the blocking selects waiting on the channel
 // (see select)
 const K_CHAN = 24,
-  RING = 12;
-const LOCK = 2,
-  SEQ = 3,
-  HEAD = 4,
-  TAIL = 5,
-  COUNT = 6,
-  CLOSED = 7,
-  SENT = 8,
-  RECEIVED = 9,
-  UNBUFFERED = 10,
-  SELECTS = 11;
+  RING = 14;
+const LOCK = 4,
+  SEQ = 5,
+  HEAD = 6,
+  TAIL = 7,
+  COUNT = 8,
+  CLOSED = 9,
+  SENT = 10,
+  RECEIVED = 11,
+  UNBUFFERED = 12,
+  SELECTS = 13;
 
 // the channel's lock (runtime.ts $lock): held only for a few loads and stores,
 // never across a wait
@@ -175,30 +178,36 @@ const EMPTY = Symbol('empty'),
 // holding the lock: the next message's value (unlocking), or EMPTY, or DONE
 // when closed and empty. functions, not private methods: another thread's
 // handle for a channel is made by own.ts, from the class's prototype
-function take(c: number): unknown {
+// Passing undefined (as native handles do) also applies this default.
+function take(c: number, raw = false): unknown {
   if (I32[c + COUNT] === 0) return I32[c + CLOSED] !== 0 ? DONE : EMPTY;
   const h = I32[c + HEAD],
     m = I32[c + RING + 2 * h],
     bytes = I32[c + RING + 2 * h + 1];
-  I32[c + HEAD] = (h + 1) % I32[c + 1];
+  I32[c + HEAD] = (h + 1) % I32[c + 2];
   I32[c + COUNT]--;
   I32[c + RECEIVED]++;
   changed(c);
-  return __unmessage(m, bytes);
+  return __unmessage(m, bytes, raw);
 }
 // the same without blocking
-async function receiveAsync(c: number) {
-  lock(c + LOCK);
-  for (;;) {
-    const v = take(c);
-    if (v === EMPTY) {
-      await sleepAsync(c);
-      $resumed();
-      lock(c + LOCK);
-      continue;
+async function receiveAsync(c: number, raw = false) {
+  retain(c * 4);
+  try {
+    lock(c + LOCK);
+    for (;;) {
+      const v = take(c, raw);
+      if (v === EMPTY) {
+        await sleepAsync(c);
+        $resumed();
+        lock(c + LOCK);
+        continue;
+      }
+      if (v === DONE) unlock(c + LOCK);
+      return v;
     }
-    if (v === DONE) unlock(c + LOCK);
-    return v;
+  } finally {
+    release(c * 4);
   }
 }
 // the next value, waiting while the channel is empty, or DONE. where it would
@@ -208,22 +217,29 @@ function receive(
   c: number,
   what = "a channel's recv()",
   instead = 'await recvAsync() (or for await)',
+  raw = false,
 ) {
-  $mustNotBlock(what, instead);
-  lock(c + LOCK);
-  for (;;) {
-    const v = take(c);
-    if (v === EMPTY) {
-      sleep(c);
-      continue;
+  retain(c * 4);
+  try {
+    $mustNotBlock(what, instead);
+    lock(c + LOCK);
+    for (;;) {
+      const v = take(c, raw);
+      if (v === EMPTY) {
+        sleep(c);
+        continue;
+      }
+      if (v === DONE) unlock(c + LOCK);
+      return v;
     }
-    if (v === DONE) unlock(c + LOCK);
-    return v;
+  } finally {
+    release(c * 4);
   }
 }
 
 export class Channel {
   declare $cell: number;
+  declare $raw?: boolean;
   constructor(capacity = 0) {
     if (!Number.isInteger(capacity) || capacity < 0)
       throw new RangeError(
@@ -231,81 +247,90 @@ export class Channel {
       );
     const slots = Math.max(1, capacity),
       a = __newCell(K_CHAN, (RING + 2 * slots) * 4, this) >> 2;
-    I32[a + 1] = slots;
+    I32[a + 2] = slots;
+    __tracked(a * 4);
     I32[a + UNBUFFERED] = capacity === 0 ? 1 : 0;
   }
   // moves v into the channel: waits while it is full, and on an unbuffered
   // channel until a receiver has taken it
   send(v: unknown) {
-    $mustNotBlock("a channel's send()", 'await sendAsync()');
-    const c = this.$cell >> 2,
-      [m, bytes] = __message(v);
-    lock(c + LOCK);
-    while (I32[c + COUNT] === I32[c + 1] && I32[c + CLOSED] === 0) sleep(c);
-    if (I32[c + CLOSED] !== 0) {
-      unlock(c + LOCK);
-      const back = __unmessage<number>(m, bytes);
-      if (__isCounted(v)) release(back); // the count the message carried
-      throw new TypeError('own: send on a closed channel');
-    }
-    const t = I32[c + TAIL];
-    I32[c + RING + 2 * t] = m;
-    I32[c + RING + 2 * t + 1] = bytes;
-    I32[c + TAIL] = (t + 1) % I32[c + 1];
-    I32[c + COUNT]++;
-    const ticket = I32[c + SENT]++;
-    if (I32[c + UNBUFFERED] !== 0) {
-      changed(c);
+    retain(this.$cell);
+    try {
+      $mustNotBlock("a channel's send()", 'await sendAsync()');
+      const c = this.$cell >> 2,
+        [m, bytes] = __message(v);
       lock(c + LOCK);
-      while (I32[c + RECEIVED] <= ticket) sleep(c);
-      unlock(c + LOCK);
-    } else changed(c);
+      while (I32[c + COUNT] === I32[c + 2] && I32[c + CLOSED] === 0) sleep(c);
+      if (I32[c + CLOSED] !== 0) {
+        unlock(c + LOCK);
+        __dropMessage(m, bytes);
+        throw new TypeError('own: send on a closed channel');
+      }
+      const t = I32[c + TAIL];
+      I32[c + RING + 2 * t] = m;
+      I32[c + RING + 2 * t + 1] = bytes;
+      I32[c + TAIL] = (t + 1) % I32[c + 2];
+      I32[c + COUNT]++;
+      const ticket = I32[c + SENT]++;
+      if (I32[c + UNBUFFERED] !== 0) {
+        changed(c);
+        lock(c + LOCK);
+        while (I32[c + RECEIVED] <= ticket) sleep(c);
+        unlock(c + LOCK);
+      } else changed(c);
+    } finally {
+      release(this.$cell);
+    }
   }
   // the same in an async function: waits without blocking its worker. the value
   // moves when sendAsync is called, as send's does
   async sendAsync(v: unknown) {
-    const c = this.$cell >> 2,
-      [m, bytes] = __message(v);
-    lock(c + LOCK);
-    while (I32[c + COUNT] === I32[c + 1] && I32[c + CLOSED] === 0) {
-      await sleepAsync(c);
-      $resumed();
+    retain(this.$cell);
+    try {
+      const c = this.$cell >> 2,
+        [m, bytes] = __message(v);
       lock(c + LOCK);
-    }
-    if (I32[c + CLOSED] !== 0) {
-      unlock(c + LOCK);
-      const back = __unmessage<number>(m, bytes);
-      if (__isCounted(v)) release(back); // the count the message carried
-      throw new TypeError('own: send on a closed channel');
-    }
-    const t = I32[c + TAIL];
-    I32[c + RING + 2 * t] = m;
-    I32[c + RING + 2 * t + 1] = bytes;
-    I32[c + TAIL] = (t + 1) % I32[c + 1];
-    I32[c + COUNT]++;
-    const ticket = I32[c + SENT]++;
-    changed(c);
-    if (I32[c + UNBUFFERED] !== 0) {
-      lock(c + LOCK);
-      while (I32[c + RECEIVED] <= ticket) {
+      while (I32[c + COUNT] === I32[c + 2] && I32[c + CLOSED] === 0) {
         await sleepAsync(c);
         $resumed();
         lock(c + LOCK);
       }
-      unlock(c + LOCK);
+      if (I32[c + CLOSED] !== 0) {
+        unlock(c + LOCK);
+        __dropMessage(m, bytes);
+        throw new TypeError('own: send on a closed channel');
+      }
+      const t = I32[c + TAIL];
+      I32[c + RING + 2 * t] = m;
+      I32[c + RING + 2 * t + 1] = bytes;
+      I32[c + TAIL] = (t + 1) % I32[c + 2];
+      I32[c + COUNT]++;
+      const ticket = I32[c + SENT]++;
+      changed(c);
+      if (I32[c + UNBUFFERED] !== 0) {
+        lock(c + LOCK);
+        while (I32[c + RECEIVED] <= ticket) {
+          await sleepAsync(c);
+          $resumed();
+          lock(c + LOCK);
+        }
+        unlock(c + LOCK);
+      }
+    } finally {
+      release(this.$cell);
     }
   }
   // the next value, which the caller now owns; waits while the channel is
   // empty. undefined once it is closed and empty, as for a sent undefined:
   // recvOk tells the two apart
   recv() {
-    const v = receive(this.$cell >> 2);
-    return v === DONE ? undefined : v;
+    const v = receive(this.$cell >> 2, undefined, undefined, this.$raw);
+    return v === DONE ? (this.$raw ? 0 : undefined) : v;
   }
   // the same in an async function: waits without blocking its worker
   async recvAsync() {
-    const v = await receiveAsync(this.$cell >> 2);
-    return v === DONE ? undefined : v;
+    const v = await receiveAsync(this.$cell >> 2, this.$raw);
+    return v === DONE ? (this.$raw ? 0 : undefined) : v;
   }
   // Go's `v, ok := <-ch`: [the next value, true], or [undefined, false] once
   // the channel is closed and empty
@@ -314,15 +339,17 @@ export class Channel {
       this.$cell >> 2,
       "a channel's recvOk()",
       'await recvOkAsync()',
+      this.$raw,
     );
-    return v === DONE ? [undefined, false] : [v, true];
+    return v === DONE ? [this.$raw ? 0 : undefined, false] : [v, true];
   }
   // the same in an async function: waits without blocking its worker
   async recvOkAsync(): Promise<[unknown, boolean]> {
-    const v = await receiveAsync(this.$cell >> 2);
-    return v === DONE ? [undefined, false] : [v, true];
+    const v = await receiveAsync(this.$cell >> 2, this.$raw);
+    return v === DONE ? [this.$raw ? 0 : undefined, false] : [v, true];
   }
-  // without waiting: the next value, EMPTY, or DONE
+  // Without waiting: the next boxed/native value, EMPTY, or DONE. Select
+  // returns ordinary tuples, so polling never transfers raw counted values.
   poll() {
     const c = this.$cell >> 2;
     lock(c + LOCK);
@@ -339,17 +366,43 @@ export class Channel {
     changed(c);
   }
   *[Symbol.iterator]() {
-    const c = this.$cell >> 2;
-    for (let v = receive(c); v !== DONE; v = receive(c)) yield v;
+    // Read this again after every yield: its handle must stay live while the
+    // iterator is suspended, including between two receive operations.
+    for (
+      let v = receive(this.$cell >> 2, undefined, undefined, this.$raw);
+      v !== DONE;
+      v = receive(this.$cell >> 2, undefined, undefined, this.$raw)
+    )
+      yield v;
   }
-  // for await (const v of channel): in an async function
   async *[Symbol.asyncIterator]() {
-    const c = this.$cell >> 2;
-    for (let v = await receiveAsync(c); v !== DONE; v = await receiveAsync(c))
+    for (
+      let v = await receiveAsync(this.$cell >> 2, this.$raw);
+      v !== DONE;
+      v = await receiveAsync(this.$cell >> 2, this.$raw)
+    )
       yield v;
   }
 }
-__cellKind(K_CHAN, Channel);
+__countedCellKind(K_CHAN, Channel, {
+  held(b, f) {
+    const c = b >> 2,
+      slots = I32[c + 2];
+    for (let k = 0; k < I32[c + COUNT]; k++) {
+      const i = c + RING + 2 * ((I32[c + HEAD] + k) % slots);
+      __messageHeld(I32[i], f);
+    }
+  },
+  free(b) {
+    const c = b >> 2,
+      slots = I32[c + 2];
+    for (let k = 0; k < I32[c + COUNT]; k++) {
+      const i = c + RING + 2 * ((I32[c + HEAD] + k) % slots);
+      $freeBlock(I32[i], I32[i + 1]);
+    }
+    $freeBlock(b, (RING + 2 * slots) * 4);
+  },
+});
 
 // starts f(...args) on a thread of its own; nothing waits for it (a goroutine).
 // if it throws, the error is printed, as a Go panic would be
@@ -374,64 +427,70 @@ const ready = (chans: Channel[]): [number, unknown, boolean] | null => {
   return null;
 };
 // a blocking select waits on a word of its own, which a change of any of its
-// channels bumps: it adds a record to each channel's list of selects (word 11,
+// channels bumps: it adds a record to each channel's list of selects (word 13,
 // under the channel's lock), [next][the wake word's index], and takes them out
 // once it is done. a change elsewhere in the heap does not wake it, and a
 // change of a channel no select waits on costs nothing more
 export function select(...chans: Channel[]): [number, unknown, boolean] {
-  $mustNotBlock('select()', 'await selectAsync()');
-  const first = ready(chans);
-  if (first !== null) return first;
-  const n = chans.length,
-    bytes = 8 + 8 * n, // [wake][-] then n records
-    b = $allocBlock(bytes),
-    wake = b >> 2;
-  const record = (i: number) => b + 8 + 8 * i;
-  const leave = () => {
-    for (let i = 0; i < n; i++) {
-      const c = chans[i].$cell >> 2,
-        r = record(i);
-      lock(c + LOCK);
-      for (let link = c + SELECTS; I32[link] !== 0; link = I32[link] >> 2)
-        if (I32[link] === r) {
-          I32[link] = I32[r >> 2];
-          break;
-        }
-      unlock(c + LOCK);
-    }
-  };
+  const held: number[] = [];
   try {
-    for (;;) {
-      const seen = Atomics.load(I32, wake);
+    $mustNotBlock('select()', 'await selectAsync()');
+    for (const ch of chans) held.push(retain(ch.$cell));
+    const first = ready(chans);
+    if (first !== null) return first;
+    const n = chans.length,
+      bytes = 8 + 8 * n, // [wake][-] then n records
+      b = $allocBlock(bytes),
+      wake = b >> 2;
+    const record = (i: number) => b + 8 + 8 * i;
+    const leave = () => {
       for (let i = 0; i < n; i++) {
         const c = chans[i].$cell >> 2,
           r = record(i);
         lock(c + LOCK);
-        I32[r >> 2] = I32[c + SELECTS];
-        I32[(r >> 2) + 1] = wake;
-        I32[c + SELECTS] = r;
+        for (let link = c + SELECTS; I32[link] !== 0; link = I32[link] >> 2)
+          if (I32[link] === r) {
+            I32[link] = I32[r >> 2];
+            break;
+          }
         unlock(c + LOCK);
       }
-      // a change before the records were in is seen here; one after wakes the
-      // wait (the word is no longer seen)
-      let got: [number, unknown, boolean] | null;
-      try {
-        got = ready(chans);
-        if (got === null) {
-          $waitBegin();
-          try {
-            Atomics.wait(I32, wake, seen);
-          } finally {
-            $waitEnd();
-          }
+    };
+    try {
+      for (;;) {
+        const seen = Atomics.load(I32, wake);
+        for (let i = 0; i < n; i++) {
+          const c = chans[i].$cell >> 2,
+            r = record(i);
+          lock(c + LOCK);
+          I32[r >> 2] = I32[c + SELECTS];
+          I32[(r >> 2) + 1] = wake;
+          I32[c + SELECTS] = r;
+          unlock(c + LOCK);
         }
-      } finally {
-        leave();
+        // a change before the records were in is seen here; one after wakes the
+        // wait (the word is no longer seen)
+        let got: [number, unknown, boolean] | null;
+        try {
+          got = ready(chans);
+          if (got === null) {
+            $waitBegin();
+            try {
+              Atomics.wait(I32, wake, seen);
+            } finally {
+              $waitEnd();
+            }
+          }
+        } finally {
+          leave();
+        }
+        if (got !== null) return got;
       }
-      if (got !== null) return got;
+    } finally {
+      $freeBlock(b, bytes);
     }
   } finally {
-    $freeBlock(b, bytes);
+    for (const a of held) release(a);
   }
 }
 // the same in an async function: waits without blocking its worker, on the
@@ -439,17 +498,23 @@ export function select(...chans: Channel[]): [number, unknown, boolean] {
 export async function selectAsync(
   ...chans: Channel[]
 ): Promise<[number, unknown, boolean]> {
-  const cs = chans.map(ch => ch.$cell >> 2);
-  for (;;) {
-    // before polling: a change after it wakes the wait
-    const seqs = cs.map(c => Atomics.load(I32, c + SEQ));
-    const got = ready(chans);
-    if (got !== null) return got;
-    let stops!: (() => void)[];
-    await new Promise<void>(wake => {
-      stops = cs.map((c, i) => onChange(c, seqs[i], wake));
-    });
-    for (const stop of stops) stop();
-    $resumed();
+  const held: number[] = [];
+  try {
+    for (const ch of chans) held.push(retain(ch.$cell));
+    const cs = held.map(a => a >> 2);
+    for (;;) {
+      // before polling: a change after it wakes the wait
+      const seqs = cs.map(c => Atomics.load(I32, c + SEQ));
+      const got = ready(chans);
+      if (got !== null) return got;
+      let stops!: (() => void)[];
+      await new Promise<void>(wake => {
+        stops = cs.map((c, i) => onChange(c, seqs[i], wake));
+      });
+      for (const stop of stops) stop();
+      $resumed();
+    }
+  } finally {
+    for (const a of held) release(a);
   }
 }

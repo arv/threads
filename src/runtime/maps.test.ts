@@ -21,6 +21,34 @@ const both = (steps: (m: Mapish) => unknown) => {
 };
 
 describe('SharedMap', () => {
+  it('keeps plain $cell data distinct from real handles in values, keys and sets', () => {
+    const cell = new T.Lock(),
+      before = count(cell.$cell);
+    for (const address of [1, cell.$cell]) {
+      const value = {$cell: address, nested: {n: 7}};
+      const equal = {$cell: address, nested: {n: 7}};
+      const map = new T.SharedMap<unknown, unknown>();
+      const set = new T.SharedSet<unknown>();
+      map.set('value', value);
+      map.set(value, 'plain key');
+      set.add(value);
+      expect(map.get('value')).toBe(value);
+      expect([...set]).toEqual([value]);
+      expect(map.get(value)).toBe('plain key');
+      expect(map.has(equal)).toBe(false);
+      expect(set.has(equal)).toBe(false);
+      expect(map.has(cell)).toBe(false);
+      expect(set.has(cell)).toBe(false);
+      expect(Object.isFrozen(value.nested)).toBe(true);
+      expect(count(cell.$cell)).toBe(before);
+      expect(map.delete(value)).toBe(true);
+      expect(set.delete(value)).toBe(true);
+      map.clear();
+      own.__collect();
+      expect(count(cell.$cell)).toBe(before);
+    }
+  });
+
   it('keeps insertion order, as Map does', () => {
     both(m => {
       m.set('c', 1);
@@ -273,48 +301,141 @@ describe('SharedMap', () => {
 });
 
 describe('as compiled code calls it', () => {
-  // compiled code passes a struct as its address, set's arguments as __countedRef(p)
-  // (a count for the map), and reads one back as the address
+  it('consumes transferred keys in lookup-only map and set operations', () => {
+    const key = new T.Lock(),
+      map = new T.SharedMap<unknown, number>(),
+      set = new T.SharedSet<unknown>();
+    map.set(key, 7);
+    set.add(key);
+    const lookups = [
+      () => map.get(own.countedRef(key.$cell)),
+      () => map.has(own.countedRef(key.$cell)),
+      () => set.has(own.countedRef(key.$cell)),
+    ];
+    for (const lookup of lookups) {
+      const before = count(key.$cell);
+      lookup();
+      expect(count(key.$cell)).toBe(before);
+    }
+    for (const remove of [
+      () => map.delete(own.countedRef(key.$cell)),
+      () => set.delete(own.countedRef(key.$cell)),
+    ]) {
+      const before = count(key.$cell);
+      expect(remove()).toBe(true);
+      own.__collect();
+      expect(count(key.$cell)).toBe(before - 1);
+    }
+  });
+
+  it('balances computed lookup keys on hits, insertion and callback failure', () => {
+    const cell = new T.Lock(),
+      blob = T.share({n: 7});
+    for (const [key, address] of [
+      [cell, cell.$cell],
+      [blob, own.__sharedAddress(blob)!],
+    ] as const) {
+      const before = count(address);
+      const map = new T.SharedMap<unknown, number>();
+      expect(
+        map.getOrInsertComputed(own.countedRef(address), received => {
+          expect(received).toBe(key);
+          return 7;
+        }),
+      ).toBe(7);
+      expect(count(address)).toBe(before + 1);
+      for (let i = 0; i < 3; i++) {
+        expect(
+          map.getOrInsertComputed(own.countedRef(address), () => {
+            throw new Error('hit must not call callback');
+          }),
+        ).toBe(7);
+        expect(count(address)).toBe(before + 1);
+      }
+      map.clear();
+      own.__collect();
+      expect(count(address)).toBe(before);
+      expect(() =>
+        map.getOrInsertComputed(own.countedRef(address), () => {
+          throw new Error('callback failed');
+        }),
+      ).toThrow('callback failed');
+      expect(count(address)).toBe(before);
+    }
+  });
+
+  it('releases a transferred computed key when its callback throws', () => {
+    const key = new T.Lock(),
+      map = new T.SharedMap<unknown, number>();
+    const before = count(key.$cell),
+      failure = new Error('computed failed');
+    expect(() =>
+      map.getOrInsertComputed(own.countedRef(key.$cell), received => {
+        expect(received).toBe(key);
+        throw failure;
+      }),
+    ).toThrow(failure);
+    expect(count(key.$cell)).toBe(before);
+    expect(map.size).toBe(0);
+  });
+
   const N = own.sharedStruct('MapRaw', ['v'], []);
 
-  it('keeps an address as that, with a count', () => {
+  it('tags counted entries as cells and transfers their counts', () => {
     const a = own.newStruct(N),
-      b = own.newStruct(N),
-      m = new T.SharedMap<string, number>();
-    m.set('k', own.countedRef(a) as unknown as number);
-    expect(m.get('k')).toBe(a);
-    expect(count(a)).toBe(2);
-    m.set('k', own.countedRef(b) as unknown as number); // a's count, given back
+      b = own.newStruct(N);
+    const boxedA = own.box(a),
+      boxedB = own.box(b);
+    const m = new T.SharedMap<string, unknown>();
+    m.set('k', own.countedRef(a));
+    expect(m.get('k')).toBe(boxedA);
+    expect(count(a)).toBe(3); // caller, handle and entry
+    m.set('k', own.countedRef(b));
     own.__collect();
-    expect(count(a)).toBe(1);
-    expect(m.getOrInsert('k', own.countedRef(a) as unknown as number)).toBe(b);
-    expect(count(a)).toBe(1); // not kept: its count given back at once
+    expect(count(a)).toBe(2);
+    expect(m.getOrInsert('k', own.countedRef(a))).toBe(boxedB);
+    expect(count(a)).toBe(2); // rejected value's transferred count returned
     const seen: unknown[] = [];
     m.forEach(v => seen.push(v));
-    expect(seen).toEqual([b]);
+    expect(seen).toEqual([boxedB]);
     m.delete('k');
     own.__collect();
-    expect(count(b)).toBe(1);
+    expect(count(b)).toBe(2);
     own.release(a);
     own.release(b);
   });
 
-  it('finds a key by its address', () => {
+  it('distinguishes counted cell keys from ordinary numbers with the same address', () => {
     const a = own.newStruct(N),
-      m = new T.SharedMap<number, string>(),
-      s = new T.SharedSet<number>();
-    m.set(own.countedRef(a) as unknown as number, 'a');
-    expect(m.get(a)).toBe('a');
-    expect([...m.keys()]).toEqual([a]);
-    s.add(own.countedRef(a) as unknown as number);
-    s.add(own.countedRef(a) as unknown as number); // there already
-    expect(count(a)).toBe(3);
-    expect(s.has(a)).toBe(true);
-    m.delete(a);
-    s.delete(a);
+      boxed = own.box(a);
+    const m = new T.SharedMap<unknown, string>(),
+      s = new T.SharedSet<unknown>();
+    m.set(own.countedRef(a), 'cell');
+    m.set(a, 'number');
+    expect(m.get(boxed)).toBe('cell');
+    expect(m.get(a)).toBe('number');
+    expect([...m.keys()]).toEqual([boxed, a]);
+    s.add(own.countedRef(a));
+    s.add(own.countedRef(a));
+    expect(count(a)).toBe(4); // caller, handle, map, set
+    expect(s.has(boxed)).toBe(true);
+    m.delete(boxed);
+    s.delete(boxed);
     own.__collect();
-    expect(count(a)).toBe(1);
+    expect(count(a)).toBe(2);
     own.release(a);
+  });
+
+  it('uses the same identity for counted shared blobs and their materialized keys', () => {
+    const p = own.newShared({n: 1}),
+      boxed = own.box(p);
+    const m = new T.SharedMap<unknown, unknown>();
+    m.set(own.countedRef(p), own.countedRef(p));
+    expect(m.get(boxed)).toBe(boxed);
+    expect(m.has(boxed)).toBe(true);
+    m.delete(boxed);
+    own.__collect();
+    own.release(p);
   });
 });
 

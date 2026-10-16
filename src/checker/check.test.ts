@@ -58,6 +58,89 @@ function checkProgram(files: Record<string, string[]>): string[] {
 }
 
 describe('threads-check', () => {
+  it('rejects counted select and recvOk tuples, including nullable cell payloads', () => {
+    for (const type of [
+      'Lock',
+      'Lock | null | undefined',
+      'Shared<{n: number}>',
+      'Shared<{n: number}> | null | undefined',
+    ]) {
+      const diagnostics = checkProgram({
+        'select.ts': [
+          'import {Channel, Lock, type Shared, select, selectAsync} from "threads";',
+          `type Value = ${type};`,
+          'function sync(ch: Channel<Value>) { select(ch); ch.recvOk(); }',
+          'async function async(ch: Channel<Value>) { await selectAsync(ch); await ch.recvOkAsync(); }',
+        ],
+      });
+      expect(diagnostics, type).toHaveLength(4);
+      expect(
+        diagnostics.every(d => d.includes('TS96021')),
+        type,
+      ).toBe(true);
+    }
+  });
+
+  it('reports native method forwarding and overloaded callbacks instead of emitting incompatible representations', () => {
+    const diagnostics = checkProgram({
+      'callbacks.ts': [
+        'import {Channel, Lock, SharedMap, SharedSet} from "threads";',
+        'function indirect(map: SharedMap<string, Lock>) {',
+        '  map.forEach.call(map, (value: Lock) => { using held = value.hold(); });',
+        '  map.forEach.apply(map, [(value: Lock) => { using held = value.hold(); }]);',
+        '  return map.forEach.bind(map);',
+        '}',
+        'function visitor(value: Lock): void;',
+        'function visitor(value: number): void;',
+        'function visitor(value: unknown): void {}',
+        'function overloaded(set: SharedSet<number>) { set.forEach(visitor); }',
+        'function receiver(ch: Channel<Lock>) { return ch.recv.bind(ch); }',
+      ],
+    });
+    expect(diagnostics.map(d => d.match(/TS\d+/)?.[0])).toEqual([
+      'TS96040',
+      'TS96040',
+      'TS96040',
+      'TS96041',
+      'TS96040',
+    ]);
+    expect(diagnostics[0]).toContain('SharedMap.forEach');
+    expect(diagnostics[3]).toContain('single signature');
+  });
+
+  it('reports every unsupported counting escape for built-in cells and immutable shared values', () => {
+    for (const type of [
+      'Channel<number>',
+      'Lock',
+      'Condition',
+      'Shared<{x: number}>',
+    ]) {
+      const diagnostics = checkProgram({
+        'counted.ts': [
+          'import {Channel, Lock, Condition, type Shared} from "threads";',
+          `type T = ${type};`,
+          'function stored(p: T) { const a: T[] = [p]; return a; }',
+          'function reassigned(p: T) { let v = p; const f = () => v; v = p; return f; }',
+          'function member(p: T) { return class { read() { return p; } }; }',
+          'function destructured(xs: T[]) { const [v] = xs; return v; }',
+          'function loop(xs: T[]) { for (const v of xs) {} }',
+          'function* generator(p: T) { return 0; }',
+        ],
+      });
+      const codes = new Set(
+        diagnostics.flatMap(d => d.match(/TS9602[0-5]/g) ?? []),
+      );
+      expect([...codes].sort(), type).toEqual([
+        'TS96020',
+        'TS96021',
+        'TS96022',
+        'TS96023',
+        'TS96024',
+        'TS96025',
+      ]);
+    }
+  });
+
   it('refuses a runtime no file imports: a mistyped --runtime', () => {
     expect(() =>
       check(join(cases, 'channels/tsconfig.json'), {runtime: 'thread', api}),
@@ -270,6 +353,8 @@ describe('threads-check, where it differs from the fork', () => {
         .sort(),
     ).toEqual(
       [
+        "delegates.ts(16,24): error TS96025: A generator's parameter cannot have type 'Channel<Node>': the generator runs after its caller's borrow ends.",
+        "delegates.ts(17,35): error TS96025: A generator's parameter cannot have type 'Channel<Node>': the generator runs after its caller's borrow ends.",
         "delegates.ts(16,52): error TS96032: A value of type 'Node' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
         "delegates.ts(17,63): error TS96032: A value of type 'Node' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
         "delegates.ts(18,35): error TS96032: A value of type 'Node' cannot be yielded, or returned by a generator: it would be stored in an IteratorResult, an ordinary object, which the caller keeps past the generator's count of it.",
@@ -324,6 +409,7 @@ describe('threads-check, where it differs from the fork', () => {
         .sort(),
     ).toEqual(
       [
+        "try-exits.ts(423,35): error TS96023: 'ch' cannot be captured by a method or a class: its value is a counted address in the shared heap, which only functions and arrow functions can hold.",
         "try-exits.ts(9,46): error TS96002: 'xs' cannot be used here: it may have been sent to 'send' on line 9.",
         "try-exits.ts(87,69): error TS96006: 'xs' may have been consumed by 'consume' on line 87.",
         "try-exits.ts(91,70): error TS96006: 'xs' may have been consumed by 'consume' on line 91.",
