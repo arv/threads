@@ -68,6 +68,55 @@ const fn = (name: string) => {
 };
 
 describe('compile', () => {
+  it('retains unstable channel fields across collecting arguments and computed keys', () => {
+    const dir = project({
+      'app.ts': `import {Channel, struct, ref, f64, select} from 'threads';
+const Node = struct({n: f64});
+const Holder = struct({channel: ref<Channel<InstanceType<typeof Node>>>()});
+export function send(holder: InstanceType<typeof Holder>) { holder.channel!.send(new Node()); }
+export function computed(holder: InstanceType<typeof Holder>, method: () => 'send') { holder.channel![method()](new Node()); }
+export function selected(holder: InstanceType<typeof Holder>, later: () => Channel<unknown>) { select(holder.channel!, later()); }
+`,
+    });
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+      check: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    const code = toJavaScript(
+      result.files.find(f => f.fileName.endsWith('/app.ts'))!,
+    ).code;
+    for (const name of ['send', 'computed', 'selected']) {
+      const start = code.indexOf('function ' + name + '(');
+      const body = code.slice(start, code.indexOf('\n}\n', start) + 2);
+      expect(body).toMatch(/__cellView\(\(?_[a-z]+ = __retain\(__I32\[/);
+      expect(body).toMatch(/__release\(_[a-z]+\)/);
+    }
+  });
+
+  it('counts unboxed map results before entries are cleared or results are returned', () => {
+    const dir = project({
+      'app.ts': `import {SharedMap, Lock} from 'threads';
+export function read(map: SharedMap<string, Lock>) { const value = map.get('k')!; map.clear(); return value; }
+export function insert(map: SharedMap<string, Lock>) { return map.getOrInsert('k', new Lock()); }
+export function computed(map: SharedMap<string, Lock>) { return map.getOrInsertComputed('k', () => new Lock()); }
+`,
+    });
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+      check: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    const code = toJavaScript(
+      result.files.find(f => f.fileName.endsWith('/app.ts'))!,
+    ).code;
+    expect(code).toContain('__retain(__unbox(map.get(');
+    expect(code).toContain('__retain(__unbox(map.getOrInsert(');
+    expect(code).toContain('__retain(__unbox(map.getOrInsertComputed(');
+  });
+
   it('leaves primitive share results uncounted, including discarded and returned values', () => {
     const dir = project({
       'app.ts': `import {share} from 'threads';
