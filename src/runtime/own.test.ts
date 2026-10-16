@@ -11,6 +11,14 @@ const move = (v: unknown) => {
 };
 
 describe('struct methods', () => {
+  it('preserves explicit module URLs outside bundled struct identities', () => {
+    const url = 'file:///example/counter.ts';
+    expect(own.structIdentity(url)).toBe(url);
+    expect(own.structIdentity(url, 'Counter')).toBe(
+      JSON.stringify([url, 'Counter']),
+    );
+  });
+
   it.each([
     [false, false],
     [false, true],

@@ -234,6 +234,7 @@ class Lowering {
   private readonly scopes: Scope[] = [];
   private readonly starts = new Map<Node, number>();
   private readonly receivers = new Map<Node, string>();
+  private inStructIdentity = false;
 
   constructor(r: Resolver, file: Node, options: TransformOptions) {
     this.r = r;
@@ -376,8 +377,8 @@ class Lowering {
     return names;
   }
 
-  // Where the import goes: after the file's directives ("use strict") and a
-  // `#!` line.
+  // Helpers follow existing module dependencies, so a page's heap setup
+  // still loads before the runtime. Keep directives and a `#!` line first.
   private prologueEnd(): number {
     let at = 0;
     if (this.text.startsWith('#!')) {
@@ -392,6 +393,12 @@ class Lowering {
         at = s.end;
       else break;
     }
+    for (const s of this.file.statements as Node[])
+      if (
+        s.kind === K.ImportDeclaration ||
+        (s.kind === K.ExportDeclaration && s.moduleSpecifier)
+      )
+        at = Math.max(at, s.end);
     if (this.text.startsWith('\r\n', at)) at += 2;
     else if (this.text[at] === '\n') at++;
     return at;
@@ -1022,6 +1029,7 @@ class Lowering {
 
   // A full expression of a statement or a declaration: the temporaries in it
   // are released after it, as `(_r = E, __release(_a), _r)`.
+  // Module-level variable initializers have these frames too.
   private fullExpression(node: Node | undefined, ctx: Ctx): Ir | undefined {
     if (!node) return undefined;
     const frame = this.pushFrame({released: [], zeroed: [], conditional: 0});
@@ -1918,6 +1926,14 @@ class Lowering {
       }
       case K.PropertyAccessExpression:
       case K.ElementAccessExpression: {
+        if (
+          this.inStructIdentity &&
+          node.kind === K.PropertyAccessExpression &&
+          node.name.text === 'url' &&
+          node.expression.kind === K.MetaProperty &&
+          node.expression.keywordToken === K.ImportKeyword
+        )
+          return this.call('__structIdentity', raw('import.meta.url'));
         const lowered = this.lowerAccess(node, false, undefined);
         if (lowered) return lowered;
         const method = this.r.structMethodAccess(node);
@@ -2074,7 +2090,7 @@ class Lowering {
     if (structCall.methods.length > 0 || structCall.node.arguments[1]) {
       args.push(
         structCall.node.arguments[1]
-          ? this.visit(structCall.node.arguments[1])
+          ? this.explicitStructIdentity(structCall.node.arguments[1])
           : this.call(
               '__structIdentity',
               raw('import.meta.url'),
@@ -2176,6 +2192,18 @@ class Lowering {
       args.push(behavior, object(signatures));
     }
     return this.sequence(evaluated, this.call('__sharedStruct', ...args));
+  }
+
+  // An explicit module URL still needs the bundler's stable module key.
+  // Other import.meta.url uses retain their normal JavaScript meaning.
+  private explicitStructIdentity(node: Node): Ir {
+    const previous = this.inStructIdentity;
+    this.inStructIdentity = true;
+    try {
+      return this.visit(node);
+    } finally {
+      this.inStructIdentity = previous;
+    }
   }
 
   // `atomic.add(s, "f", V)` as `Atomics.add(__I32, (S >> 2) + 2 + 2 * k, V)`,

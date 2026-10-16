@@ -119,11 +119,15 @@ write(
   'app.ts',
   `import {f64, log, scope, SharedArray, struct, type Struct} from '@arv/threads';
 
-const Body = struct({x: f64, vx: f64});
+export const Body = struct({x: f64, vx: f64,
+  step(): number { this.x += this.vx; return this.x; },
+}, \`\${import.meta.url}#Body\`);
 type Body = Struct<typeof Body>;
 
+export function stepBody(body: Body): number { return body.step(); }
+
 function step(bodies: SharedArray<Body>, lo: number, hi: number) {
-  for (let i = lo; i < hi; i++) bodies[i].x += bodies[i].vx;
+  for (let i = lo; i < hi; i++) bodies[i].step();
 }
 
 export function main(threads: number): number {
@@ -144,7 +148,11 @@ write(
   'main.ts',
   `import '@arv/threads/heap';
 import {run} from '@arv/threads/browser';
-import {main} from './app.ts';
+import {Body, main, stepBody} from './app.ts';
+
+const body = new Body();
+body.vx = 21;
+if (await run(stepBody, body) !== 21) throw new Error('page/worker struct identity mismatch');
 
 document.body.textContent = \`result \${await run(main, 4)}\`;
 `,

@@ -958,6 +958,34 @@ export function main() {
     ).toBe('42 42 42 42');
   });
 
+  it.each(['call', 'access', 'tag'])(
+    'keeps a file-scope computed method receiver alive for %s',
+    kind => {
+      const operation =
+        kind === 'access'
+          ? "const method = holder.current![key as unknown as 'read']; const result = method.call(make(2));"
+          : kind === 'tag'
+            ? "const result = holder.current![key as unknown as 'read']``;"
+            : "const result = holder.current![key as unknown as 'read']();";
+      const {output} = run({
+        'main.ts': `import {struct, f64, ref, collectCycles, log, type Struct} from '@arv/threads';
+const C = struct({value: f64, read(_template?: TemplateStringsArray): number { return this.value; }}); type C = Struct<typeof C>;
+const Other = struct({value: f64, read(): number { return 99; }}); type Other = Struct<typeof Other>;
+const Holder = struct({current: ref<C>(), replacement: ref<Other>()});
+const holder = new Holder();
+function make(value: number): C { const c = new C(); c.value = value; return c; }
+const key = {[Symbol.toPrimitive]() {
+  holder.current = null; collectCycles(); holder.replacement = new Other(); holder.current = make(20); return 'read';
+}};
+holder.current = make(1);
+${operation}
+export function main() { log(result, holder.current!.value, holder.replacement!.read()); }
+`,
+      });
+      expect(output.trim()).toBe(`${kind === 'access' ? 2 : 1} 20 99`);
+    },
+  );
+
   it('keeps the original receiver alive when property-key coercion replaces it', () => {
     expect(
       run({

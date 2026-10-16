@@ -15,6 +15,23 @@ __register(import.meta.url, { main, gen });
 //# sourceMappingURL=program.js.map`;
 
 describe('registration', () => {
+  it('finds compiler helpers after a source import of register', () => {
+    const code = `import { register as sourceRegister } from "${RUNTIME}";\n${EMIT}`;
+    expect(registeredIn(code, RUNTIME)).toEqual(['main', 'gen']);
+    expect(keyRegistration(code, RUNTIME, 'src/app.ts')).toContain(
+      '__register("src/app.ts", { main, gen });',
+    );
+  });
+
+  it('normalizes an explicit struct identity URL without changing other module URLs', () => {
+    const source = `import { structIdentity as __id } from "${RUNTIME}";
+const key = \`\${__id(import.meta.url)}#Counter\`;
+const url = import.meta.url;`;
+    const code = keyRegistration(source, RUNTIME, 'src/counter.ts');
+    expect(code).toContain('__id("src/counter.ts")');
+    expect(code).toContain('const url = import.meta.url;');
+  });
+
   it('gives struct declarations the same module identity in page and worker bundles', () => {
     const source = `import { structIdentity as __id } from "${RUNTIME}";
 const key = __id(import.meta.url, "Counter");`;

@@ -180,6 +180,8 @@ type StructArguments<F> = F extends {constructor: (...args: infer A) => any}
 /** Methods live on each worker's local prototype, outside shared memory.
  * When running without compilation, supply a module-qualified identity for
  * a declaration with a constructor or methods. The compiler supplies one otherwise.
+ * In compiled Vite builds, import.meta.url used directly in this identity
+ * becomes a stable source-module key shared by page and worker bundles.
  */
 export declare function struct<F extends Record<PropertyKey, StructMember>>(
   members: F & ThisType<StructInstance<F> & Cell>,

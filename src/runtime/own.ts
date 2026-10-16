@@ -922,8 +922,8 @@ function boxStructArguments(args: unknown[], signature: StructMethodSignature) {
   return args;
 }
 
-export const structIdentity = (module: string, name: string) =>
-  JSON.stringify([module, name]);
+export const structIdentity = (module: string, name?: string) =>
+  name === undefined ? module : JSON.stringify([module, name]);
 
 // Keep symbol keys intact and convert other property keys to strings.
 export function structKey(

@@ -26,8 +26,9 @@ import {
 // The constructor and methods are local to each worker; only these three
 // fields use shared storage. Construction starts with zero length and growth count,
 // then allocates the backing array. The explicit identity also lets the
-// example run with types erased. Scope it to this module URL so the playground's
-// compiled and erased modules can coexist in the same worker pool.
+// example run with types erased. Scope it to this module so the playground's
+// compiled and erased variants can coexist. Compiled builds normalize the URL
+// in this identity to the same source-module key in page and worker bundles.
 const SharedVector = struct(
   {
     length: f64,

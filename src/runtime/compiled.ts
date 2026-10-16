@@ -38,20 +38,22 @@ export const HELPERS = new Set([
 ]);
 
 // The local names of the helpers that compiled code imports from `runtime` :
-// the specifiers of its first import of nothing but helpers.
+// the specifiers of its last import of nothing but helpers. The compiler
+// appends that import after the source's existing module dependencies.
 export function helpersOf(
   code: string,
   runtime: string,
 ): Record<string, string> {
+  let helpers: Record<string, string> = {};
   for (const m of code.matchAll(/^import \{ ([^}]*) \} from "([^"]*)";$/gm)) {
     if (m[2] !== runtime) continue;
     const pairs = m[1]!.split(',').map(s => s.trim().split(/\s+as\s+/));
     if (pairs.every(([name]) => name !== undefined && HELPERS.has(name)))
-      return Object.fromEntries(
+      helpers = Object.fromEntries(
         pairs.map(([name, local]) => [name, local ?? name]),
       );
   }
-  return {};
+  return helpers;
 }
 
 // A name like `name` that no identifier in `source` has, as TypeScript makes
@@ -68,11 +70,16 @@ export function uniqueName(source: string, name: string) {
 // in place of import.meta.url.
 export function keyRegistration(code: string, runtime: string, key: string) {
   const helpers = helpersOf(code, runtime);
-  if (helpers.structIdentity)
+  if (helpers.structIdentity) {
     code = code.replaceAll(
       `${helpers.structIdentity}(import.meta.url,`,
       `${helpers.structIdentity}(${JSON.stringify(key)},`,
     );
+    code = code.replaceAll(
+      `${helpers.structIdentity}(import.meta.url)`,
+      `${helpers.structIdentity}(${JSON.stringify(key)})`,
+    );
+  }
   const register = helpers.register;
   if (!register) return code;
   const call = `${register}(import.meta.url, {`,
