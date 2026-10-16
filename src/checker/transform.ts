@@ -285,6 +285,9 @@ class Lowering {
       if (statement.kind === K.VariableStatement) {
         const decls = statement.declarationList.declarations as Node[];
         if (decls.some(d => this.moduleSetups.has(d))) {
+          // These remain declarations in the same module environment.
+          // Module instantiation creates every binding before evaluation,
+          // so splitting statements preserves later bindings' TDZ.
           const start = statement.getStart(this.file as any);
           const prefix = this.text.slice(start, this.startOf(decls[0]!));
           ir = statements([

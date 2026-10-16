@@ -1247,6 +1247,17 @@ describe('receiver cleanup during module initialization', () => {
   it.each([
     ['statement', 'p.x = ((p = new P()), fail());'],
     [
+      'multi-declaration typeof TDZ',
+      `// @ts-expect-error Deliberately read b before initialization.
+       export const a = typeof b, b = p.x = ((p = new P()), 7);`,
+    ],
+    [
+      'multi-declaration closure TDZ',
+      `function read(): string { return typeof b; }
+       export const a = read(), b = p.x = ((p = new P()), 7);`,
+    ],
+
+    [
       'exported initializer',
       'export const value = p.x = ((p = new P()), fail());',
     ],
@@ -1287,7 +1298,9 @@ describe('receiver cleanup during module initialization', () => {
         export async function main() {
           const before = heapStats();
           let failed = false;
-          try { await import('./bad.js'); } catch { failed = true; }
+          try { await import('./bad.js'); } catch (error) {
+            failed = ${_name.includes('TDZ') ? 'error instanceof ReferenceError' : 'true'};
+          }
           collectCycles();
           const after = heapStats();
           log(JSON.stringify([failed,
