@@ -409,6 +409,13 @@ export class Resolver {
     const list = decl.parent as Node | undefined;
     if (!list || list.kind !== K.VariableDeclarationList) return Local.None;
     const statement = list.parent as Node;
+    const iteration =
+      statement.kind === K.ForInStatement ||
+      statement.kind === K.ForOfStatement;
+    // Only channel receives transfer an owned count. Unsupported counted
+    // iteration is diagnosed by checkRefCounts and must remain borrowed,
+    // including var bindings whose scope is the module.
+    if (iteration && !isChannelReceiveLoop(c, statement)) return Local.Borrowed;
     if (
       statement.kind === K.VariableStatement &&
       (statement.parent?.kind === K.SourceFile ||
@@ -430,14 +437,7 @@ export class Resolver {
         scope = scope.parent as Node | undefined;
       }
     }
-    if (
-      statement.kind === K.ForInStatement ||
-      statement.kind === K.ForOfStatement
-    ) {
-      if (isChannelReceiveLoop(c, statement))
-        return this.ownedLocal(decl, symbol); // owns each received value
-      return Local.Borrowed; // an error (checkRefCounts)
-    }
+    if (iteration) return this.ownedLocal(decl, symbol); // owns each channel receive
     if (!this.isAssigned(symbol)) {
       if (!decl.initializer || this.isBorrowable(decl.initializer))
         return Local.Borrowed; // (always 0 without an initializer)

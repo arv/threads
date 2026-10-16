@@ -366,6 +366,31 @@ describe('what the lowering moves, as it runs', () => {
 });
 
 describe('counting lowering review regressions', () => {
+  it.each(['const values: Iterable<P> = [];', 'const values: P[] = [];'])(
+    'keeps non-channel module receive bindings borrowed: %s',
+    values => {
+      const dir = project({
+        'app.ts': `import {f64, SharedArray, struct, type Struct} from 'threads';
+        const P = struct({x: f64});
+        type P = Struct<typeof P>;
+        ${values}
+        for (var p of values) { p.x = 1; }`,
+      });
+      const result = compile(path.join(dir, 'tsconfig.json'), {
+        runtime: 'threads',
+        api,
+        check: true,
+        types: true,
+      });
+      // Counted array iteration remains unsupported; lowering must not
+      // pretend its borrowed element transfers ownership into a module var.
+      expect(result.diagnostics.map(d => d.code)).toEqual([96022]);
+      expect(result.typeDiagnostics).toEqual([]);
+      const code = toJavaScript(result.files[0]!).code;
+      expect(code).toContain('for (var p of values)');
+      expect(code).not.toContain('__release(p)');
+    },
+  );
   const cases = [
     {
       name: 'keeps function var receives alive through iterations and a post-loop read',
