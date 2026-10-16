@@ -2623,7 +2623,7 @@ class Lowering {
   }
 
   // `x = E` for an owned local: the new value is retained before the old is
-  // released, `_t = x, x = E', __release(_t)`. `x ||= E` is `x || (x = E')`.
+  // released. Logical assignments use the same replacement on their taken branch.
   private lowerLocalAssignment(node: Node, x: Node, ctx: Ctx): Ir | undefined {
     const operator = node.operatorToken.kind;
     const replace = (value: Ir, keepValue: boolean): Ir =>
@@ -2642,17 +2642,7 @@ class Lowering {
         this.conditional++;
         const value = this.visitIn(node.right, Ctx.Take)!;
         this.conditional--;
-        const owner = this.lexicalOwner(x);
-        return binary(
-          this.name(x),
-          '||',
-          paren(
-            this.assign(
-              this.name(x),
-              owner ? this.assign(tempRef(owner), value) : value,
-            ),
-          ),
-        );
+        return binary(this.name(x), '||', paren(replace(value, true)));
       }
       case K.AmpersandAmpersandEqualsToken: {
         this.conditional++;
@@ -3012,8 +3002,21 @@ class Lowering {
   // to counted bindings or fields, including cleanup when evaluation throws.
   private receiver(object: Node, ctx: Ctx, after: Node[]): Ir {
     const replacesOwner = (node: Node): boolean => {
-      if (isErased(node) || isFunctionLike(node) || isClassLike(node))
-        return false;
+      if (isErased(node)) return false;
+      // Class evaluation executes computed names, decorators, static field
+      // initializers and static blocks. Method bodies and instance field
+      // initializers run later, but their names/decorators run now.
+      if (
+        isFunctionLike(node) ||
+        (node.kind === K.PropertyDeclaration &&
+          !node.modifiers?.some((m: Node) => m.kind === K.StaticKeyword))
+      ) {
+        return !!forEachChild(node, child =>
+          child.kind === K.ComputedPropertyName || child.kind === K.Decorator
+            ? replacesOwner(child)
+            : false,
+        );
+      }
       if (
         node.kind === K.BinaryExpression &&
         isAssignmentOperator(node.operatorToken.kind) &&

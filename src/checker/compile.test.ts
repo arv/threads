@@ -98,7 +98,9 @@ describe('compile', () => {
     expect(returns).toMatch(
       /\} finally \{\n\t\t\t__release\(c\);\n\t\t\}\n\t\} finally \{\n\t\t__release\(b\);/,
     );
-    expect(fn('logical')).toContain('x || (x = __retain(other));');
+    expect(fn('logical')).toMatch(
+      /x \|\| \(\w+ = __retain\(other\), \w+ = x, x = \w+, __release\(\w+\), x\);/,
+    );
     expect(fn('receive')).toContain('finally {\n\t\t\t__release(n);');
     expect(fn('quiescent')).toContain('__quiescent();\n\t\t\tcontinue;');
     expect(fn('moves')).toContain('s.spawn(receiveOne, __countedRef(n));');
@@ -625,6 +627,57 @@ describe('counting lowering review regressions', () => {
       }`,
       expected: '163',
     },
+    {
+      name: 'keeps static block var declarations separate from enclosing lexical names',
+      source: `function f() {
+        const p = new P(); p.x = 241;
+        class C { static { var p = new P(); p.x = 99; } }
+        return p.x;
+      }
+      export function main() {
+        const before = heapStats(); const result = f(); const after = heapStats();
+        log(JSON.stringify([result, after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[241,0]',
+    },
+    {
+      name: 'allows a module closure before its counted binding initializes',
+      source: `const get = () => p.x; const p = new P(); p.x = 251;
+      export function main() { log(get()); }`,
+      expected: '251',
+    },
+    ...['||=', '??=', '&&='].map(operator => ({
+      name: `balances nested RHS ownership in ${operator}`,
+      source: `function f() {
+        let p: P | null = ${operator === '&&=' ? 'new P()' : 'null'};
+        p ${operator} (p = new P()); p!.x = 257;
+        const q = new P(); q.x = 99; return p!.x;
+      }
+      export function main() {
+        const before = heapStats(); const result = f(); const after = heapStats();
+        log(JSON.stringify([result, after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[257,0]',
+    })),
+    ...[
+      '[((root.next = new P()), collectCycles(), (root.pressure = new P()), (root.pressure.x = 99), 1)]() {}',
+      'static { root.next = new P(); collectCycles(); root.pressure = new P(); root.pressure.x = 99; }',
+      'static value = ((root.next = new P()), collectCycles(), (root.pressure = new P()), (root.pressure.x = 99));',
+    ].map(member => ({
+      name: `holds a receiver through immediate class evaluation: ${member}`,
+      source: `const R = struct({next: ref<P>(), pressure: ref<P>()}); const root = new R();
+      function f() {
+        root.next = new P(); collectCycles();
+        root.next!.x = (void class { ${member} }, 263);
+        collectCycles();
+        const result = root.pressure!.x; root.next = null; root.pressure = null; collectCycles(); return result;
+      }
+      export function main() {
+        const before = heapStats(); const result = f(); const after = heapStats();
+        log(JSON.stringify([result, after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[99,0]',
+    })),
     {
       name: 'retains the value returned by a nested assignment before replacing it',
       source: `function f() {
