@@ -20,6 +20,26 @@ const condition = (p: number) =>
 const field = (p: number) => (p >> 2) + 2;
 
 describe('counted built-in cells', () => {
+  it('releases a condition when reading the lock argument fails', async () => {
+    const failure = new Error('lock receiver failed');
+    const bad = Object.create(T.Lock.prototype, {
+      $cell: {
+        get() {
+          throw failure;
+        },
+      },
+    }) as InstanceType<typeof T.Lock>;
+    for (const async of [false, true]) {
+      const p = own.newCell(T.Condition);
+      if (async)
+        await expect(condition(p).waitAsync(bad)).rejects.toBe(failure);
+      else expect(() => condition(p).wait(bad)).toThrow(failure);
+      expect(count(p)).toBe(1);
+      own.release(p);
+      expect(runtime.I32[p >> 2]).toBe(runtime.K_FREE);
+    }
+  });
+
   it('releases a partially retained select when a later receiver throws', async () => {
     const failure = new Error('receiver failed');
     const bad = Object.create(T.Channel.prototype, {

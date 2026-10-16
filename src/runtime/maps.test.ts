@@ -301,6 +301,48 @@ describe('SharedMap', () => {
 });
 
 describe('as compiled code calls it', () => {
+  it('consumes transferred keys in lookup-only map and set operations', () => {
+    const key = new T.Lock(),
+      map = new T.SharedMap<unknown, number>(),
+      set = new T.SharedSet<unknown>();
+    map.set(key, 7);
+    set.add(key);
+    const lookups = [
+      () => map.get(own.countedRef(key.$cell)),
+      () => map.has(own.countedRef(key.$cell)),
+      () => set.has(own.countedRef(key.$cell)),
+    ];
+    for (const lookup of lookups) {
+      const before = count(key.$cell);
+      lookup();
+      expect(count(key.$cell)).toBe(before);
+    }
+    for (const remove of [
+      () => map.delete(own.countedRef(key.$cell)),
+      () => set.delete(own.countedRef(key.$cell)),
+    ]) {
+      const before = count(key.$cell);
+      expect(remove()).toBe(true);
+      own.__collect();
+      expect(count(key.$cell)).toBe(before - 1);
+    }
+  });
+
+  it('releases a transferred computed key when its callback throws', () => {
+    const key = new T.Lock(),
+      map = new T.SharedMap<unknown, number>();
+    const before = count(key.$cell),
+      failure = new Error('computed failed');
+    expect(() =>
+      map.getOrInsertComputed(own.countedRef(key.$cell), received => {
+        expect(received).toBe(key);
+        throw failure;
+      }),
+    ).toThrow(failure);
+    expect(count(key.$cell)).toBe(before);
+    expect(map.size).toBe(0);
+  });
+
   const N = own.sharedStruct('MapRaw', ['v'], []);
 
   it('tags counted entries as cells and transfers their counts', () => {

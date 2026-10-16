@@ -556,26 +556,36 @@ export class SharedMap<K = unknown, V = unknown> {
     if (!encode(key, true, false)) return undefined;
     const m = this.$cell,
       l = lo,
-      h = hi;
-    $lock((m >> 2) + LOCK);
-    const t = I32[(m >> 2) + TABLE],
-      i = find(t, MAP_ENTRY, l, h),
-      at = i < 0 ? 0 : entriesAt(t) + i * MAP_ENTRY + 8,
-      wf = F64[at >> 3],
-      wh = I32[(at >> 2) + 1],
-      wp = I32[at >> 2];
-    $unlock((m >> 2) + LOCK);
-    return (i < 0 ? undefined : decodeWord(wf, wh, wp)) as V | undefined;
+      h = hi,
+      how = held;
+    try {
+      $lock((m >> 2) + LOCK);
+      const t = I32[(m >> 2) + TABLE],
+        i = find(t, MAP_ENTRY, l, h),
+        at = i < 0 ? 0 : entriesAt(t) + i * MAP_ENTRY + 8,
+        wf = F64[at >> 3],
+        wh = I32[(at >> 2) + 1],
+        wp = I32[at >> 2];
+      $unlock((m >> 2) + LOCK);
+      return (i < 0 ? undefined : decodeWord(wf, wh, wp)) as V | undefined;
+    } finally {
+      unheld(l, h, how);
+    }
   }
   has(key: K): boolean {
     if (!encode(key, true, false)) return false;
     const m = this.$cell,
       l = lo,
-      h = hi;
-    $lock((m >> 2) + LOCK);
-    const found = find(I32[(m >> 2) + TABLE], MAP_ENTRY, l, h) >= 0;
-    $unlock((m >> 2) + LOCK);
-    return found;
+      h = hi,
+      how = held;
+    try {
+      $lock((m >> 2) + LOCK);
+      const found = find(I32[(m >> 2) + TABLE], MAP_ENTRY, l, h) >= 0;
+      $unlock((m >> 2) + LOCK);
+      return found;
+    } finally {
+      unheld(l, h, how);
+    }
   }
   set(key: K, value: V): this {
     encode(value, false, true);
@@ -648,36 +658,47 @@ export class SharedMap<K = unknown, V = unknown> {
    * threads adding the same key get the one value.
    */
   getOrInsertComputed(key: K, callback: (key: K) => V): V {
-    if (encode(key, true, false)) {
-      const m = this.$cell,
-        l = lo,
-        h = hi,
-        how = held;
-      $lock((m >> 2) + LOCK);
-      const t = I32[(m >> 2) + TABLE],
-        i = find(t, MAP_ENTRY, l, h),
-        at = i < 0 ? 0 : entriesAt(t) + i * MAP_ENTRY + 8,
-        wf = F64[at >> 3],
-        wh = I32[(at >> 2) + 1],
-        wp = I32[at >> 2];
-      $unlock((m >> 2) + LOCK);
-      if (i >= 0) {
-        unheld(l, h, how);
-        return decodeWord(wf, wh, wp) as V;
+    const transferred = __isCounted(key) ? (key as {a: number}).a : 0;
+    try {
+      // The callback and insertion use a native handle. Return the incoming
+      // transferred count here, whether lookup, callback or insertion fails.
+      key = plain(key) as K;
+      if (encode(key, true, false)) {
+        const m = this.$cell,
+          l = lo,
+          h = hi;
+        $lock((m >> 2) + LOCK);
+        const t = I32[(m >> 2) + TABLE],
+          i = find(t, MAP_ENTRY, l, h),
+          at = i < 0 ? 0 : entriesAt(t) + i * MAP_ENTRY + 8,
+          wf = F64[at >> 3],
+          wh = I32[(at >> 2) + 1],
+          wp = I32[at >> 2];
+        $unlock((m >> 2) + LOCK);
+        if (i >= 0) {
+          return decodeWord(wf, wh, wp) as V;
+        }
       }
+      return this.getOrInsert(key, callback(key));
+    } finally {
+      release(transferred);
     }
-    return this.getOrInsert(key, callback(plain(key) as K));
   }
   delete(key: K): boolean {
     if (!encode(key, true, false)) return false;
     const m = this.$cell,
       l = lo,
-      h = hi;
-    $lock((m >> 2) + LOCK);
+      h = hi,
+      how = held;
     try {
-      return remove(m, MAP_ENTRY, l, h);
+      $lock((m >> 2) + LOCK);
+      try {
+        return remove(m, MAP_ENTRY, l, h);
+      } finally {
+        $unlock((m >> 2) + LOCK);
+      }
     } finally {
-      $unlock((m >> 2) + LOCK);
+      unheld(l, h, how);
     }
   }
   clear(): void {
@@ -729,11 +750,16 @@ export class SharedSet<T = unknown> {
     if (!encode(value, true, false)) return false;
     const m = this.$cell,
       l = lo,
-      h = hi;
-    $lock((m >> 2) + LOCK);
-    const found = find(I32[(m >> 2) + TABLE], SET_ENTRY, l, h) >= 0;
-    $unlock((m >> 2) + LOCK);
-    return found;
+      h = hi,
+      how = held;
+    try {
+      $lock((m >> 2) + LOCK);
+      const found = find(I32[(m >> 2) + TABLE], SET_ENTRY, l, h) >= 0;
+      $unlock((m >> 2) + LOCK);
+      return found;
+    } finally {
+      unheld(l, h, how);
+    }
   }
   add(value: T): this {
     encode(value, true, true);
@@ -755,12 +781,17 @@ export class SharedSet<T = unknown> {
     if (!encode(value, true, false)) return false;
     const m = this.$cell,
       l = lo,
-      h = hi;
-    $lock((m >> 2) + LOCK);
+      h = hi,
+      how = held;
     try {
-      return remove(m, SET_ENTRY, l, h);
+      $lock((m >> 2) + LOCK);
+      try {
+        return remove(m, SET_ENTRY, l, h);
+      } finally {
+        $unlock((m >> 2) + LOCK);
+      }
     } finally {
-      $unlock((m >> 2) + LOCK);
+      unheld(l, h, how);
     }
   }
   clear(): void {

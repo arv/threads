@@ -1005,13 +1005,14 @@ export class Condition {
   // releases lock, which this thread holds, waits for a notify, and holds lock
   // again
   wait(lock: Lock) {
-    retain(this.$cell);
-    retain(lock.$cell);
+    const condition = retain(this.$cell);
+    let heldLock = 0;
     try {
+      heldLock = retain(lock.$cell);
       $mustNotBlock('Condition.wait()', 'await waitAsync()');
-      const s = (this.$cell >> 2) + 2,
+      const s = (condition >> 2) + 2,
         seq = Atomics.load(I32, s),
-        l = (lock.$cell >> 2) + 2;
+        l = (heldLock >> 2) + 2;
       unlock(l);
       $waitBegin();
       let k = 0;
@@ -1020,18 +1021,19 @@ export class Condition {
       $waitEnd();
       acquire(l);
     } finally {
-      release(lock.$cell);
-      release(this.$cell);
+      release(heldLock);
+      release(condition);
     }
   }
   // the same in an async function: waits without blocking its worker
   async waitAsync(lock: Lock) {
-    retain(this.$cell);
-    retain(lock.$cell);
+    const condition = retain(this.$cell);
+    let heldLock = 0;
     try {
-      const s = (this.$cell >> 2) + 2,
+      heldLock = retain(lock.$cell);
+      const s = (condition >> 2) + 2,
         seq = Atomics.load(I32, s),
-        l = (lock.$cell >> 2) + 2;
+        l = (heldLock >> 2) + 2;
       unlock(l);
       while (Atomics.load(I32, s) === seq) {
         const w = Atomics.waitAsync(I32, s, seq);
@@ -1040,8 +1042,8 @@ export class Condition {
       $resumed();
       await acquireAsync(l);
     } finally {
-      release(lock.$cell);
-      release(this.$cell);
+      release(heldLock);
+      release(condition);
     }
   }
   notifyOne() {
