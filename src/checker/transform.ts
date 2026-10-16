@@ -200,6 +200,7 @@ class Lowering {
   private readonly exceptionTemps = new Map<Scope, Set<Temp>>();
   private readonly moduleSetups = new Map<Node, Ir[]>();
   private readonly moduleDeclarations = new Map<Node, Ir>();
+  private readonly moduleClasses = new Set<Node>();
   // default values of owned parameters, moved into the body
   private readonly paramInits = new Map<Node, Node>();
   // default values of other parameters that move into the body with them
@@ -257,6 +258,8 @@ class Lowering {
     this.fileIdentifiers = this.identifiers();
     const findForward = (node: Node): void => {
       if (isErased(node)) return;
+      // Hoisted declarations can run before any lexical binding initializes,
+      // including a binding textually before the function in a switch clause.
       if (isFunctionLikeDeclaration(node))
         for (const decl of this.r.captures(node))
           if (
@@ -297,6 +300,45 @@ class Lowering {
             ]),
           ]);
         }
+      } else if (this.moduleClasses.has(statement) && temps.length) {
+        // A suspending computed name uses file-scope temporaries. Guard
+        // construction as an expression, then initialize the original live
+        // module binding after it succeeds, preserving its TDZ and exports.
+        const modifiers = (statement.modifiers as Node[] | undefined) ?? [];
+        const exported = modifiers.some(m => m.kind === K.ExportKeyword);
+        const isDefault = modifiers.some(m => m.kind === K.DefaultKeyword);
+        const expression = this.src(statement, [
+          ...(ir as Src).edits,
+          ...modifiers
+            .filter(
+              m => m.kind === K.ExportKeyword || m.kind === K.DefaultKeyword,
+            )
+            .map(m => ({start: this.startOf(m), end: m.end, ir: raw('')})),
+        ]);
+        const value = this.newTemp();
+        const construction = statement.name
+          ? paren(copyOf(expression))
+          : gen(Prec.Member, ['({default: ', copyOf(expression), '}).default']);
+        const declaration = statement.name
+          ? gen(Prec.Primary, [
+              `\n${exported && !isDefault ? 'export ' : ''}let `,
+              this.name(statement.name),
+              ' = ',
+              tempRef(value),
+              ';',
+              ...(isDefault
+                ? ['\nexport { ', this.name(statement.name), ' as default };']
+                : []),
+            ])
+          : gen(Prec.Primary, ['\nexport default ', tempRef(value), ';']);
+        ir = statements([
+          ...(this.moduleSetups.get(statement) ?? []),
+          this.guardTemps(
+            [exprStatement(this.assign(tempRef(value), construction))],
+            temps,
+          ),
+          declaration,
+        ]);
       } else if (this.moduleSetups.has(statement)) {
         ir = statements([...this.moduleSetups.get(statement)!, ir]);
       } else if (temps.length) {
@@ -540,11 +582,11 @@ class Lowering {
   // VisitEachChild: the node with its children visited (in the AtOnce
   // context); types and declarations that are only types are left as they
   // are.
-  private visitEachChild(node: Node): Ir {
+  private visitEachChild(node: Node, visited = new Map<Node, Ir>()): Ir {
     const edits: Edit[] = [];
     forEachChild(node, child => {
       if (isErased(child)) return;
-      const ir = this.visit(child);
+      const ir = visited.get(child) ?? this.visit(child);
       if (!isIdentity(ir, child)) edits.push(this.editOf(child, ir));
     });
     return this.src(node, edits);
@@ -720,6 +762,11 @@ class Lowering {
           edits.push(this.editOf(node.initializer, initializer));
         return this.src(node, edits);
       }
+      case K.ComputedPropertyName:
+      case K.Decorator:
+        return this.update(node, [
+          [node.expression, this.scopedExpression(node.expression)],
+        ]);
       case K.PropertyDeclaration: {
         const edits: Edit[] = [];
         forEachChild(node, child => {
@@ -768,6 +815,16 @@ class Lowering {
       case K.ClassStaticBlockDeclaration:
       case K.ClassDeclaration:
       case K.ClassExpression: {
+        // Names and decorators run in the enclosing evaluation, before
+        // entering a method's parameter/body scope.
+        const outer = new Map<Node, Ir>();
+        forEachChild(node, child => {
+          if (
+            child.kind === K.ComputedPropertyName ||
+            child.kind === K.Decorator
+          )
+            outer.set(child, this.visit(child));
+        });
         this.pushFrame(null);
         const scoped =
           isFunctionLikeDeclaration(node) ||
@@ -776,7 +833,7 @@ class Lowering {
           this.pushScope();
           this.prepareParameters(node);
         }
-        const result = this.visitEachChild(node);
+        const result = this.visitEachChild(node, outer);
         if (scoped) this.popScope();
         this.popFrame();
         return result;
@@ -1085,6 +1142,60 @@ class Lowering {
       }
     }
     return ir;
+  }
+
+  // A computed name or decorator may have no surrounding expression frame.
+  // Keep its temporaries local to an immediately invoked lexical function,
+  // so both normal completion and exceptions release its receiver holds.
+  private scopedExpression(node: Node): Ir {
+    const suspends = (n: Node): boolean => {
+      if (isFunctionLike(n) || isClassLike(n) || isErased(n)) return false;
+      return (
+        n.kind === K.AwaitExpression ||
+        n.kind === K.YieldExpression ||
+        !!forEachChild(n, suspends)
+      );
+    };
+    if (this.frames[this.frames.length - 1] || suspends(node)) {
+      const scope = this.scopes[this.scopes.length - 1]!;
+      const before = new Set(this.exceptionTemps.get(scope));
+      const result = this.fullExpression(node, Ctx.AtOnce)!;
+      if (
+        this.scopes.length === 1 &&
+        [...(this.exceptionTemps.get(scope) ?? [])].some(t => !before.has(t))
+      ) {
+        for (
+          let parent = node.parent as Node | undefined;
+          parent;
+          parent = parent.parent as Node | undefined
+        ) {
+          if (isClassLike(parent)) {
+            if (
+              parent.kind === K.ClassDeclaration &&
+              parent.parent?.kind === K.SourceFile
+            )
+              this.moduleClasses.add(parent);
+            break;
+          }
+        }
+      }
+      return result;
+    }
+    const scope = this.pushScope();
+    const result = this.fullExpression(node, Ctx.AtOnce)!;
+    this.popScope();
+    if (!scope.temps.length) return result;
+    return call(
+      paren(
+        gen(Prec.Assignment, [
+          '() => {',
+          varsStatement(scope),
+          ...this.guardReceiverTemps([returnStatement(result)], scope),
+          '\n}',
+        ]),
+      ),
+      [],
+    );
   }
 
   private releaseAfter(expr: Ir, frame: Frame, keepValue: boolean): Ir {

@@ -368,6 +368,150 @@ describe('what the lowering moves, as it runs', () => {
 describe('counting lowering review regressions', () => {
   const cases = [
     {
+      name: 'queues a switch capture declared after its binding in the same clause',
+      source: `function f() {
+        switch (0) {
+          case 0:
+            const p = new P(); p.x = 191;
+            function get() { return p.x; }
+            return get;
+        }
+        throw new Error('unreachable');
+      }
+      export function main() {
+        const get = f(); const q = new P(); q.x = 99; log(get());
+      }`,
+      expected: '191',
+    },
+    {
+      name: 'queues switch captures of a binding declared in an earlier clause',
+      source: `function f(n: number) {
+        switch (n) {
+          case 0:
+            const p = new P(); p.x = 193;
+          case 1:
+            function get() { return p.x; }
+            return get;
+        }
+        throw new Error('unreachable');
+      }
+      export function main() {
+        const get = f(0); const q = new P(); q.x = 99; log(get());
+      }`,
+      expected: '193',
+    },
+    {
+      name: 'protects a reference-field receiver in a computed class method name',
+      source: `const R = struct({next: ref<P>()});
+      const root = new R(); root.next = new P();
+      function f() {
+        class C { [root.next!.x = ((root.next = new P()), 197)]() {} }
+        return [root.next!.x, typeof Reflect.get(new C(), 197)];
+      }
+      export function main() {
+        collectCycles();
+        const before = heapStats();
+        const result = f();
+        collectCycles();
+        const after = heapStats();
+        log(JSON.stringify([result,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[[0,"function"],0]',
+    },
+    {
+      name: 'releases reference-field receiver holds when a computed class name throws',
+      source: `const R = struct({next: ref<P>()});
+      const root = new R(); root.next = new P();
+      function fail(): never { throw new Error('fail'); }
+      function f() {
+        class C { [root.next!.x = ((root.next = new P()), fail())]() {} }
+      }
+      export function main() {
+        collectCycles();
+        const before = heapStats();
+        let message = "";
+        try { f(); } catch (error) { message = (error as Error).message; }
+        collectCycles();
+        const after = heapStats();
+        log(JSON.stringify([message,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '["fail",0]',
+    },
+    {
+      name: 'preserves an awaited computed class name and its module export',
+      source: `const R = struct({next: ref<P>()});
+      const root = new R(); root.next = new P();
+      const before = heapStats();
+      export class C {
+        [root.next!.x = ((root.next = new P()), await Promise.resolve(199))]() {}
+      }
+      const observed = [root.next!.x, typeof Reflect.get(new C(), 199)];
+      export function main() {
+        collectCycles();
+        const after = heapStats();
+        log(JSON.stringify([observed,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[[0,"function"],0]',
+    },
+    {
+      name: 'preserves a named default class export with an awaited computed name',
+      source: `const R = struct({next: ref<P>()});
+      const root = new R(); root.next = new P();
+      export default class C {
+        [root.next!.x = ((root.next = new P()), await Promise.resolve(211))]() {}
+      }
+      export function main() {
+        log(JSON.stringify([C.name, typeof Reflect.get(new C(), 211), root.next!.x]));
+      }`,
+      expected: '["C","function",0]',
+    },
+    {
+      name: 'preserves an anonymous default class name through awaited computed evaluation',
+      source: `const R = struct({next: ref<P>()});
+      const root = new R(); root.next = new P();
+      export default class {
+        [root.next!.x = ((root.next = new P()), await Promise.resolve(223))]() {}
+      }
+      export async function main() {
+        const {default: C} = await import('./app.js');
+        log(JSON.stringify([C.name, typeof Reflect.get(new C(), 223), root.next!.x]));
+      }`,
+      expected: '["default","function",0]',
+    },
+    {
+      name: 'keeps untaken awaits in computed names synchronous',
+      source: `const R = struct({next: ref<P>()});
+      const root = new R(); root.next = new P();
+      const events: number[] = [];
+      Promise.resolve().then(() => events.push(2));
+      export class C {
+        [root.next!.x = ((root.next = new P()), false ? await 0 : 227)]() {}
+      }
+      events.push(1);
+      export function main() { log(JSON.stringify(events)); }`,
+      expected: '[1,2]',
+    },
+    {
+      name: 'releases a computed-name receiver when its generator is closed',
+      source: `const R = struct({next: ref<P>()});
+      const root = new R(); root.next = new P();
+      function* f() {
+        class C { [root.next!.x = ((root.next = new P()), yield 229)]() {} }
+      }
+      export function main() {
+        collectCycles();
+        const before = heapStats();
+        const iterator = f(); iterator.next(); iterator.return(undefined);
+        collectCycles();
+        const after = heapStats();
+        log(after.allocated - before.allocated - (after.freed - before.freed));
+      }`,
+      expected: '0',
+    },
+    {
       name: 'preserves the final module channel var and releases overwritten receives',
       source: `const channel = new Channel<P>(2);
       const before = heapStats();
@@ -998,7 +1142,7 @@ describe('counting lowering review regressions', () => {
     ({source, expected}) => {
       const dir = project(
         {
-          'app.ts': `import {Channel, f64, heapStats, log, ref, SharedArray, struct, type Struct} from '@arv/threads';
+          'app.ts': `import {Channel, collectCycles, f64, heapStats, log, ref, SharedArray, struct, type Struct} from '@arv/threads';
         const P = struct({x: f64});
         type P = Struct<typeof P>;
         ${source}`,
@@ -1028,7 +1172,7 @@ describe('counting lowering review regressions', () => {
 });
 
 describe('receiver cleanup during module initialization', () => {
-  const header = `import {f64, struct} from '@arv/threads';
+  const header = `import {f64, ref, struct} from '@arv/threads';
     const P = struct({x: f64});
     function fail(): never { throw new Error('fail'); }
     let p = new P();`;
@@ -1051,6 +1195,15 @@ describe('receiver cleanup during module initialization', () => {
       'class heritage',
       'export class C extends ((p.x = ((p = new P()), fail())), class {}) {}',
     ],
+    [
+      'awaited computed class name',
+      `const R = struct({next: ref<InstanceType<typeof P>>()});
+       const root = new R(); root.next = new P();
+       export class C {
+         [root.next!.x = ((root.next = new P()), await Promise.reject(new Error('fail')))]() {}
+       }`,
+      '[true,3]',
+    ],
     ['default export', 'export default p.x = ((p = new P()), fail());'],
     [
       'TDZ in initializer',
@@ -1058,15 +1211,16 @@ describe('receiver cleanup during module initialization', () => {
     ],
   ])(
     'releases receiver holds on a throwing %s',
-    (_name, source) => {
+    (_name, source, expected = '[true,1]') => {
       const dir = project(
         {
           'bad.ts': header + source,
-          'app.ts': `import {heapStats, log} from '@arv/threads';
+          'app.ts': `import {collectCycles, heapStats, log} from '@arv/threads';
         export async function main() {
           const before = heapStats();
           let failed = false;
           try { await import('./bad.js'); } catch { failed = true; }
+          collectCycles();
           const after = heapStats();
           log(JSON.stringify([failed,
             after.allocated - before.allocated - (after.freed - before.freed)]));
@@ -1100,7 +1254,7 @@ describe('receiver cleanup during module initialization', () => {
       expect(run.status, run.stdout + run.stderr).toBe(0);
       // The module's replacement binding owns one block for its lifetime;
       // only the receiver temporary of the failed expression must be freed.
-      expect(run.stdout.trim(), run.stderr).toBe('[true,1]');
+      expect(run.stdout.trim(), run.stderr).toBe(expected);
     },
     60_000,
   );
@@ -1109,7 +1263,7 @@ describe('receiver cleanup during module initialization', () => {
     const dir = project(
       {
         'app.ts':
-          header.replace('{f64, struct}', '{f64, log, struct}') +
+          header.replace('{f64, ref, struct}', '{f64, log, ref, struct}') +
           `
         export const events: number[] = [];
         Promise.resolve().then(() => events.push(2));
