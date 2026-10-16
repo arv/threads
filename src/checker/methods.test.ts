@@ -92,6 +92,56 @@ function run(
 }
 
 describe('struct methods', () => {
+  it.each([false, true])(
+    'adapts literal __proto__ methods with shared arguments and results when erased=%s',
+    erased => {
+      const {output} = run(
+        {
+          'main.ts': `import {struct, f64, log, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64, constructor() { this.value = 7; }}, 'proto/Leaf'); type Leaf = Struct<typeof Leaf>;
+const Factory = struct({__proto__(leaf: Leaf): Leaf { return leaf; }}, 'proto/Factory');
+export function main() {
+  const factory = new Factory(), leaf = new Leaf(), {__proto__: identity} = factory;
+  log(factory.__proto__(leaf).value, identity.call(factory, leaf).value);
+}
+`,
+        },
+        erased,
+      );
+      expect(output.trim()).toBe('7 7');
+    },
+  );
+
+  it.each([false, true])(
+    'adapts immediate and promised shared union results across modules when behavior erased=%s',
+    erased => {
+      const {output} = run(
+        {
+          'behavior.ts': `import {struct, f64, type Struct} from '@arv/threads';
+const Leaf = struct({value: f64, constructor() { this.value = 7; }}, 'union-result/Leaf'); type Leaf = Struct<typeof Leaf>;
+async function create(): Promise<Leaf> { return new Leaf(); }
+export const Factory = struct({maybe(flag: boolean): Leaf | Promise<Leaf> { return flag ? new Leaf() : create(); }}, 'union-result/Factory');
+`,
+          'main.ts': `import {log} from '@arv/threads'; import {Factory} from './behavior.ts';
+async function boxed(value: unknown) {
+  const factory = value as {maybe(flag: boolean): unknown};
+  log((factory.maybe(true) as {value: number}).value, ((await factory.maybe(false)) as {value: number}).value);
+}
+export async function main() {
+  const factory = new Factory(), {maybe} = factory;
+  const direct = factory.maybe(true), extracted = maybe.call(factory, true);
+  log('value' in direct ? direct.value : -1, 'value' in extracted ? extracted.value : -1);
+  log((await factory.maybe(false)).value, (await maybe.call(factory, false)).value);
+  await boxed(factory);
+}
+`,
+        },
+        erased ? new Set(['behavior.ts']) : false,
+      );
+      expect(output.trim()).toBe('7 7\n7 7\n7 7');
+    },
+  );
+
   it.each(['read', 'make'])(
     'diagnoses structural views whose %s method uses shared references',
     kind => {

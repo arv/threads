@@ -2112,7 +2112,13 @@ class Lowering {
             end: method.parameters.pos,
             ir: raw(self + (method.parameters.length ? ', ' : '')),
           });
-        let key: Ir = str(method.name.text ?? '');
+        // Computed keys keep __proto__ an own metadata entry instead of
+        // changing the metadata object's prototype.
+        let key: Ir = gen(Prec.Primary, [
+          '[',
+          str(method.name.text ?? ''),
+          ']',
+        ]);
         if (
           method.name.kind === K.ComputedPropertyName ||
           method.name.kind === K.NumericLiteral
