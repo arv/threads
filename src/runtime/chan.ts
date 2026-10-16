@@ -324,12 +324,12 @@ export class Channel {
   // recvOk tells the two apart
   recv() {
     const v = receive(this.$cell >> 2, undefined, undefined, this.$raw);
-    return v === DONE ? undefined : v;
+    return v === DONE ? (this.$raw ? 0 : undefined) : v;
   }
   // the same in an async function: waits without blocking its worker
   async recvAsync() {
     const v = await receiveAsync(this.$cell >> 2, this.$raw);
-    return v === DONE ? undefined : v;
+    return v === DONE ? (this.$raw ? 0 : undefined) : v;
   }
   // Go's `v, ok := <-ch`: [the next value, true], or [undefined, false] once
   // the channel is closed and empty
@@ -340,12 +340,12 @@ export class Channel {
       'await recvOkAsync()',
       this.$raw,
     );
-    return v === DONE ? [undefined, false] : [v, true];
+    return v === DONE ? [this.$raw ? 0 : undefined, false] : [v, true];
   }
   // the same in an async function: waits without blocking its worker
   async recvOkAsync(): Promise<[unknown, boolean]> {
     const v = await receiveAsync(this.$cell >> 2, this.$raw);
-    return v === DONE ? [undefined, false] : [v, true];
+    return v === DONE ? [this.$raw ? 0 : undefined, false] : [v, true];
   }
   // without waiting: the next value, EMPTY, or DONE
   poll() {

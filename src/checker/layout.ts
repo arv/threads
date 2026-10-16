@@ -1024,10 +1024,14 @@ function computeConversion(c: Own, node: Node): void {
           const mapLookup =
             (container === 'SharedMap' || container === 'SharedSet') &&
             ['get', 'has', 'delete'].includes(decl?.name?.text);
-          const mapNullish =
-            (container === 'SharedMap' || container === 'SharedSet') &&
+          const nativeNullish =
+            (container === 'SharedMap' ||
+              container === 'SharedSet' ||
+              ((container === 'Channel' || container === 'ChannelCell') &&
+                (decl?.name?.text === 'send' ||
+                  decl?.name?.text === 'sendAsync'))) &&
             nonNullishMembers(c, host.typeOf(arg)).length === 0;
-          if (mapLookup || mapNullish) setTarget(c, arg, false);
+          if (mapLookup || nativeNullish) setTarget(c, arg, false);
           else if (
             param &&
             (runtimeMethod ||

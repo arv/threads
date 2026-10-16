@@ -12,6 +12,71 @@ import {
   ref,
 } from '@arv/threads';
 
+function escapedValueOf(): unknown {
+  const ch = new Channel<number>(1);
+  ch.send(7);
+  ch.close();
+  return ch.valueOf();
+}
+function inheritedReceiver(): boolean {
+  const value = escapedValueOf();
+  const recycled = new Channel<number>(1);
+  recycled.send(99);
+  recycled.close();
+  return value instanceof Channel && value.recv() === 7;
+}
+function boxedReceiver(source: Channel<Lock> | number): boolean {
+  if (!(source instanceof Channel)) return false;
+  const value = source.recv()!;
+  {
+    using _ = value.hold();
+  }
+  return value instanceof Lock;
+}
+function boxedLoop(source: Channel<Lock> | number): boolean {
+  if (!(source instanceof Channel)) return false;
+  for (const value of source) {
+    using _ = value.hold();
+    return value instanceof Lock;
+  }
+  return false;
+}
+function boxedReceivers(): boolean {
+  const a = new Channel<Lock>(1),
+    b = new Channel<Lock>(1);
+  a.send(new Lock());
+  b.send(new Lock());
+  a.close();
+  b.close();
+  return boxedReceiver(a) && boxedLoop(b);
+}
+function nullSends(): boolean {
+  const ch = new Channel<Lock | null | undefined>(2);
+  ch.send(null);
+  ch.send(void 0);
+  const widened: Channel<unknown> = ch;
+  return widened.recv() === null && widened.recv() === void 0;
+}
+async function asyncNullSends(): Promise<boolean> {
+  const ch = new Channel<Lock | null | undefined>(2);
+  await ch.sendAsync(null);
+  await ch.sendAsync(void 0);
+  const widened: Channel<unknown> = ch;
+  return (
+    (await widened.recvAsync()) === null &&
+    (await widened.recvAsync()) === void 0
+  );
+}
+function closedReceive(): boolean {
+  const ch = new Channel<Lock>();
+  ch.close();
+  return ch.recv() === void 0;
+}
+async function asyncClosedReceive(): Promise<boolean> {
+  const ch = new Channel<Lock>();
+  ch.close();
+  return (await ch.recvAsync()) === void 0;
+}
 function conditionalReceives(flag: boolean): boolean {
   const locks = new Channel<Lock>(1),
     numbers = new Channel<number>(1);
@@ -330,6 +395,36 @@ export function allocatingStore(root: Node): void {
 }
 export async function main() {
   const results: Record<string, unknown> = {};
+  try {
+    results.inheritedReceiver = inheritedReceiver();
+  } catch (e) {
+    results.inheritedReceiver = String(e);
+  }
+  try {
+    results.boxedReceivers = boxedReceivers();
+  } catch (e) {
+    results.boxedReceivers = String(e);
+  }
+  try {
+    results.nullSends = nullSends();
+  } catch (e) {
+    results.nullSends = String(e);
+  }
+  try {
+    results.asyncNullSends = await asyncNullSends();
+  } catch (e) {
+    results.asyncNullSends = String(e);
+  }
+  try {
+    results.closedReceive = closedReceive();
+  } catch (e) {
+    results.closedReceive = String(e);
+  }
+  try {
+    results.asyncClosedReceive = await asyncClosedReceive();
+  } catch (e) {
+    results.asyncClosedReceive = String(e);
+  }
   try {
     results.nullishMapEntries = nullishMapEntries();
   } catch (e) {

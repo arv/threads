@@ -55,6 +55,8 @@ import {
   isTypeNode,
   K,
   NodeFlags,
+  OEK,
+  skipOuterExpressions,
   skipParentheses,
 } from './syntax.ts';
 import type {Node} from './syntax.ts';
@@ -583,8 +585,68 @@ export function checkRefCounts(c: Own, file: SourceFile): void {
       }
     }
   };
+  const runtimeClasses = new Set([
+    'Channel',
+    'ChannelCell',
+    'Lock',
+    'Condition',
+    'SharedMap',
+    'SharedSet',
+  ]);
   const visit = (node: Node): boolean => {
     if (isTypeNode(node)) return false;
+    if (
+      isAccessExpression(node) ||
+      (node.kind === K.Identifier && isOwnReferencePosition(node))
+    ) {
+      const signature = host.callSignatures(host.typeOf(node))[0];
+      const handle = signature?.declaration;
+      const method =
+        handle && c.isRuntimePath(handle.path)
+          ? host.declarationOf(handle)
+          : undefined;
+      const owner = (method?.parent as Node | undefined)?.name?.text;
+      if (runtimeClasses.has(owner)) {
+        let callee = node;
+        while (
+          callee.parent &&
+          skipOuterExpressions(callee.parent as Node, OEK.All) ===
+            skipOuterExpressions(callee, OEK.All)
+        )
+          callee = callee.parent as Node;
+        const invocation = callee.parent as Node | undefined;
+        const name = `${owner}.${method?.name?.text ?? 'iterator'}`;
+        if (
+          invocation?.kind !== K.CallExpression ||
+          invocation.expression !== callee
+        ) {
+          c.error(node, Messages.IndirectRuntimeMethod, name);
+        } else if (
+          method?.name?.text === 'forEach' ||
+          method?.name?.text === 'getOrInsertComputed'
+        ) {
+          const callback =
+            invocation.arguments[method.name.text === 'forEach' ? 0 : 1];
+          const signatures = callback
+            ? host.callSignatures(host.typeOf(callback))
+            : [];
+          const needsAdaptation = signatures.some(
+            signature =>
+              signature.parameters.some((_parameter, index) =>
+                isCellType(c, host.parameterTypeAt(signature, index)),
+              ) ||
+              isCellType(
+                c,
+                host.awaitedType(
+                  host.checker.getReturnTypeOfSignature(signature),
+                ),
+              ),
+          );
+          if (signatures.length > 1 && needsAdaptation)
+            c.error(callback, Messages.OverloadedRuntimeCallback, name);
+        }
+      }
+    }
     switch (node.kind) {
       case K.Identifier:
         if (getAssignmentTarget(node)) {

@@ -727,126 +727,165 @@ class Lowering {
     return embedded(ir);
   }
 
+  // Native receivers can be raw addresses or handles narrowed from a wider type.
+  // A view of a handle keeps that handle alive; inherited methods use the handle.
+  private runtimeReceiver(node: Node, rawReceiver: boolean): Ir | undefined {
+    // setTarget distributes a receiver's conversion through parentheses,
+    // conditional branches and logical/comma expressions. Find its use.
+    let receiver = node;
+    for (;;) {
+      const parent = receiver.parent as Node | undefined;
+      if (
+        (parent?.kind === K.ParenthesizedExpression &&
+          parent.expression === receiver) ||
+        (parent?.kind === K.ConditionalExpression &&
+          parent.condition !== receiver) ||
+        (parent?.kind === K.BinaryExpression &&
+          [
+            K.BarBarToken,
+            K.AmpersandAmpersandToken,
+            K.QuestionQuestionToken,
+            K.CommaToken,
+          ].includes(parent.operatorToken.kind))
+      )
+        receiver = parent!;
+      else break;
+    }
+    const access = receiver.parent as Node | undefined;
+    let callee = access;
+    while (
+      callee?.parent &&
+      skipOuterExpressions(callee.parent as Node, OEK.All) ===
+        skipOuterExpressions(callee, OEK.All)
+    )
+      callee = callee.parent as Node;
+    const invocation = callee?.parent as Node | undefined;
+    const methodHandle =
+      invocation?.kind === K.CallExpression
+        ? this.r.c.host.signatureOf(invocation).declaration
+        : undefined;
+    const method =
+      methodHandle && this.r.c.isRuntimePath(methodHandle.path)
+        ? this.r.c.host.declarationOf(methodHandle)
+        : undefined;
+    const cellMethod =
+      method &&
+      ['Channel', 'ChannelCell', 'Lock', 'Condition'].includes(
+        (method.parent as Node | undefined)?.name?.text,
+      );
+    const type = this.r.c.host.typeOf(node);
+    const receiverType = this.r.c.host.typeOf(receiver);
+    if (
+      isRuntimeCellType(this.r.c, type) &&
+      access?.kind === K.CallExpression
+    ) {
+      const handle = this.r.c.host.signatureOf(access).declaration;
+      const decl =
+        handle && this.r.c.isRuntimePath(handle.path)
+          ? this.r.c.host.declarationOf(handle)
+          : undefined;
+      if (
+        decl?.name &&
+        ['select', 'selectAsync', 'wait', 'waitAsync'].includes(decl.name.text)
+      ) {
+        let value = this.visitValue(
+          node,
+          rawReceiver ? Ctx.Argument : Ctx.AtOnce,
+        );
+        const id = skipParentheses(node);
+        const index = access.arguments.indexOf(receiver);
+        if (
+          rawReceiver &&
+          id.kind === K.Identifier &&
+          access.arguments
+            .slice(index + 1)
+            .some((n: Node) => this.r.assignsIn(n, id))
+        )
+          value = this.temporary(this.call('__retain', value));
+        return this.call('__cellView', value);
+      }
+    }
+    if (
+      isRuntimeCellType(this.r.c, type) &&
+      access?.kind === K.ForOfStatement &&
+      access.expression === receiver
+    )
+      return this.call(
+        '__cellView',
+        this.visitValue(node, Ctx.AtOnce),
+        raw('true'),
+        raw(String(hasCountedChannelElements(this.r.c, receiverType))),
+      );
+    if (
+      isRuntimeCellType(this.r.c, this.r.c.host.typeOf(node)) &&
+      (access?.kind === K.PropertyAccessExpression ||
+        access?.kind === K.ElementAccessExpression) &&
+      access.expression === receiver &&
+      invocation?.kind === K.CallExpression &&
+      invocation.expression === callee &&
+      cellMethod
+    ) {
+      // The view holds no count. Stabilize a field borrow before evaluating
+      // the method's key or arguments; one may pass a quiescent point or
+      // replace the local that supplied the receiver.
+      let value = this.visitValue(
+        node,
+        rawReceiver ? Ctx.Argument : Ctx.AtOnce,
+      );
+      const id = skipParentheses(node);
+      if (
+        rawReceiver &&
+        id.kind === K.Identifier &&
+        [
+          ...(access.kind === K.ElementAccessExpression
+            ? [access.argumentExpression]
+            : []),
+          ...invocation.arguments,
+        ].some(n => this.r.assignsIn(n, id))
+      )
+        value = this.temporary(this.call('__retain', value));
+      // Computed keys can produce an escaping iterator. Its receiver must
+      // own a handle before the generator's first next().
+      return this.call(
+        '__cellView',
+        value,
+        raw(String(access.kind === K.ElementAccessExpression)),
+        raw(
+          String(
+            isCellType(
+              this.r.c,
+              this.r.c.host.awaitedType(this.r.c.host.typeOf(invocation)),
+            ) ||
+              (hasCountedChannelElements(this.r.c, receiverType) &&
+                ['recv', 'recvAsync', 'recvOk', 'recvOkAsync'].includes(
+                  this.r.c.host.declarationOf(
+                    this.r.c.host.signatureOf(invocation).declaration,
+                  )?.name?.text,
+                )),
+          ),
+        ),
+      );
+    }
+    return undefined;
+  }
+
   // Visits an expression, applying its box, unbox or null conversion.
   private visitExpression(node: Node, ctx: Ctx): Ir {
-    switch (this.r.conversion(node)) {
+    const conversion = this.r.conversion(node);
+    if (
+      (conversion === Conversion.Box ||
+        (conversion === Conversion.None &&
+          this.r.rawCount(node) === Count.None)) &&
+      isRuntimeCellType(this.r.c, this.r.c.host.typeOf(node))
+    ) {
+      const receiver = this.runtimeReceiver(
+        node,
+        conversion === Conversion.Box,
+      );
+      if (receiver) return receiver;
+    }
+    switch (conversion) {
       case Conversion.Box: {
-        // setTarget distributes a receiver's conversion through parentheses,
-        // conditional branches and logical/comma expressions. Find its use.
-        let receiver = node;
-        for (;;) {
-          const parent = receiver.parent as Node | undefined;
-          if (
-            (parent?.kind === K.ParenthesizedExpression &&
-              parent.expression === receiver) ||
-            (parent?.kind === K.ConditionalExpression &&
-              parent.condition !== receiver) ||
-            (parent?.kind === K.BinaryExpression &&
-              [
-                K.BarBarToken,
-                K.AmpersandAmpersandToken,
-                K.QuestionQuestionToken,
-                K.CommaToken,
-              ].includes(parent.operatorToken.kind))
-          )
-            receiver = parent!;
-          else break;
-        }
-        const access = receiver.parent as Node | undefined;
-        let callee = access;
-        while (
-          callee?.parent &&
-          skipOuterExpressions(callee.parent as Node, OEK.All) ===
-            skipOuterExpressions(callee, OEK.All)
-        )
-          callee = callee.parent as Node;
-        const invocation = callee?.parent as Node | undefined;
-        const type = this.r.c.host.typeOf(node);
-        const receiverType = this.r.c.host.typeOf(receiver);
-        if (
-          isRuntimeCellType(this.r.c, type) &&
-          access?.kind === K.CallExpression
-        ) {
-          const handle = this.r.c.host.signatureOf(access).declaration;
-          const decl =
-            handle && this.r.c.isRuntimePath(handle.path)
-              ? this.r.c.host.declarationOf(handle)
-              : undefined;
-          if (
-            decl?.name &&
-            ['select', 'selectAsync', 'wait', 'waitAsync'].includes(
-              decl.name.text,
-            )
-          ) {
-            let value = this.visitValue(node, Ctx.Argument);
-            const id = skipParentheses(node);
-            const index = access.arguments.indexOf(receiver);
-            if (
-              id.kind === K.Identifier &&
-              access.arguments
-                .slice(index + 1)
-                .some((n: Node) => this.r.assignsIn(n, id))
-            )
-              value = this.temporary(this.call('__retain', value));
-            return this.call('__cellView', value);
-          }
-        }
-        if (
-          isRuntimeCellType(this.r.c, type) &&
-          access?.kind === K.ForOfStatement &&
-          access.expression === receiver
-        )
-          return this.call(
-            '__cellView',
-            this.visitValue(node, Ctx.AtOnce),
-            raw('true'),
-            raw(String(hasCountedChannelElements(this.r.c, receiverType))),
-          );
-        if (
-          isRuntimeCellType(this.r.c, this.r.c.host.typeOf(node)) &&
-          (access?.kind === K.PropertyAccessExpression ||
-            access?.kind === K.ElementAccessExpression) &&
-          access.expression === receiver &&
-          invocation?.kind === K.CallExpression &&
-          invocation.expression === callee
-        ) {
-          // The view holds no count. Stabilize a field borrow before evaluating
-          // the method's key or arguments; one may pass a quiescent point or
-          // replace the local that supplied the receiver.
-          let value = this.visitValue(node, Ctx.Argument);
-          const id = skipParentheses(node);
-          if (
-            id.kind === K.Identifier &&
-            [
-              ...(access.kind === K.ElementAccessExpression
-                ? [access.argumentExpression]
-                : []),
-              ...invocation.arguments,
-            ].some(n => this.r.assignsIn(n, id))
-          )
-            value = this.temporary(this.call('__retain', value));
-          // Computed keys can produce an escaping iterator. Its receiver must
-          // own a handle before the generator's first next().
-          return this.call(
-            '__cellView',
-            value,
-            raw(String(access.kind === K.ElementAccessExpression)),
-            raw(
-              String(
-                isCellType(
-                  this.r.c,
-                  this.r.c.host.awaitedType(this.r.c.host.typeOf(invocation)),
-                ) ||
-                  (hasCountedChannelElements(this.r.c, receiverType) &&
-                    ['recv', 'recvAsync', 'recvOk', 'recvOkAsync'].includes(
-                      this.r.c.host.declarationOf(
-                        this.r.c.host.signatureOf(invocation).declaration,
-                      )?.name?.text,
-                    )),
-              ),
-            ),
-          );
-        }
         return this.call('__box', this.visitValue(node, Ctx.AtOnce));
       }
       case Conversion.Unbox: {
@@ -1863,9 +1902,10 @@ class Lowering {
         ) {
           const callbackIndex = decl.name.text === 'forEach' ? 0 : 1;
           const callbackArgument = args[callbackIndex];
-          const callback = this.r.c.host.callSignatures(
+          const signatures = this.r.c.host.callSignatures(
             this.r.c.host.typeOf(node.arguments[callbackIndex]),
-          )[0];
+          );
+          const callback = signatures.length === 1 ? signatures[0] : undefined;
           if (callback && callbackArgument?.[1]) {
             const mask = callback.parameters.reduce(
               (mask, _parameter, index) =>

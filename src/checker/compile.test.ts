@@ -327,6 +327,12 @@ describe('what the lowering moves, as it runs', () => {
     );
     expect(run.status, run.stderr).toBe(0);
     expect(JSON.parse(run.stdout.trim())).toEqual({
+      inheritedReceiver: true,
+      boxedReceivers: true,
+      nullSends: true,
+      asyncNullSends: true,
+      closedReceive: true,
+      asyncClosedReceive: true,
       nullishMapEntries: true,
       keyLookups: true,
       computedKeyCallback: true,

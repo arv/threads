@@ -58,6 +58,33 @@ function checkProgram(files: Record<string, string[]>): string[] {
 }
 
 describe('threads-check', () => {
+  it('reports native method forwarding and overloaded callbacks instead of emitting incompatible representations', () => {
+    const diagnostics = checkProgram({
+      'callbacks.ts': [
+        'import {Channel, Lock, SharedMap, SharedSet} from "threads";',
+        'function indirect(map: SharedMap<string, Lock>) {',
+        '  map.forEach.call(map, (value: Lock) => { using held = value.hold(); });',
+        '  map.forEach.apply(map, [(value: Lock) => { using held = value.hold(); }]);',
+        '  return map.forEach.bind(map);',
+        '}',
+        'function visitor(value: Lock): void;',
+        'function visitor(value: number): void;',
+        'function visitor(value: unknown): void {}',
+        'function overloaded(set: SharedSet<number>) { set.forEach(visitor); }',
+        'function receiver(ch: Channel<Lock>) { return ch.recv.bind(ch); }',
+      ],
+    });
+    expect(diagnostics.map(d => d.match(/TS\d+/)?.[0])).toEqual([
+      'TS96040',
+      'TS96040',
+      'TS96040',
+      'TS96041',
+      'TS96040',
+    ]);
+    expect(diagnostics[0]).toContain('SharedMap.forEach');
+    expect(diagnostics[3]).toContain('single signature');
+  });
+
   it('reports every unsupported counting escape for built-in cells and immutable shared values', () => {
     for (const type of [
       'Channel<number>',

@@ -141,6 +141,14 @@ export const Messages = {
     code: 96038,
     text: "Field '{0}' is marked with a value whose kind the checker cannot tell: a Field of a number may be an f64, an i32 or a u8. Mark it with one of them, or with a const that holds one.",
   },
+  IndirectRuntimeMethod: {
+    code: 96040,
+    text: "'{0}' must be called directly: indirect runtime methods cannot adapt counted arguments, callbacks and results.",
+  },
+  OverloadedRuntimeCallback: {
+    code: 96041,
+    text: "An overloaded callback cannot be passed to '{0}': counted callback adaptation requires a single signature.",
+  },
   CommonJSInput: {
     code: 96039,
     text: "'{0}' is a CommonJS module: threads-check compiles ES modules only.",

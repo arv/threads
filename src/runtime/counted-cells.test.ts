@@ -20,6 +20,30 @@ const condition = (p: number) =>
 const field = (p: number) => (p >> 2) + 2;
 
 describe('counted built-in cells', () => {
+  it('keeps an existing handle alive when adapting an already-boxed receiver', () => {
+    const handle = new T.Channel(1);
+    const view = own.cellView(handle, false, true) as InstanceType<
+      typeof T.Channel
+    > & {$handle: unknown};
+    expect(view.$handle).toBe(handle);
+    expect(view.$cell).toBe(handle.$cell);
+  });
+
+  it('uses zero for closed raw receives and undefined for closed native receives', async () => {
+    const p = own.newCell(T.Channel, 1);
+    channel(p).close();
+    expect(channel(p).recv()).toBe(0);
+    expect(await channel(p).recvAsync()).toBe(0);
+    expect(channel(p).recvOk()).toEqual([0, false]);
+    expect(await channel(p).recvOkAsync()).toEqual([0, false]);
+    const boxed = own.cellView(p, false, false) as InstanceType<
+      typeof T.Channel
+    >;
+    expect(boxed.recv()).toBeUndefined();
+    expect(await boxed.recvAsync()).toBeUndefined();
+    own.release(p);
+  });
+
   it('normalizes native nullish messages only for raw counted receivers', () => {
     const p = own.newCell(T.Channel, 1);
     for (const value of [null, undefined]) {

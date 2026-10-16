@@ -379,6 +379,12 @@ Reference counting here has real limits. Here's what to keep in mind:
     stay.
   - Compiled code counts without handles. Handles are only for `any`, `unknown`
     and uncompiled code.
+- **Native method forwarding.** Invoke runtime cell, map and set methods
+  directly. Taking these methods as values, including forwarding them through
+  `call`, `apply` or `bind`, is rejected (96040): those calls cannot adapt
+  counted arguments, callbacks and results. A native container callback with
+  multiple signatures is rejected when any signature needs counted adaptation
+  (96041); use a callback with one signature.
 - **Exceptions.** `finally` releases owned locals, but owned temporaries in a
   statement that throws leak.
 - **Races are the program's to avoid.** A channel's `send` moves a value, but

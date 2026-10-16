@@ -820,17 +820,19 @@ export function newCell(
 // themselves; escaping iterators keep a handle. Decode raw only when the
 // channel element's static type is represented as a counted address.
 export function cellView(
-  a: number,
+  value: number | CellObject | null,
   keepAlive = false,
   raw = true,
 ): CellObject | null {
+  const source = typeof value === 'number' ? undefined : value;
+  const a = typeof value === 'number' ? value : (value?.$cell ?? 0);
   if (a === 0) return null;
   return Object.assign(Object.create(cellKinds.get(I32[a >> 2])!.prototype), {
     $cell: a,
     $raw: raw,
     // An iterator starts after its iterable expression has been evaluated.
     // Keep a canonical handle alive from then until the iterator is dropped.
-    ...(keepAlive ? {$handle: cell(a)} : {}),
+    ...(keepAlive || source ? {$handle: source ?? cell(a)} : {}),
   });
 }
 
