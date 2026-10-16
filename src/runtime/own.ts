@@ -1034,6 +1034,8 @@ function attachStructMethods(
           release(value);
         }
       };
+      // promiseResult describes the awaited reference. Immediate union
+      // results are already boxed by the compiled body.
       return signature.promiseResult && isThenable(result)
         ? result.then(boxed)
         : signature.result
@@ -1093,6 +1095,8 @@ export function structMethod(
     };
     adapted = (self: number, ...args: unknown[]) => {
       const result = method(self, ...boxStructArguments(args, signature));
+      // The compiler keeps a union containing a promise boxed. Unbox only
+      // its resolved reference, preserving an immediate union value.
       return signature.promiseResult && isThenable(result)
         ? result.then(address)
         : signature.result
@@ -1225,6 +1229,8 @@ export function sharedStruct<T = unknown>(
         this.$cell = a;
         holdFor(this, a);
         cells.set(a, new WeakRef(this));
+        // Release the allocation's initial ownership before user code runs.
+        // The handle's separate count must survive a throw if `this` escaped.
         release(a);
         if (identity) Object.seal(this);
         structInitializers.get(Struct)?.boxed.apply(this, args);

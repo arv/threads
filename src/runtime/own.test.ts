@@ -11,6 +11,53 @@ const move = (v: unknown) => {
 };
 
 describe('struct methods', () => {
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'preserves an escaped failed-constructor handle with compiled=%s and raw caller=%s',
+    (compiled, raw) => {
+      type Value = {value: number; $cell: number};
+      let escaped: Value | undefined;
+      const publish = (value: Value) => {
+        escaped = value;
+      };
+      const Broken = own.sharedStruct<{value: number}>(
+        'FailedConstructorHandle',
+        ['value'],
+        [],
+        '',
+        `tests/failed-constructor-handle/${compiled}/${raw}`,
+        compiled
+          ? {
+              constructor(self: number) {
+                own.F64[(self >> 3) + 1] = 7;
+                publish(own.box(self) as Value);
+                throw new Error('failed');
+              },
+            }
+          : {
+              constructor(this: Value) {
+                this.value = 7;
+                publish(this);
+                throw new Error('failed');
+              },
+            },
+        compiled ? {constructor: {cells: [], result: false}} : undefined,
+      );
+      expect(() => (raw ? own.newStruct(Broken) : new Broken())).toThrow(
+        'failed',
+      );
+      expect(escaped!.value).toBe(7);
+      // Only the live handle's count remains; the allocation's initial
+      // ownership was released with either calling convention.
+      expect(own.I32[(escaped!.$cell >> 2) + 1]).toBe(1);
+      expect(own.box(escaped!.$cell)).toBe(escaped);
+    },
+  );
+
   it.each([false, true])(
     'retains a raw synchronous receiver through reentrant release with throw=%s',
     throws => {

@@ -112,9 +112,14 @@ export function main() {
     },
   );
 
-  it.each([false, true])(
-    'adapts immediate and promised shared union results across modules when behavior erased=%s',
-    erased => {
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'adapts immediate and promised shared union results with behavior erased=%s and caller erased=%s',
+    (erasedBehavior, erasedCaller) => {
       const {output} = run(
         {
           'behavior.ts': `import {struct, f64, type Struct} from '@arv/threads';
@@ -136,7 +141,10 @@ export async function main() {
 }
 `,
         },
-        erased ? new Set(['behavior.ts']) : false,
+        new Set([
+          ...(erasedBehavior ? ['behavior.ts'] : []),
+          ...(erasedCaller ? ['main.ts'] : []),
+        ]),
       );
       expect(output.trim()).toBe('7 7\n7 7\n7 7');
     },

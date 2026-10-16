@@ -174,7 +174,9 @@ which arguments and results need conversion for boxed callers. Constructors
 always use the allocated instance; returned expressions are evaluated and
 discarded. A constructor that throws releases the allocation's initial count.
 References published to shared fields or captured by closures retain their own
-counts. Boxed handles hold their own counts until garbage collection.
+counts. Boxed handles hold their own counts until garbage collection, including
+a handle published by a constructor that later throws. Releasing the initial
+allocation count does not revoke an escaped handle.
 
 An arrow that captures a method's `this` keeps the receiver alive through
 `capture`. A compiled synchronous invocation retains its receiver until it
