@@ -430,9 +430,10 @@ const ready = (chans: Channel[]): [number, unknown, boolean] | null => {
 // once it is done. a change elsewhere in the heap does not wake it, and a
 // change of a channel no select waits on costs nothing more
 export function select(...chans: Channel[]): [number, unknown, boolean] {
-  for (const ch of chans) retain(ch.$cell);
+  const held: number[] = [];
   try {
     $mustNotBlock('select()', 'await selectAsync()');
+    for (const ch of chans) held.push(retain(ch.$cell));
     const first = ready(chans);
     if (first !== null) return first;
     const n = chans.length,
@@ -487,7 +488,7 @@ export function select(...chans: Channel[]): [number, unknown, boolean] {
       $freeBlock(b, bytes);
     }
   } finally {
-    for (const ch of chans) release(ch.$cell);
+    for (const a of held) release(a);
   }
 }
 // the same in an async function: waits without blocking its worker, on the
@@ -495,9 +496,10 @@ export function select(...chans: Channel[]): [number, unknown, boolean] {
 export async function selectAsync(
   ...chans: Channel[]
 ): Promise<[number, unknown, boolean]> {
-  for (const ch of chans) retain(ch.$cell);
+  const held: number[] = [];
   try {
-    const cs = chans.map(ch => ch.$cell >> 2);
+    for (const ch of chans) held.push(retain(ch.$cell));
+    const cs = held.map(a => a >> 2);
     for (;;) {
       // before polling: a change after it wakes the wait
       const seqs = cs.map(c => Atomics.load(I32, c + SEQ));
@@ -511,6 +513,6 @@ export async function selectAsync(
       $resumed();
     }
   } finally {
-    for (const ch of chans) release(ch.$cell);
+    for (const a of held) release(a);
   }
 }

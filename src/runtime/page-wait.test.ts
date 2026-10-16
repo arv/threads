@@ -62,3 +62,19 @@ it("a channel's recvOk refuses there, naming recvOkAsync", async () => {
   );
   expect(await ch.recvOkAsync()).toStrictEqual([1, true]); // left in the channel
 });
+
+it('rejected blocking selects leave channel counts and buffers unchanged', async () => {
+  const a = new T.Channel(1),
+    b = new T.Channel(1);
+  await a.sendAsync('still buffered');
+  const count = (ch: InstanceType<typeof T.Channel>) =>
+    runtime.I32[(ch.$cell >> 2) + 1];
+  const before = [count(a), count(b)];
+  for (let i = 0; i < 20; i++) {
+    expect(() => T.select(a, b)).toThrow(
+      /select\(\) would block the page's main thread/,
+    );
+    expect([count(a), count(b)]).toEqual(before);
+  }
+  expect(await a.recvAsync()).toBe('still buffered');
+});

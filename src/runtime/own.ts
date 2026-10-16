@@ -645,11 +645,44 @@ export function __unmessage<T = unknown>(
 }
 
 // ---- sharing ----
+// A user may store $cell as ordinary data, even with a valid heap address.
+// Only a runtime handle of the corresponding heap kind denotes a cell.
+function sharedCellAddress(v: object): number | undefined {
+  const proto = Object.getPrototypeOf(v);
+  if (proto === Object.prototype || proto === Array.prototype || proto === null)
+    return undefined;
+  const a = (v as MaybeCell)?.$cell;
+  if (
+    typeof a !== 'number' ||
+    !Number.isInteger(a) ||
+    a <= 0 ||
+    a % 8 !== 0 ||
+    a > I32.byteLength - 8
+  )
+    return undefined;
+  const kind = I32[a >> 2];
+  if (kind === K_F64)
+    return v instanceof Float64Array &&
+      v.buffer === SAB &&
+      v.byteOffset === a + 16
+      ? a
+      : undefined;
+  const prototype =
+    kind === K_SHARED_ARRAY
+      ? SharedArray.prototype
+      : cellKinds.get(kind)?.prototype;
+  return counted(kind) &&
+    prototype &&
+    Object.prototype.isPrototypeOf.call(prototype, v)
+    ? a
+    : undefined;
+}
+
 // writes v once and freezes it as it goes (it is shared now, so nobody may
 // change it)
 export function share<T>(v: T) {
   if (v === null || typeof v !== 'object') return v;
-  if (sharedAddr.has(v) || (v as MaybeCell)?.$cell !== undefined) return v;
+  if (sharedAddr.has(v) || sharedCellAddress(v) !== undefined) return v;
   const a = write(v as Sent, null, true);
   rememberShared(a, v);
   release(a); // the copy holds its own count
@@ -661,7 +694,7 @@ export function newShared(v: unknown): number {
   if (v == null) return 0;
   if (typeof v === 'number') return retain(v);
   if (typeof v === 'object') {
-    const address = (v as CellObject).$cell ?? sharedAddr.get(v);
+    const address = sharedAddr.get(v) ?? sharedCellAddress(v);
     if (address !== undefined) return retain(address);
   }
   return write(v as Sent, null, true);

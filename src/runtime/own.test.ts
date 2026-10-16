@@ -65,6 +65,50 @@ describe('moving values', () => {
     expect(() => own.__message(() => {})).toThrow(/cannot send a function/);
   });
 
+  it('shares plain $cell properties as frozen data, including null prototypes and arrays', () => {
+    const cell = new T.Lock();
+    const values = [
+      {$cell: 1, nested: {n: 2}},
+      {$cell: cell.$cell, nested: {n: 3}},
+      Object.assign(Object.create(null), {$cell: 1, nested: {n: 4}}),
+      Object.assign([{n: 5}], {$cell: 1}),
+    ];
+    for (const value of values) {
+      expect(T.share(value)).toBe(value);
+      expect(Object.isFrozen(value)).toBe(true);
+      expect(own.__sharedAddress(value)).toBeDefined();
+      expect(
+        Object.isFrozen(Array.isArray(value) ? value[0] : value.nested),
+      ).toBe(true);
+    }
+    expect(T.share(cell)).toBe(cell);
+    expect(Object.isFrozen(cell)).toBe(false);
+  });
+
+  it('keeps real runtime handles shared without freezing or copying them', () => {
+    const Node = T.struct({value: T.i32}, 'ShareHandle');
+    const handles = [
+      new T.Lock(),
+      new T.Condition(),
+      new T.Channel(1),
+      new T.SharedMap(),
+      new T.SharedSet(),
+      new T.SharedArray(Number, 1),
+      new Node(),
+      own.sharedFloat64Array(1),
+    ];
+    for (const handle of handles) {
+      expect(T.share(handle)).toBe(handle);
+      expect(Object.isFrozen(handle)).toBe(false);
+      expect(own.newShared(handle)).toBe(handle.$cell);
+      own.release(handle.$cell);
+    }
+    const data = T.share({$cell: handles[0].$cell});
+    const address = own.newShared(data);
+    expect(address).toBe(own.__sharedAddress(data));
+    own.release(address);
+  });
+
   it('shares a value frozen, deeply', () => {
     const shared = T.share({a: [1, {b: 2}]});
     expect(Object.isFrozen(shared)).toBe(true);

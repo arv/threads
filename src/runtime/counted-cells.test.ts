@@ -20,6 +20,40 @@ const condition = (p: number) =>
 const field = (p: number) => (p >> 2) + 2;
 
 describe('counted built-in cells', () => {
+  it('releases a partially retained select when a later receiver throws', async () => {
+    const failure = new Error('receiver failed');
+    const bad = Object.create(T.Channel.prototype, {
+      $cell: {
+        get() {
+          throw failure;
+        },
+      },
+    }) as InstanceType<typeof T.Channel>;
+    for (const async of [false, true]) {
+      const p = own.newCell(T.Channel, 1);
+      if (async)
+        await expect(T.selectAsync(channel(p), bad)).rejects.toBe(failure);
+      else expect(() => T.select(channel(p), bad)).toThrow(failure);
+      expect(count(p)).toBe(1);
+      own.release(p);
+      expect(runtime.I32[p >> 2]).toBe(runtime.K_FREE);
+    }
+  });
+
+  it('serializes plain $cell data instead of retaining its numeric value', () => {
+    const p = own.newCell(T.Lock);
+    for (const address of [1, p]) {
+      const value = {$cell: address, nested: {n: 7}};
+      const blob = own.newShared(value);
+      expect(blob).not.toBe(address);
+      expect(own.box(blob)).toEqual({$cell: address, nested: {n: 7}});
+      expect(Object.isFrozen(value.nested)).toBe(true);
+      expect(count(p)).toBe(1);
+      own.release(blob);
+    }
+    own.release(p);
+  });
+
   it('keeps an existing handle alive when adapting an already-boxed receiver', () => {
     const handle = new T.Channel(1);
     const view = own.cellView(handle, false, true) as InstanceType<
