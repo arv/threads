@@ -150,6 +150,12 @@ function computedKeyCallback(): boolean {
   }
   return map.has(key);
 }
+function cellDataMap(): boolean {
+  const map = new SharedMap<string, {$cell: number; nested: {n: number}}>();
+  map.set('data', {$cell: 1, nested: {n: 9}});
+  const value = map.get('data')!;
+  return value.$cell === 1 && value.nested.n === 9;
+}
 function nullishMapEntries(): boolean {
   const map = new SharedMap<Lock | null | undefined, Lock | null | undefined>();
   map.set(null, null);
@@ -395,6 +401,11 @@ export function allocatingStore(root: Node): void {
 }
 export async function main() {
   const results: Record<string, unknown> = {};
+  try {
+    results.cellDataMap = cellDataMap();
+  } catch (e) {
+    results.cellDataMap = String(e);
+  }
   try {
     results.inheritedReceiver = inheritedReceiver();
   } catch (e) {

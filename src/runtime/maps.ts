@@ -37,6 +37,7 @@ import {
   release,
   retain,
   __sharedAddress,
+  __sharedCellAddress,
   share,
   __tracked,
 } from './own.ts';
@@ -165,7 +166,7 @@ function encode(v: unknown, key: boolean, adding: boolean): boolean {
         held = lo === 0 ? 0 : ADOPT;
         return true;
       }
-      const c = (v as {$cell?: number}).$cell;
+      const c = __sharedCellAddress(v);
       if (c !== undefined) {
         lo = c;
         hi = CELL_HI;

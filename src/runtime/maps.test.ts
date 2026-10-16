@@ -21,6 +21,34 @@ const both = (steps: (m: Mapish) => unknown) => {
 };
 
 describe('SharedMap', () => {
+  it('keeps plain $cell data distinct from real handles in values, keys and sets', () => {
+    const cell = new T.Lock(),
+      before = count(cell.$cell);
+    for (const address of [1, cell.$cell]) {
+      const value = {$cell: address, nested: {n: 7}};
+      const equal = {$cell: address, nested: {n: 7}};
+      const map = new T.SharedMap<unknown, unknown>();
+      const set = new T.SharedSet<unknown>();
+      map.set('value', value);
+      map.set(value, 'plain key');
+      set.add(value);
+      expect(map.get('value')).toBe(value);
+      expect([...set]).toEqual([value]);
+      expect(map.get(value)).toBe('plain key');
+      expect(map.has(equal)).toBe(false);
+      expect(set.has(equal)).toBe(false);
+      expect(map.has(cell)).toBe(false);
+      expect(set.has(cell)).toBe(false);
+      expect(Object.isFrozen(value.nested)).toBe(true);
+      expect(count(cell.$cell)).toBe(before);
+      expect(map.delete(value)).toBe(true);
+      expect(set.delete(value)).toBe(true);
+      map.clear();
+      own.__collect();
+      expect(count(cell.$cell)).toBe(before);
+    }
+  });
+
   it('keeps insertion order, as Map does', () => {
     both(m => {
       m.set('c', 1);

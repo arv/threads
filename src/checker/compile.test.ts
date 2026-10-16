@@ -68,6 +68,30 @@ const fn = (name: string) => {
 };
 
 describe('compile', () => {
+  it('leaves primitive share results uncounted, including discarded and returned values', () => {
+    const dir = project({
+      'app.ts': `import {share} from 'threads';
+export function primitive(n: number, text: string, flag: boolean) {
+  share(n);
+  const value = share(n);
+  return [value, share(8), share(text), share(flag), share(null), share(void 0)];
+}
+`,
+    });
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: 'threads',
+      api,
+      check: true,
+    });
+    expect(result.diagnostics).toEqual([]);
+    const code = toJavaScript(
+      result.files.find(f => f.fileName.endsWith('/app.ts'))!,
+    ).code;
+    expect(code).toContain('share(n)');
+    expect(code).toContain('share(8)');
+    expect(code).not.toMatch(/__(?:retain|release|newShared)\(/);
+  });
+
   it('imports the helpers it uses and registers the top-level functions', () => {
     expect(js).toMatch(
       /^import \{ F64 as __F64, I32 as __I32, U8 as __U8, .*capture as __capture, .*register as __register, .*\} from "threads";$/m,
@@ -327,6 +351,7 @@ describe('what the lowering moves, as it runs', () => {
     );
     expect(run.status, run.stderr).toBe(0);
     expect(JSON.parse(run.stdout.trim())).toEqual({
+      cellDataMap: true,
       inheritedReceiver: true,
       boxedReceivers: true,
       nullSends: true,

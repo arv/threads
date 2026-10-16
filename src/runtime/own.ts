@@ -647,7 +647,7 @@ export function __unmessage<T = unknown>(
 // ---- sharing ----
 // A user may store $cell as ordinary data, even with a valid heap address.
 // Only a runtime handle of the corresponding heap kind denotes a cell.
-function sharedCellAddress(v: object): number | undefined {
+export function __sharedCellAddress(v: object): number | undefined {
   const proto = Object.getPrototypeOf(v);
   if (proto === Object.prototype || proto === Array.prototype || proto === null)
     return undefined;
@@ -682,7 +682,7 @@ function sharedCellAddress(v: object): number | undefined {
 // change it)
 export function share<T>(v: T) {
   if (v === null || typeof v !== 'object') return v;
-  if (sharedAddr.has(v) || sharedCellAddress(v) !== undefined) return v;
+  if (sharedAddr.has(v) || __sharedCellAddress(v) !== undefined) return v;
   const a = write(v as Sent, null, true);
   rememberShared(a, v);
   release(a); // the copy holds its own count
@@ -694,7 +694,7 @@ export function newShared(v: unknown): number {
   if (v == null) return 0;
   if (typeof v === 'number') return retain(v);
   if (typeof v === 'object') {
-    const address = sharedAddr.get(v) ?? sharedCellAddress(v);
+    const address = sharedAddr.get(v) ?? __sharedCellAddress(v);
     if (address !== undefined) return retain(address);
   }
   return write(v as Sent, null, true);
@@ -1595,7 +1595,10 @@ export const box: (a: number) => object | null = a =>
 // 0 for null: what a reference or channel field holds
 export function cellAddress(v: MaybeCell) {
   if (v == null) return 0;
-  const a = typeof v === 'object' ? (v.$cell ?? sharedAddr.get(v)) : undefined;
+  const a =
+    typeof v === 'object'
+      ? (sharedAddr.get(v) ?? __sharedCellAddress(v))
+      : undefined;
   if (a === undefined)
     throw new TypeError(
       staysHere(v, 'is not a cell, which a field holds') ??
@@ -1654,9 +1657,10 @@ export class SharedArray<E extends ElementType = ElementType> {
 }
 export function unbox(v: MaybeCell | number) {
   if (v == null || v === 0) return 0;
-  const a = typeof v === 'number' ? v : (v.$cell ?? sharedAddr.get(v));
+  const a =
+    typeof v === 'number' ? v : (sharedAddr.get(v) ?? __sharedCellAddress(v));
   if (a === undefined || !counted(I32[a >> 2]))
-    throw new TypeError('own: not a shared struct or SharedArray');
+    throw new TypeError('own: not a counted shared value');
   return a;
 }
 const isIndex: (key: string | symbol) => boolean = key =>

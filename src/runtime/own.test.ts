@@ -85,6 +85,18 @@ describe('moving values', () => {
     expect(Object.isFrozen(cell)).toBe(false);
   });
 
+  it('unboxes shared $cell data to its blob and stores it in reference fields', () => {
+    const cell = new T.Lock();
+    const value = T.share({$cell: cell.$cell, nested: {n: 9}});
+    const address = own.__sharedAddress(value)!;
+    expect(own.unbox(value)).toBe(address);
+    const Holder = T.struct({value: T.ref<typeof value>()}, 'CellDataHolder');
+    const holder = new Holder();
+    holder.value = value;
+    expect(holder.value).toBe(value);
+    expect(holder.value!.nested.n).toBe(9);
+  });
+
   it('keeps real runtime handles shared without freezing or copying them', () => {
     const Node = T.struct({value: T.i32}, 'ShareHandle');
     const handles = [

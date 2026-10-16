@@ -240,7 +240,8 @@ export class Resolver {
   // it hands over ownership (`Sending<T>`).
   private isCountedCall(call: Node): boolean {
     const c = this.c;
-    if (getCallMarker(c, call) === 'share') return true;
+    if (getCallMarker(c, call) === 'share')
+      return isCellType(c, c.host.typeOf(call));
     let signature = this.signatureDeclaration(call);
     if (!signature) return false;
     if (isAmbientHandle(c, signature.declaration)) {
