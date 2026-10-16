@@ -410,14 +410,6 @@ export class Resolver {
     if (!list || list.kind !== K.VariableDeclarationList) return Local.None;
     const statement = list.parent as Node;
     if (
-      statement.kind === K.ForInStatement ||
-      statement.kind === K.ForOfStatement
-    ) {
-      if (isChannelReceiveLoop(c, statement))
-        return this.ownedLocal(decl, symbol); // owns each received value
-      return Local.Borrowed; // an error (checkRefCounts)
-    }
-    if (
       statement.kind === K.VariableStatement &&
       (statement.parent?.kind === K.SourceFile ||
         statement.parent?.kind === K.ModuleBlock)
@@ -437,6 +429,14 @@ export class Resolver {
           break;
         scope = scope.parent as Node | undefined;
       }
+    }
+    if (
+      statement.kind === K.ForInStatement ||
+      statement.kind === K.ForOfStatement
+    ) {
+      if (isChannelReceiveLoop(c, statement))
+        return this.ownedLocal(decl, symbol); // owns each received value
+      return Local.Borrowed; // an error (checkRefCounts)
     }
     if (!this.isAssigned(symbol)) {
       if (!decl.initializer || this.isBorrowable(decl.initializer))

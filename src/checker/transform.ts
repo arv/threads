@@ -627,8 +627,14 @@ class Lowering {
           node.initializer.kind === K.VariableDeclarationList
             ? (node.initializer.declarations[0] as Node | undefined)
             : undefined;
+        const moduleVar =
+          decl &&
+          this.r.local(decl) === Local.Module &&
+          !(node.initializer.flags & (NodeFlags.Let | NodeFlags.Const));
         const temp =
-          decl && this.hoistedVars.has(decl) ? this.newTemp() : undefined;
+          decl && (this.hoistedVars.has(decl) || moduleVar)
+            ? this.newTemp()
+            : undefined;
         const initializer = temp
           ? gen(Prec.Primary, ['var ', tempRef(temp)])
           : this.visit(node.initializer);
@@ -636,6 +642,10 @@ class Lowering {
         let body = this.visitLoopBody(node.statement, node);
         if (temp)
           body = this.replaceBody(node.statement, body, [
+            // Keep the module binding hoisted even when the channel is empty.
+            ...(moduleVar
+              ? [gen(Prec.Primary, ['\nvar ', this.name(decl!.name), ';'])]
+              : []),
             exprStatement(this.replaceLocal(decl!.name, tempRef(temp), false)),
             ...(this.blockStatements(body, node.statement) ?? [body]),
           ]);
@@ -1361,18 +1371,27 @@ class Lowering {
       return this.lowerPattern(node, name, undefined);
     }
     if (node.initializer) {
-      // ` = init` goes, and the parameter is optional (`p?: T`, stripped
-      // with the types), so that one after it with no default may still
-      // follow an optional one
+      // Remove the initializer that will run in the body. Preserve a
+      // parseable parameter list when a required parameter follows it.
       const before = node.type ?? node.questionToken ?? node.name;
-      const optional = node.questionToken || node.type ? '' : '?';
+      // A default may precede a required parameter, whereas `?` cannot.
+      // Keep a trivial default in that case so the lowered TypeScript parses.
+      const parameters = fn.parameters as Node[];
+      const beforeRequired = parameters
+        .slice(parameters.indexOf(node) + 1)
+        .some(p => !p.initializer && !p.questionToken && !p.dotDotDotToken);
+      const optional = beforeRequired
+        ? ' = void 0'
+        : node.questionToken || node.type
+          ? ''
+          : '?';
       const remove = {
         start: before.end,
         end: node.initializer.end,
         ir: raw(optional),
       };
       const drop = () => {
-        if (node.type && !node.questionToken)
+        if (node.type && !node.questionToken && !beforeRequired)
           edits.push({start: node.name.end, end: node.name.end, ir: raw('?')});
         edits.push(remove);
       };
@@ -1939,7 +1958,12 @@ class Lowering {
       (fn.parameters as Node[] | undefined)?.filter(p =>
         this.prepareQueue(p),
       ) ?? [];
-    if (queued.length) this.parameterQueues.set(fn, queued);
+    if (queued.length) {
+      this.parameterQueues.set(fn, queued);
+      // Defaults that can enqueue a later parameter must run after the
+      // body prologue declares the queues, even without other temporaries.
+      this.movingDefaults.add(fn);
+    }
   }
 
   private queueDeclaration(decl: Node): Ir {

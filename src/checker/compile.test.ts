@@ -368,6 +368,69 @@ describe('what the lowering moves, as it runs', () => {
 describe('counting lowering review regressions', () => {
   const cases = [
     {
+      name: 'preserves the final module channel var and releases overwritten receives',
+      source: `const channel = new Channel<P>(2);
+      const before = heapStats();
+      channel.send(new P()); channel.send(new P()); channel.close();
+      for (var p of channel) p.x = 157;
+      const q = new P(); q.x = 99;
+      const observed = p!.x;
+      p = null!;
+      const after = heapStats();
+      export function main() {
+        log(JSON.stringify([observed,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[157,1]',
+    },
+    {
+      name: 'keeps labels and the initial binding of an empty module channel loop',
+      source: `var p = new P(); p.x = 179;
+      const channel = new Channel<P>(0); channel.close();
+      outer: for (var p of channel) { continue outer; }
+      const q = new P(); q.x = 99;
+      const observed = p.x;
+      export function main() { log(observed); }`,
+      expected: '179',
+    },
+    {
+      name: 'queues a borrowed optional parameter default before retaining its closure',
+      source: `function f(get = () => p!.x, p?: P) { return get; }
+      export function main() {
+        const p = new P(); p.x = 181;
+        const get = f(undefined, p);
+        log(get());
+      }`,
+      expected: '181',
+    },
+    {
+      name: 'moves a default that queues a later borrowed parameter into the body',
+      source: `function f(get = () => p.x, p: P) { return get; }
+      export function main() {
+        const p = new P(); p.x = 163;
+        const get = f(undefined, p);
+        log(get());
+      }`,
+      expected: '163',
+    },
+    {
+      name: 'retains the value returned by a nested assignment before replacing it',
+      source: `function f() {
+        let p = new P(); p.x = 1;
+        p = (p = new P()); p.x = 167;
+        const q = new P(); q.x = 99;
+        return p.x;
+      }
+      export function main() {
+        const before = heapStats();
+        const result = f();
+        const after = heapStats();
+        log(JSON.stringify([result,
+          after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[167,0]',
+    },
+    {
       name: 'sorts copied loop edits in a moved parameter default',
       source: `function f(make = () => {
         for (let get = () => p.x, p = new P(), q = new P();;) {
@@ -935,7 +998,7 @@ describe('counting lowering review regressions', () => {
     ({source, expected}) => {
       const dir = project(
         {
-          'app.ts': `import {f64, heapStats, log, ref, SharedArray, struct, type Struct} from '@arv/threads';
+          'app.ts': `import {Channel, f64, heapStats, log, ref, SharedArray, struct, type Struct} from '@arv/threads';
         const P = struct({x: f64});
         type P = Struct<typeof P>;
         ${source}`,
