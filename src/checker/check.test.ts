@@ -86,6 +86,25 @@ describe('threads-check', () => {
     ]);
   });
 
+  it('rejects forward captures of function var channel receives', () => {
+    expect(
+      checkProgram({
+        'receive.ts': [
+          "import {Channel, f64, struct, type Struct} from 'threads';",
+          'const P = struct({x: f64});',
+          'type P = Struct<typeof P>;',
+          'function f(channel: Channel<P>) {',
+          '  const get = () => p.x;',
+          '  for (var p of channel) { p.x = 277; }',
+          '  return get;',
+          '}',
+        ],
+      }),
+    ).toEqual([
+      expect.stringContaining("error TS96020: 'p' cannot be reassigned"),
+    ]);
+  });
+
   it('refuses a runtime no file imports: a mistyped --runtime', () => {
     expect(() =>
       check(join(cases, 'channels/tsconfig.json'), {runtime: 'thread', api}),
