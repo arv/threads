@@ -210,6 +210,28 @@ describe('compile, where the fork does not', () => {
     expect(fixes).toMatch(/finally \{\n\t\t__release\(p\);\n\t\}\n\}/);
   });
 
+  it('rejects parameter defaults that reference body-only var bindings', () => {
+    const dir = project(
+      {
+        'app.ts': `import {f64, struct} from '@arv/threads';
+      const P = struct({x: f64});
+      function f(get = () => p.x) { var p = new P(); return get; }
+      export {f};`,
+      },
+      {paths: {'@arv/threads': [runtimeTypes]}},
+    );
+    const result = compile(path.join(dir, 'tsconfig.json'), {
+      runtime: '@arv/threads',
+      api,
+      check: true,
+      types: true,
+    });
+    expect(result.typeDiagnostics.map(d => d.code)).toEqual([2552]);
+    expect(result.typeDiagnostics[0]!.message).toContain(
+      "Cannot find name 'p'",
+    );
+  });
+
   it('holds forward captures only after initialization, in locals and defaults', () => {
     expect(fixes).toContain('const get = (_a = () => __F64[(p >> 3) + 1]');
     expect(fixes).toMatch(
@@ -639,6 +661,13 @@ describe('counting lowering review regressions', () => {
         log(JSON.stringify([result, after.allocated - before.allocated - (after.freed - before.freed)]));
       }`,
       expected: '[241,0]',
+    },
+    {
+      name: 'parameter defaults capture the outer binding instead of a body var',
+      source: `const p = new P(); p.x = 269;
+      function f(get = () => p.x) { var p = new P(); p.x = 99; return get; }
+      export function main() { log(f()()); }`,
+      expected: '269',
     },
     {
       name: 'allows a module closure before its counted binding initializes',

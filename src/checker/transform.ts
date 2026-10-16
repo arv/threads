@@ -2068,6 +2068,8 @@ class Lowering {
   }
 
   private prepareParameters(fn: Node): void {
+    // Parameter defaults cannot see body var declarations. Only parameters
+    // need queues here; outer bindings retain their own capture scope.
     const queued =
       (fn.parameters as Node[] | undefined)?.filter(p =>
         this.prepareQueue(p),
