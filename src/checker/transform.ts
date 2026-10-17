@@ -314,7 +314,10 @@ class Lowering {
           ...(ir as Src).edits,
           ...modifiers
             .filter(
-              m => m.kind === K.ExportKeyword || m.kind === K.DefaultKeyword,
+              m =>
+                m.kind === K.ExportKeyword ||
+                m.kind === K.DefaultKeyword ||
+                m.kind === K.AbstractKeyword,
             )
             .map(m => ({start: this.startOf(m), end: m.end, ir: raw('')})),
         ]);
@@ -692,7 +695,9 @@ class Lowering {
               ? [gen(Prec.Primary, ['\nvar ', this.name(decl!.name), ';'])]
               : []),
             exprStatement(this.replaceLocal(decl!.name, tempRef(temp), false)),
-            ...(this.blockStatements(body, node.statement) ?? [body]),
+            // Keep body lexical bindings inside their original block, away
+            // from the hoisted receive binding and its replacement.
+            body,
           ]);
         return this.update(node, [
           [node.initializer, initializer],

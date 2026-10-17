@@ -417,6 +417,34 @@ describe('counting lowering review regressions', () => {
   );
   const cases = [
     {
+      name: 'preserves an abstract class with an awaited computed name',
+      source: `const R = struct({next: ref<P>()});
+      const root = new R(); root.next = new P();
+      export abstract class C {
+        [root.next!.x = ((root.next = new P()), await Promise.resolve(281))]() {}
+      }
+      class D extends C {}
+      export function main() {
+        log(JSON.stringify([C.name, typeof Reflect.get(new D(), 281), root.next!.x]));
+      }`,
+      expected: '["C","function",0]',
+    },
+    {
+      name: 'preserves shadowing in a module channel var loop body',
+      source: `const channel = new Channel<P>(1);
+      const value = new P(); value.x = 283;
+      channel.send(value); channel.close();
+      let observed = 0;
+      outer: for (var p of channel) {
+        let p = new P(); p.x = 293;
+        observed = p.x;
+        continue outer;
+      }
+      const finalValue = p!.x;
+      export function main() { log(JSON.stringify([observed, finalValue])); }`,
+      expected: '[293,283]',
+    },
+    {
       name: 'keeps function var receives alive through iterations and a post-loop read',
       source: `const channel = new Channel<P>(2);
       function f() {
