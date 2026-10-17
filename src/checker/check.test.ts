@@ -58,6 +58,53 @@ function checkProgram(files: Record<string, string[]>): string[] {
 }
 
 describe('threads-check', () => {
+  it('rejects reinitializing a captured counted var, including in a loop', () => {
+    expect(
+      checkProgram({
+        'vars.ts': [
+          "import {f64, struct, type Struct} from 'threads';",
+          'const P = struct({x: f64});',
+          'function loop() {',
+          '  const callbacks: (() => number)[] = [];',
+          '  for (let i = 0; i < 2; i++) {',
+          '    var p = new P();',
+          '    callbacks.push(() => p.x);',
+          '  }',
+          '  return callbacks;',
+          '}',
+          'function redeclared() {',
+          '  var p = new P();',
+          '  const get = () => p.x;',
+          '  var p = new P();',
+          '  return get;',
+          '}',
+        ],
+      }),
+    ).toEqual([
+      expect.stringContaining("error TS96020: 'p' cannot be reassigned"),
+      expect.stringContaining("error TS96020: 'p' cannot be reassigned"),
+    ]);
+  });
+
+  it('rejects forward captures of function var channel receives', () => {
+    expect(
+      checkProgram({
+        'receive.ts': [
+          "import {Channel, f64, struct, type Struct} from 'threads';",
+          'const P = struct({x: f64});',
+          'type P = Struct<typeof P>;',
+          'function f(channel: Channel<P>) {',
+          '  const get = () => p.x;',
+          '  for (var p of channel) { p.x = 277; }',
+          '  return get;',
+          '}',
+        ],
+      }),
+    ).toEqual([
+      expect.stringContaining("error TS96020: 'p' cannot be reassigned"),
+    ]);
+  });
+
   it('refuses a runtime no file imports: a mistyped --runtime', () => {
     expect(() =>
       check(join(cases, 'channels/tsconfig.json'), {runtime: 'thread', api}),

@@ -51,3 +51,40 @@ export class Derived extends ((element = first[((first = second), 0)]), Base) {}
 export function afterOptional(o?: Node, p: Node = new Node(), q: Node = p) {
   return q === p && o === undefined;
 }
+
+// #59: the fork releases this var when the inner block ends. Its owner now
+// starts at function entry and is released on function exit.
+export function functionVar(): number {
+  {
+    // eslint-disable-next-line no-var
+    var p = new Node();
+    p.value = 7;
+  }
+  const q = new Node();
+  return p.value + q.value;
+}
+
+// #59: forward captures wait for the binding to initialize before holding it.
+export function forwardCapture(): () => number {
+  const get = () => p.value;
+  const p = new Node();
+  return get;
+}
+export function forwardParameter(get = () => p.value, p: Node = new Node()) {
+  return get;
+}
+
+// #59: evaluating the address alone does not keep the receiver alive when
+// the right side replaces its last owner. Hold it through the full expression.
+export function assignmentReceiver(p: Node, q: Node): number {
+  p.value = ((p = new Node()), (q = new Node()), 7);
+  return q.value;
+}
+
+// #59: leave let declarations in the for head. Separate owners are visible
+// to the finally without destroying JavaScript's per-iteration environments.
+export function iterationBindings(): number[] {
+  const callbacks: (() => number)[] = [];
+  for (let p = new Node(), i = 0; i < 2; i++) callbacks.push(() => i + p.value);
+  return callbacks.map(f => f());
+}
