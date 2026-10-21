@@ -6,7 +6,7 @@
 // defaults, a closure in a default, a labelled loop, a logical assignment and
 // a class's extends. main logs each result, and how many blocks are still
 // allocated.
-import {f64, heapStats, log, struct, type Struct} from '@arv/threads';
+import {Channel, f64, heapStats, log, struct, type Struct} from '@arv/threads';
 
 const P = struct({x: f64});
 type P = Struct<typeof P>;
@@ -146,6 +146,149 @@ function base(value: unknown) {
 }
 class Extended extends base(new P()) {}
 
+// Issue #59: var is function-scoped, even in a conditional or repeated block.
+function nestedVar(run = true): number {
+  if (run) {
+    // eslint-disable-next-line no-var
+    var p = new P();
+    p.x = 7;
+  }
+  const q = new P();
+  return run ? p!.x + q.x : q.x;
+}
+function loopVar(): number {
+  for (let i = 0; i < 3; i++) {
+    // eslint-disable-next-line no-var
+    var p = new P();
+    p.x = i;
+  }
+  const q = new P();
+  return p!.x + q.x;
+}
+
+function varAlias(): number {
+  // eslint-disable-next-line no-var
+  var p = new P();
+  p.x = 31;
+  const alias = p;
+  {
+    // eslint-disable-next-line no-var
+    var p = new P();
+    p.x = 99;
+  }
+  return alias.x;
+}
+const varChannel = new Channel<P>(2);
+function varReceive(): number {
+  varChannel.send(new P());
+  varChannel.send(new P());
+  varChannel.close();
+  // eslint-disable-next-line no-var
+  for (var p of varChannel) p.x = 37;
+  const q = new P();
+  return p!.x + q.x;
+}
+
+// A forward capture is held after initialization, including parameter defaults.
+function forwardLocal(): () => number {
+  const get = () => p.x;
+  const p = new P();
+  p.x = 11;
+  return get;
+}
+function forwardDefault(get = () => p.x, p: P = new P()): () => number {
+  p.x = 13;
+  return get;
+}
+function forwardList(): () => number {
+  const get = () => p.x,
+    p = new P();
+  p.x = 17;
+  return get;
+}
+function forwardNested(): () => number {
+  const make = () => () => p.x;
+  const p = new P();
+  p.x = 19;
+  return make();
+}
+function forwardHead(): () => number {
+  for (let get = () => p.x, p = new P(); ;) {
+    p.x = 41;
+    return get;
+  }
+}
+
+function forwardHoisted(): () => number {
+  const get = make();
+  const p = new P();
+  p.x = 29;
+  return get;
+  function make() {
+    function inner() {
+      return p.x;
+    }
+    return inner;
+  }
+}
+function invokeLater(make: () => () => number): number {
+  const get = make();
+  const q = new P();
+  q.x = 99;
+  return get() + q.x - 99;
+}
+function forwardLoop(): number[] {
+  const gets: (() => number)[] = [];
+  for (let i = 0; i < 2; i++) {
+    const get = () => p.x;
+    const p = new P();
+    p.x = i + 20;
+    gets.push(get);
+  }
+  return gets.map(get => get());
+}
+
+// The assignment writes the original receiver, whose address must stay live.
+function replaceReceiver(p: P = new P(), q: P = new P()): number {
+  p.x = ((p = new P()), (q = new P()), 7);
+  return q.x;
+}
+function assignmentReceiver(): number {
+  return replaceReceiver();
+}
+
+// An owned for-head must preserve each let binding, and release on every exit.
+function iterationBindings(): number[] {
+  const callbacks: (() => number)[] = [];
+  for (let p = new P(), i = 0; i < 2; i++) callbacks.push(() => i + p.x);
+  return callbacks.map(f => f());
+}
+function iterationAssignment(): number {
+  let result = 0;
+  outer: for (let p = new P(), i = 0; i < 3; i++, p = new P()) {
+    p.x = i + 1;
+    result += p.x;
+    if (i === 1) continue outer;
+  }
+  for (let p = new P(); ;) {
+    p = new P();
+    if (p.x !== 0) return -1;
+    break;
+  }
+  return result;
+}
+function iterationReturn(): P {
+  for (let p = new P(); ;) return p;
+}
+function iterationThrow(): number {
+  try {
+    for (let p = new P(), i = 0; i < 2; p = new P(), fail()) i += 1 + p.x;
+  } catch {
+    return 23;
+  }
+  return 0;
+}
+
 // a result, or the error it throws (the fork's emit throws for some)
 function attempt(f: () => unknown): unknown {
   try {
@@ -169,6 +312,14 @@ export function main() {
   // the closure later() made holds its p until it is collected: the blocks
   // are counted from here. heapStats() counts every worker's blocks, so this
   // runs with no other worker (compile.test.ts)
+  results.push(attempt(() => invokeLater(forwardLocal)));
+  results.push(attempt(() => invokeLater(forwardDefault)));
+  results.push(attempt(() => invokeLater(forwardList)));
+  results.push(attempt(() => invokeLater(forwardNested)));
+  results.push(attempt(() => invokeLater(forwardHoisted)));
+  results.push(attempt(() => invokeLater(forwardHead)));
+  results.push(attempt(forwardLoop));
+  results.push(attempt(iterationBindings));
   const before = heapStats();
   results.push(attempt(() => new C().value));
   results.push(attempt(() => renamedResult().x));
@@ -179,6 +330,15 @@ export function main() {
   results.push(attempt(patternSeen));
   results.push(attempt(labelled));
   results.push(attempt(logical));
+  results.push(attempt(nestedVar));
+  results.push(attempt(() => nestedVar(false)));
+  results.push(attempt(loopVar));
+  results.push(attempt(varAlias));
+  results.push(attempt(varReceive));
+  results.push(attempt(assignmentReceiver));
+  results.push(attempt(iterationAssignment));
+  results.push(attempt(() => iterationReturn().x));
+  results.push(attempt(iterationThrow));
   const after = heapStats();
   log(
     `${JSON.stringify(results)} blocks left ${after.allocated - before.allocated - (after.freed - before.freed)}`,

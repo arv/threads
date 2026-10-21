@@ -82,6 +82,7 @@ import {Count, Local} from './resolver.ts';
 import type {AtomicCall, Resolver, StructCall} from './resolver.ts';
 import {
   forEachChild,
+  getContainingFunction,
   isAssignmentOperator,
   isAssignmentTarget,
   isClassExtends,
@@ -110,6 +111,7 @@ interface Frame {
   released: Temp[];
   zeroed: Temp[]; // those assigned only conditionally: 0 before it
   conditional: number; // the enclosing frame's depth
+  receiverHold?: boolean; // retain acquired to keep an assignment receiver alive
 }
 
 // The runtime's helpers by their names in the emit, in the order the fork's
@@ -193,6 +195,12 @@ class Lowering {
   private readonly options: TransformOptions;
   private frames: (Frame | null)[] = [];
   private conditional = 0;
+  // Receiver holds survive abrupt evaluation until the next catch/finally
+  // boundary. Clear successful holds so these guards can run on either path.
+  private readonly exceptionTemps = new Map<Scope, Set<Temp>>();
+  private readonly moduleSetups = new Map<Node, Ir[]>();
+  private readonly moduleDeclarations = new Map<Node, Ir>();
+  private readonly moduleClasses = new Set<Node>();
   // default values of owned parameters, moved into the body
   private readonly paramInits = new Map<Node, Node>();
   // default values of other parameters that move into the body with them
@@ -220,6 +228,22 @@ class Lowering {
   // the var scopes of the functions being visited, innermost last
   private readonly scopes: Scope[] = [];
   private readonly starts = new Map<Node, number>();
+  // Forward captures wait in the captured binding's lexical scope until it
+  // initializes. null means initialized; closures created later hold at once.
+  private readonly forwardCaptures = new Set<Node>();
+  private readonly captureQueues = new Map<Node, string>();
+  private readonly parameterQueues = new Map<Node, Node[]>();
+  // Owned var bindings belong to the function, including declarations in loops.
+  private readonly functionVars = new Map<Node, Node[]>();
+  private readonly hoistedVars = new Set<Node>();
+  private readonly functionScopedVars = new Set<Node>();
+  private readonly functionQueueVars = new Map<Node, Node[]>();
+  // Loop and switch bindings keep their lexical scope. Separate owners
+  // track their current counts for cleanup outside that scope.
+  private readonly lexicalOwners = new Map<
+    number,
+    {temp: Temp; fn: Node | undefined}
+  >();
 
   constructor(r: Resolver, file: Node, options: TransformOptions) {
     this.r = r;
@@ -232,13 +256,100 @@ class Lowering {
     const file = this.file;
     if (!this.usesRuntime()) return [];
     this.fileIdentifiers = this.identifiers();
+    const findForward = (node: Node): void => {
+      if (isErased(node)) return;
+      // Hoisted declarations can run before any lexical binding initializes,
+      // including a binding textually before the function in a switch clause.
+      if (isFunctionLikeDeclaration(node))
+        for (const decl of this.r.captures(node))
+          if (
+            (node.kind === K.FunctionDeclaration &&
+              decl.kind !== K.Parameter) ||
+            node.pos < decl.end
+          )
+            this.forwardCaptures.add(decl);
+      forEachChild(node, findForward);
+    };
+    findForward(file);
     const fileScope: Scope = {temps: []};
     this.scopes.push(fileScope);
     // the source file's statements, each visited (as VisitEachChild does: no
     // block of its own)
     const edits: Edit[] = [];
     for (const statement of file.statements as Node[]) {
-      const ir = this.visit(statement);
+      const before = new Set(this.exceptionTemps.get(fileScope));
+      let ir = this.visit(statement);
+      const temps = [...(this.exceptionTemps.get(fileScope) ?? [])].filter(
+        t => !before.has(t),
+      );
+      if (statement.kind === K.VariableStatement) {
+        const decls = statement.declarationList.declarations as Node[];
+        if (decls.some(d => this.moduleSetups.has(d))) {
+          // These remain declarations in the same module environment.
+          // Module instantiation creates every binding before evaluation,
+          // so splitting statements preserves later bindings' TDZ.
+          const start = statement.getStart(this.file as any);
+          const prefix = this.text.slice(start, this.startOf(decls[0]!));
+          ir = statements([
+            raw(this.text.slice(statement.pos, start)),
+            ...decls.flatMap(decl => [
+              ...(this.moduleSetups.get(decl) ?? []),
+              gen(Prec.Primary, [
+                '\n',
+                prefix,
+                this.moduleDeclarations.get(decl)!,
+                ';',
+              ]),
+            ]),
+          ]);
+        }
+      } else if (this.moduleClasses.has(statement) && temps.length) {
+        // A suspending computed name uses file-scope temporaries. Guard
+        // construction as an expression, then initialize the original live
+        // module binding after it succeeds, preserving its TDZ and exports.
+        const modifiers = (statement.modifiers as Node[] | undefined) ?? [];
+        const exported = modifiers.some(m => m.kind === K.ExportKeyword);
+        const isDefault = modifiers.some(m => m.kind === K.DefaultKeyword);
+        const expression = this.src(statement, [
+          ...(ir as Src).edits,
+          ...modifiers
+            .filter(
+              m =>
+                m.kind === K.ExportKeyword ||
+                m.kind === K.DefaultKeyword ||
+                m.kind === K.AbstractKeyword,
+            )
+            .map(m => ({start: this.startOf(m), end: m.end, ir: raw('')})),
+        ]);
+        const value = this.newTemp();
+        const construction = statement.name
+          ? paren(copyOf(expression))
+          : gen(Prec.Member, ['({default: ', copyOf(expression), '}).default']);
+        const declaration = statement.name
+          ? gen(Prec.Primary, [
+              `\n${exported && !isDefault ? 'export ' : ''}let `,
+              this.name(statement.name),
+              ' = ',
+              tempRef(value),
+              ';',
+              ...(isDefault
+                ? ['\nexport { ', this.name(statement.name), ' as default };']
+                : []),
+            ])
+          : gen(Prec.Primary, ['\nexport default ', tempRef(value), ';']);
+        ir = statements([
+          ...(this.moduleSetups.get(statement) ?? []),
+          this.guardTemps(
+            [exprStatement(this.assign(tempRef(value), construction))],
+            temps,
+          ),
+          declaration,
+        ]);
+      } else if (this.moduleSetups.has(statement)) {
+        ir = statements([...this.moduleSetups.get(statement)!, ir]);
+      } else if (temps.length) {
+        ir = this.guardTemps([ir], temps);
+      }
       if (!isIdentity(ir, statement)) edits.push(this.editOf(statement, ir));
     }
     this.scopes.pop();
@@ -266,7 +377,7 @@ class Lowering {
       temp: temp => temp.name ?? '_?',
       vars: scope =>
         scope.temps.length > 0
-          ? `\nvar ${scope.temps.map(t => t.name).join(', ')};`
+          ? `\nvar ${scope.temps.map(t => this.tempDeclaration(t)).join(', ')};`
           : '',
     };
     // temporaries are named per scope in the order they were declared
@@ -277,7 +388,7 @@ class Lowering {
     // the file's own temporaries
     const vars =
       fileScope.temps.length > 0
-        ? `var ${fileScope.temps.map(t => t.name).join(', ')};\n`
+        ? `var ${fileScope.temps.map(t => this.tempDeclaration(t)).join(', ')};\n`
         : '';
 
     const functions = this.importsRuntime() ? this.registeredFunctions() : [];
@@ -477,11 +588,11 @@ class Lowering {
   // VisitEachChild: the node with its children visited (in the AtOnce
   // context); types and declarations that are only types are left as they
   // are.
-  private visitEachChild(node: Node): Ir {
+  private visitEachChild(node: Node, visited = new Map<Node, Ir>()): Ir {
     const edits: Edit[] = [];
     forEachChild(node, child => {
       if (isErased(child)) return;
-      const ir = this.visit(child);
+      const ir = visited.get(child) ?? this.visit(child);
       if (!isIdentity(ir, child)) edits.push(this.editOf(child, ir));
     });
     return this.src(node, edits);
@@ -529,14 +640,8 @@ class Lowering {
           [node.elseStatement, elseStatement],
         ]);
       }
-      case K.SwitchStatement: {
-        const expression = this.fullExpression(node.expression, Ctx.AtOnce);
-        const caseBlock = this.visitEachChild(node.caseBlock);
-        return this.update(node, [
-          [node.expression, expression],
-          [node.caseBlock, caseBlock],
-        ]);
-      }
+      case K.SwitchStatement:
+        return this.visitSwitchStatement(node);
       case K.ThrowStatement:
         return this.update(node, [
           [node.expression, this.fullExpression(node.expression, Ctx.AtOnce)],
@@ -566,12 +671,38 @@ class Lowering {
         return this.visitForStatement(node, undefined);
       case K.ForInStatement:
       case K.ForOfStatement: {
-        const initializer = this.visit(node.initializer);
+        const decl =
+          node.initializer.kind === K.VariableDeclarationList
+            ? (node.initializer.declarations[0] as Node | undefined)
+            : undefined;
+        const moduleVar =
+          decl &&
+          this.r.local(decl) === Local.Module &&
+          !(node.initializer.flags & (NodeFlags.Let | NodeFlags.Const));
+        const temp =
+          decl && (this.hoistedVars.has(decl) || moduleVar)
+            ? this.newTemp()
+            : undefined;
+        const initializer = temp
+          ? gen(Prec.Primary, ['var ', tempRef(temp)])
+          : this.visit(node.initializer);
         const expression = this.fullExpression(node.expression, Ctx.AtOnce);
+        let body = this.visitLoopBody(node.statement, node);
+        if (temp)
+          body = this.replaceBody(node.statement, body, [
+            // Keep the module binding hoisted even when the channel is empty.
+            ...(moduleVar
+              ? [gen(Prec.Primary, ['\nvar ', this.name(decl!.name), ';'])]
+              : []),
+            exprStatement(this.replaceLocal(decl!.name, tempRef(temp), false)),
+            // Keep body lexical bindings inside their original block, away
+            // from the hoisted receive binding and its replacement.
+            body,
+          ]);
         return this.update(node, [
           [node.initializer, initializer],
           [node.expression, expression],
-          [node.statement, this.visitLoopBody(node.statement, node)],
+          [node.statement, body],
         ]);
       }
       case K.LabeledStatement: {
@@ -579,10 +710,8 @@ class Lowering {
         // on it
         let loop = node.statement as Node;
         while (loop.kind === K.LabeledStatement) loop = loop.statement;
-        if (
-          loop.kind === K.ForStatement &&
-          this.ownedLocalsOfFor(loop).length > 0
-        )
+        // Borrowed heads can also gain a wrapper for forward captures.
+        if (loop.kind === K.ForStatement)
           return this.visitForStatement(loop, node);
         break;
       }
@@ -591,6 +720,28 @@ class Lowering {
         if (loop && this.r.isQuiescentLoop(loop))
           return statements([this.quiescent(), this.visitEachChild(node)]);
         break;
+      }
+      case K.VariableStatement: {
+        const decls = node.declarationList.declarations as Node[];
+        if (!decls.some(d => this.captureQueues.has(d))) break;
+        // Finish each binding before the next initializer (which may call a
+        // closure capturing it), even in a multi-declaration statement.
+        const keyword =
+          node.declarationList.flags & NodeFlags.Const
+            ? 'const'
+            : node.declarationList.flags & NodeFlags.Let
+              ? 'let'
+              : 'var';
+        return statements(
+          decls.flatMap(decl => [
+            gen(Prec.Primary, [
+              `\n${keyword === 'const' && this.r.local(decl) === Local.OwnedMoved ? 'let' : keyword} `,
+              this.visitVariableDeclaration(decl),
+              ';',
+            ]),
+            ...this.finishCapture(decl),
+          ]),
+        );
       }
       case K.VariableDeclarationList:
         return this.visitVariableDeclarationList(node);
@@ -619,6 +770,11 @@ class Lowering {
           edits.push(this.editOf(node.initializer, initializer));
         return this.src(node, edits);
       }
+      case K.ComputedPropertyName:
+      case K.Decorator:
+        return this.update(node, [
+          [node.expression, this.scopedExpression(node.expression)],
+        ]);
       case K.PropertyDeclaration: {
         const edits: Edit[] = [];
         forEachChild(node, child => {
@@ -637,7 +793,10 @@ class Lowering {
               gen(Prec.Assignment, [
                 '() => {',
                 varsStatement(scope),
-                returnStatement(initializer),
+                ...this.guardReceiverTemps(
+                  [returnStatement(initializer)],
+                  scope,
+                ),
                 '\n}',
               ]),
             ),
@@ -664,12 +823,25 @@ class Lowering {
       case K.ClassStaticBlockDeclaration:
       case K.ClassDeclaration:
       case K.ClassExpression: {
+        // Names and decorators run in the enclosing evaluation, before
+        // entering a method's parameter/body scope.
+        const outer = new Map<Node, Ir>();
+        forEachChild(node, child => {
+          if (
+            child.kind === K.ComputedPropertyName ||
+            child.kind === K.Decorator
+          )
+            outer.set(child, this.visit(child));
+        });
         this.pushFrame(null);
         const scoped =
           isFunctionLikeDeclaration(node) ||
           node.kind === K.ClassStaticBlockDeclaration;
-        if (scoped) this.pushScope();
-        const result = this.visitEachChild(node);
+        if (scoped) {
+          this.pushScope();
+          this.prepareParameters(node);
+        }
+        const result = this.visitEachChild(node, outer);
         if (scoped) this.popScope();
         this.popFrame();
         return result;
@@ -757,7 +929,14 @@ class Lowering {
           return this.visit(node.arguments[0], ctx);
         }
     }
-    const count = this.r.rawCount(node);
+    let count = this.r.rawCount(node);
+    // An outer lexical owner releases its count; a return retains it.
+    if (
+      node.kind === K.Identifier &&
+      this.lexicalOwner(node) &&
+      count === Count.OwnedLocal
+    )
+      count = Count.Stable;
     switch (node.kind) {
       case K.ConditionalExpression:
         return this.visitConditional(node, count, ctx);
@@ -866,11 +1045,12 @@ class Lowering {
 
   // `(_a = E)`, released after the full expression. Without a full expression
   // around (a decorator, a computed property name), E is left uncounted.
-  private temporary(expr: Ir): Ir {
+  private temporary(expr: Ir, receiverHold = false): Ir {
     const frame = this.frames[this.frames.length - 1];
     if (!frame) return expr;
     const temp = this.newTemp();
     frame.released.push(temp);
+    frame.receiverHold ||= receiverHold;
     if (this.conditional > 0) frame.zeroed.push(temp);
     return paren(this.assign(tempRef(temp), expr));
   }
@@ -919,14 +1099,116 @@ class Lowering {
   // are released after it, as `(_r = E, __release(_a), _r)`.
   private fullExpression(node: Node | undefined, ctx: Ctx): Ir | undefined {
     if (!node) return undefined;
+    const scope = this.scopes[this.scopes.length - 1]!;
+    const before =
+      this.scopes.length === 1
+        ? new Set(this.exceptionTemps.get(scope))
+        : undefined;
     const frame = this.pushFrame({released: [], zeroed: [], conditional: 0});
     const result = this.visitIn(node, ctx)!;
     this.popFrame();
-    return this.releaseAfter(result, frame, ctx !== Ctx.Discard);
+    let ir = this.releaseAfter(result, frame, ctx !== Ctx.Discard);
+    // A module declaration must stay at file scope, including its TDZ.
+    // Stage only its initializer in a try/finally, leaving the declaration
+    // where it was. Direct top-level awaits keep their original scheduling.
+    if (this.scopes.length === 1) {
+      let target: Node | undefined;
+      const parent = node.parent as Node;
+      if (
+        parent.kind === K.VariableDeclaration &&
+        parent.initializer === node &&
+        parent.parent?.parent?.kind === K.VariableStatement &&
+        parent.parent.parent.parent?.kind === K.SourceFile
+      )
+        target = parent;
+      else if (
+        parent.kind === K.ExportAssignment &&
+        parent.parent?.kind === K.SourceFile
+      )
+        target = parent;
+      else if (parent.kind === K.ExpressionWithTypeArguments) {
+        const declaration = parent.parent?.parent as Node | undefined;
+        if (
+          declaration?.kind === K.ClassDeclaration &&
+          declaration.parent?.kind === K.SourceFile
+        )
+          target = declaration;
+      }
+      const temps = [...(this.exceptionTemps.get(scope) ?? [])].filter(
+        t => !before!.has(t),
+      );
+      if (target && temps.length) {
+        const value = this.newTemp();
+        const setup = this.guardTemps(
+          [exprStatement(this.assign(tempRef(value), ir))],
+          temps,
+        );
+        const list = this.moduleSetups.get(target) ?? [];
+        list.push(setup);
+        this.moduleSetups.set(target, list);
+        ir = tempRef(value);
+      }
+    }
+    return ir;
+  }
+
+  // A computed name or decorator may have no surrounding expression frame.
+  // Keep its temporaries local to an immediately invoked lexical function,
+  // so both normal completion and exceptions release its receiver holds.
+  private scopedExpression(node: Node): Ir {
+    const suspends = (n: Node): boolean => {
+      if (isFunctionLike(n) || isClassLike(n) || isErased(n)) return false;
+      return (
+        n.kind === K.AwaitExpression ||
+        n.kind === K.YieldExpression ||
+        !!forEachChild(n, suspends)
+      );
+    };
+    if (this.frames[this.frames.length - 1] || suspends(node)) {
+      const scope = this.scopes[this.scopes.length - 1]!;
+      const before = new Set(this.exceptionTemps.get(scope));
+      const result = this.fullExpression(node, Ctx.AtOnce)!;
+      if (
+        this.scopes.length === 1 &&
+        [...(this.exceptionTemps.get(scope) ?? [])].some(t => !before.has(t))
+      ) {
+        for (
+          let parent = node.parent as Node | undefined;
+          parent;
+          parent = parent.parent as Node | undefined
+        ) {
+          if (isClassLike(parent)) {
+            if (
+              parent.kind === K.ClassDeclaration &&
+              parent.parent?.kind === K.SourceFile
+            )
+              this.moduleClasses.add(parent);
+            break;
+          }
+        }
+      }
+      return result;
+    }
+    const scope = this.pushScope();
+    const result = this.fullExpression(node, Ctx.AtOnce)!;
+    this.popScope();
+    if (!scope.temps.length) return result;
+    return call(
+      paren(
+        gen(Prec.Assignment, [
+          '() => {',
+          varsStatement(scope),
+          ...this.guardReceiverTemps([returnStatement(result)], scope),
+          '\n}',
+        ]),
+      ),
+      [],
+    );
   }
 
   private releaseAfter(expr: Ir, frame: Frame, keepValue: boolean): Ir {
     if (frame.released.length === 0) return expr;
+    this.protectReceiverFrame(frame);
     const expressions: Ir[] = [];
     for (const temp of frame.zeroed)
       expressions.push(this.assign(tempRef(temp), num(0)));
@@ -937,10 +1219,63 @@ class Lowering {
     } else {
       expressions.push(expr);
     }
-    for (const temp of frame.released)
+    for (const temp of frame.released) {
       expressions.push(this.call('__release', tempRef(temp)));
+      if (frame.receiverHold)
+        expressions.push(this.assign(tempRef(temp), num(0)));
+    }
     if (result) expressions.push(tempRef(result));
     return paren(comma(expressions));
+  }
+
+  private protectReceiverFrame(frame: Frame): void {
+    if (!frame.receiverHold) return;
+    for (const temp of frame.released) {
+      let temps = this.exceptionTemps.get(temp.scope);
+      if (!temps) this.exceptionTemps.set(temp.scope, (temps = new Set()));
+      temps.add(temp);
+    }
+  }
+
+  private tempDeclaration(temp: Temp): string {
+    return `${temp.name}${this.exceptionTemps.get(temp.scope)?.has(temp) ? ' = 0' : ''}`;
+  }
+
+  private clearTemps(temps: Iterable<Temp>): Ir[] {
+    return [...temps]
+      .reverse()
+      .flatMap(temp => [
+        exprStatement(this.call('__release', tempRef(temp))),
+        exprStatement(this.assign(tempRef(temp), num(0))),
+      ]);
+  }
+
+  private clearReceiverTemps(scope: Scope): Ir[] {
+    return this.clearTemps(this.exceptionTemps.get(scope) ?? []);
+  }
+
+  private guardTemps(list: Ir[], temps: Iterable<Temp>): Ir {
+    return gen(Prec.Primary, [
+      '\ntry {',
+      ...list,
+      '\n} finally {',
+      ...this.clearTemps(temps),
+      '\n}',
+    ]);
+  }
+
+  private guardReceiverTemps(list: Ir[], scope: Scope): Ir[] {
+    const cleanup = this.clearReceiverTemps(scope);
+    if (!cleanup.length) return list;
+    return [
+      gen(Prec.Primary, [
+        '\ntry {',
+        ...list,
+        '\n} finally {',
+        ...cleanup,
+        '\n}',
+      ]),
+    ];
   }
 
   private pushFrame<F extends Frame | null>(frame: F): F {
@@ -958,17 +1293,25 @@ class Lowering {
   // `E;`: an owned result is released; the temporaries are released by
   // statements that follow.
   private visitExpressionStatement(node: Node): Ir {
-    const frame = this.pushFrame({released: [], zeroed: [], conditional: 0});
+    const frame = this.pushFrame<Frame>({
+      released: [],
+      zeroed: [],
+      conditional: 0,
+    });
     const expression = this.visitIn(node.expression, Ctx.Discard);
     this.popFrame();
     const statement = this.update(node, [[node.expression, expression]]);
     if (frame.released.length === 0) return statement;
+    this.protectReceiverFrame(frame);
     const list: Ir[] = [];
     for (const temp of frame.zeroed)
       list.push(exprStatement(this.assign(tempRef(temp), num(0))));
     list.push(statement);
-    for (const temp of frame.released)
+    for (const temp of frame.released) {
       list.push(exprStatement(this.call('__release', tempRef(temp))));
+      if (frame.receiverHold)
+        list.push(exprStatement(this.assign(tempRef(temp), num(0))));
+    }
     return statements(list);
   }
 
@@ -988,22 +1331,66 @@ class Lowering {
       local === Local.Module
         ? Ctx.Take
         : Ctx.AtOnce;
-    const initializer = this.fullExpression(node.initializer, ctx);
+    const moduleVar =
+      local === Local.Module &&
+      !(node.parent!.flags & (NodeFlags.Let | NodeFlags.Const));
+    let initializer = this.fullExpression(node.initializer, ctx);
+    if (initializer && (this.hoistedVars.has(node) || moduleVar))
+      initializer = this.replaceLocal(node.name, initializer, true);
+    const owner = this.lexicalOwner(node.name);
+    if (initializer && owner)
+      initializer = paren(this.assign(tempRef(owner), initializer));
     const name = this.visit(node.name);
     const edits: Edit[] = [];
     if (!isIdentity(name, node.name)) edits.push(this.editOf(node.name, name));
     if (initializer) {
       if (!isIdentity(initializer, node.initializer))
         edits.push(this.editOf(node.initializer, initializer));
-    } else if (local !== Local.None && !inForInOrOf) {
-      edits.push({start: node.end, end: node.end, ir: raw(' = 0')});
+    } else if (
+      local !== Local.None &&
+      !inForInOrOf &&
+      !this.hoistedVars.has(node)
+    ) {
+      edits.push({
+        start: node.end,
+        end: node.end,
+        // A bare var redeclaration is a no-op. Normalize its first
+        // undefined value to the raw null address without dropping a count.
+        ir: moduleVar
+          ? gen(Prec.Primary, [
+              ' = ',
+              binary(this.name(node.name), '??', num(0)),
+            ])
+          : raw(' = 0'),
+      });
     }
-    return this.src(node, edits);
+    const ir = this.src(node, edits);
+    if (node.parent?.parent?.parent?.kind === K.SourceFile)
+      this.moduleDeclarations.set(node, ir);
+    return ir;
   }
 
   // `const` becomes `let` when a return moves an owned local's count out.
   private visitVariableDeclarationList(node: Node): Ir {
     const result = this.visitEachChild(node) as Src;
+    if (node.parent?.kind === K.ForStatement) {
+      for (const decl of node.declarations as Node[]) {
+        const queue = this.captureQueues.get(decl);
+        if (!queue) continue;
+        const fn = this.freshName('__closure');
+        const done = this.freshName('__held');
+        result.edits.push({
+          start: decl.end,
+          end: decl.end,
+          ir: gen(Prec.Primary, [
+            `, ${done} = (${queue}?.forEach(${fn} => `,
+            this.call('__capture', raw(fn), this.name(decl.name)),
+            `), ${queue} = null)`,
+          ]),
+        });
+      }
+    }
+    result.edits.sort((a, b) => a.start - b.start || a.end - b.end);
     if (!(node.flags & NodeFlags.Const)) return result;
     for (const decl of node.declarations as Node[]) {
       if (this.r.local(decl) === Local.OwnedMoved) {
@@ -1040,6 +1427,7 @@ class Lowering {
     const scope = this.scopes[this.scopes.length - 1]!;
     const temps = scope.temps.length,
       scopes = this.allScopes.length;
+    const exceptionTemps = new Set(this.exceptionTemps.get(scope));
     let irs = params.map(p => this.visitParameterOnce(p));
     const first = params.findIndex(
       p =>
@@ -1059,6 +1447,7 @@ class Lowering {
     ) {
       scope.temps.length = temps;
       this.allScopes.length = scopes;
+      this.exceptionTemps.set(scope, exceptionTemps);
       for (const p of params) {
         this.paramInits.delete(p);
         this.movedDefaults.delete(p);
@@ -1101,18 +1490,27 @@ class Lowering {
       return this.lowerPattern(node, name, undefined);
     }
     if (node.initializer) {
-      // ` = init` goes, and the parameter is optional (`p?: T`, stripped
-      // with the types), so that one after it with no default may still
-      // follow an optional one
+      // Remove the initializer that will run in the body. Preserve a
+      // parseable parameter list when a required parameter follows it.
       const before = node.type ?? node.questionToken ?? node.name;
-      const optional = node.questionToken || node.type ? '' : '?';
+      // A default may precede a required parameter, whereas `?` cannot.
+      // Keep a trivial default in that case so the lowered TypeScript parses.
+      const parameters = fn.parameters as Node[];
+      const beforeRequired = parameters
+        .slice(parameters.indexOf(node) + 1)
+        .some(p => !p.initializer && !p.questionToken && !p.dotDotDotToken);
+      const optional = beforeRequired
+        ? ' = void 0'
+        : node.questionToken || node.type
+          ? ''
+          : '?';
       const remove = {
         start: before.end,
         end: node.initializer.end,
         ir: raw(optional),
       };
       const drop = () => {
-        if (node.type && !node.questionToken)
+        if (node.type && !node.questionToken && !beforeRequired)
           edits.push({start: node.name.end, end: node.name.end, ir: raw('?')});
         edits.push(remove);
       };
@@ -1183,10 +1581,18 @@ class Lowering {
   // parameters' names, which the body releases.
   private functionPrologue(fn: Node): PrologueEntry[] {
     const entries: PrologueEntry[] = [];
+    for (const param of this.parameterQueues.get(fn) ?? [])
+      entries.push({ir: this.queueDeclaration(param), mayThrow: false});
     const prologue = {
       push: (ir: Ir, mayThrow = true) => entries.push({ir, mayThrow}),
     };
-    for (const param of fn.parameters as Node[]) {
+    for (const [index, param] of (fn.parameters as Node[]).entries()) {
+      // Delay the preceding parameter's flush until its prologue entry has
+      // acquired a count and guarded() can release it if a later default throws.
+      const previous = index - 1;
+      if (previous >= 0)
+        for (const ir of this.finishCapture(fn.parameters[previous]))
+          prologue.push(ir);
       const name = param.name as Node;
       const moved = this.movedPatterns.get(param);
       if (moved) {
@@ -1255,6 +1661,8 @@ class Lowering {
             );
       }
     }
+    const last = (fn.parameters as Node[]).at(-1);
+    if (last) for (const ir of this.finishCapture(last)) prologue.push(ir);
     return entries;
   }
 
@@ -1290,6 +1698,17 @@ class Lowering {
         parent.kind === K.ClassStaticBlockDeclaration) &&
       parent.body === node;
     const moving = isBody && this.movingDefaults.has(parent!);
+    const vars = isBody ? this.prepareVars(node) : [];
+    const queues: Node[] = [];
+    for (const statement of list) {
+      if (statement.kind !== K.VariableStatement) continue;
+      for (const decl of statement.declarationList.declarations as Node[])
+        if (!this.functionScopedVars.has(decl) && this.prepareQueue(decl))
+          queues.push(decl);
+    }
+    if (isBody)
+      for (const decl of this.functionQueueVars.get(node) ?? [])
+        if (this.prepareQueue(decl)) queues.push(decl);
     if (isBody && isFunctionLikeDeclaration(parent))
       prologue = this.functionPrologue(parent!);
     if (moving) this.renameShadowingVars(parent!, node);
@@ -1305,15 +1724,38 @@ class Lowering {
     // own, so that its declarations neither shadow what they read nor put
     // it in their temporal dead zone
     if (moving && this.bodyShadows(parent!, list)) result = [block(result)];
+    if (vars.length > 0)
+      result = [
+        this.tryFinally(
+          result,
+          vars.map(d => d.name),
+        ),
+      ];
     // the whole body is in the try, its function declarations in place
     // (the fork moves them ahead of it)
     result = this.guarded(prologue, result);
+    const scope = this.scopes[this.scopes.length - 1]!;
+    if (isBody) result = this.guardReceiverTemps(result, scope);
+    else if (
+      parent?.kind === K.CatchClause ||
+      (parent?.kind === K.TryStatement && parent.finallyBlock === node)
+    )
+      result = [...this.clearReceiverTemps(scope), ...result];
     const head: Ir[] = directives.map(d => this.src(d));
     if (isBody) {
       // the function's temporaries, declared once it is visited
       const scope = this.scopes[this.scopes.length - 1]!;
       head.push(varsStatement(scope));
     }
+    head.push(...queues.map(d => this.queueDeclaration(d)));
+    if (vars.length > 0)
+      head.push(
+        gen(Prec.Primary, [
+          '\nvar ',
+          ...vars.flatMap((d, i) => [i ? ', ' : '', this.name(d.name), ' = 0']),
+          ';',
+        ]),
+      );
     result = [...head, ...result];
     return this.withStatements(node, node.statements, result, []);
   }
@@ -1347,8 +1789,10 @@ class Lowering {
   // locals are wrapped in `try { ... } finally { __release(x) }`, and a nested
   // function declaration that captures counted variables is held
   // (`__capture(f, x)`) as soon as they are declared.
-  private visitStatements(list: Node[]): Ir[] {
-    const holds = this.holdStatements(list);
+  private visitStatements(
+    list: Node[],
+    holds = this.holdStatements(list),
+  ): Ir[] {
     if (this.splitsScope(list)) return this.visitStatementsFlat(list, holds);
     interface Level {
       statements: Ir[];
@@ -1461,16 +1905,101 @@ class Lowering {
                 ';',
               ]),
             );
+          statements.push(...this.finishCapture(decl));
         }
       }
       statements.push(...(holds.get(i) ?? []));
     });
-    const declarations = gen(Prec.Primary, [
+    return [this.ownedDeclarations(owned), this.tryFinally(statements, owned)];
+  }
+
+  private ownedDeclarations(owned: Node[]): Ir {
+    return gen(Prec.Primary, [
       '\nlet ',
       ...owned.flatMap((n, i) => [i > 0 ? ', ' : '', this.name(n), ' = 0']),
       ';',
     ]);
-    return [declarations, this.tryFinally(statements, owned)];
+  }
+
+  // All clauses share one lexical scope. Keep their bindings and queues
+  // together, and release initialized owners on every exit from the switch.
+  private visitSwitchStatement(node: Node): Ir {
+    const expression = this.fullExpression(node.expression, Ctx.AtOnce);
+    const clauses = node.caseBlock.clauses as Node[];
+    const queues: Node[] = [];
+    for (const clause of clauses)
+      for (const statement of clause.statements as Node[]) {
+        if (statement.kind !== K.VariableStatement) continue;
+        for (const decl of statement.declarationList.declarations as Node[])
+          if (!this.functionScopedVars.has(decl) && this.prepareQueue(decl))
+            queues.push(decl);
+      }
+    // Function declarations are initialized throughout the CaseBlock,
+    // even when dispatch skips the clause containing their declaration.
+    // Enter their holds before the first case test (or a default-only body).
+    const functions = clauses
+      .flatMap(clause => clause.statements as Node[])
+      .filter(s => s.kind === K.FunctionDeclaration && s.name)
+      .map(fn => ({fn, captures: this.r.captures(fn)}))
+      .filter(({captures}) => captures.length > 0);
+    const held = functions.length ? this.freshName('__held') : undefined;
+    const enter = held
+      ? binary(
+          raw(held),
+          '||',
+          paren(
+            comma([
+              this.assign(raw(held), raw('true')),
+              ...functions.map(({fn, captures}) =>
+                this.holdClosure(this.name(fn.name), captures),
+              ),
+            ]),
+          ),
+        )
+      : undefined;
+    const owned = clauses.flatMap(clause =>
+      (clause.statements as Node[]).flatMap(s => this.ownedLocalsOf(s)),
+    );
+    const owners = owned.map(name => {
+      const temp = this.newTemp();
+      this.lexicalOwners.set(this.symbolId(name), {
+        temp,
+        fn: getContainingFunction(node),
+      });
+      return temp;
+    });
+    const caseBlock = this.update(
+      node.caseBlock,
+      clauses.map(clause => {
+        let value = this.fullExpression(clause.expression, Ctx.AtOnce);
+        if (value && enter) value = paren(comma([enter, value]));
+        const list = clause.statements as Node[];
+        return [
+          clause,
+          this.withStatements(
+            clause,
+            clause.statements,
+            [
+              ...(enter ? [exprStatement(enter)] : []),
+              ...this.visitStatements(list, new Map()),
+            ],
+            value ? [[clause.expression, value]] : [],
+          ),
+        ];
+      }),
+    );
+    for (const name of owned) this.lexicalOwners.delete(this.symbolId(name));
+    const result = this.update(node, [
+      [node.expression, expression],
+      [node.caseBlock, caseBlock],
+    ]);
+    if (!owners.length && !queues.length && !held) return result;
+    return block([
+      ...queues.map(d => this.queueDeclaration(d)),
+      ...(held ? [raw(`\nlet ${held} = false;`)] : []),
+      ...owners.map(t => exprStatement(this.assign(tempRef(t), num(0)))),
+      ...(owners.length ? [this.tryFinallyTemps([result], owners)] : [result]),
+    ]);
   }
 
   // The names of the owned locals a statement declares.
@@ -1483,7 +2012,11 @@ class Lowering {
     const owned: Node[] = [];
     for (const decl of list.declarations as Node[]) {
       const local = this.r.local(decl);
-      if (local === Local.Owned || local === Local.OwnedMoved)
+      if (
+        (local === Local.Owned || local === Local.OwnedMoved) &&
+        !this.hoistedVars.has(decl) &&
+        !this.lexicalOwner(decl.name)
+      )
         owned.push(decl.name);
     }
     return owned;
@@ -1495,6 +2028,13 @@ class Lowering {
   // among the statements.
   private holdStatements(list: Node[]): Map<number, Ir[]> {
     const holds = new Map<number, Ir[]>();
+    const initialized = new Set<Node>(
+      list.flatMap(s =>
+        s.kind === K.VariableStatement
+          ? (s.declarationList.declarations as Node[])
+          : [],
+      ),
+    );
     for (const statement of list) {
       if (statement.kind !== K.FunctionDeclaration || !statement.name) continue;
       const captures = this.r.captures(statement);
@@ -1505,13 +2045,148 @@ class Lowering {
         for (const decl of s.declarationList.declarations as Node[])
           if (captures.includes(decl)) after = Math.max(after, i);
       });
-      const args: Ir[] = [this.name(statement.name)];
-      for (const decl of captures) args.push(this.name(decl.name));
       const held = holds.get(after) ?? [];
-      held.push(exprStatement(this.call('__capture', ...args)));
+      held.push(
+        exprStatement(
+          this.holdClosure(this.name(statement.name), captures, initialized),
+        ),
+      );
       holds.set(after, held);
     }
     return holds;
+  }
+
+  private freshName(base: string): string {
+    let name = base;
+    for (let i = 1; this.fileIdentifiers.has(name); i++) name = `${base}_${i}`;
+    this.fileIdentifiers.add(name);
+    return name;
+  }
+
+  private prepareQueue(decl: Node): boolean {
+    if (!this.forwardCaptures.has(decl)) return false;
+    // A parameter default may be visited again after its first lowering is
+    // discarded. Reuse the name, but emit its declaration on every visit.
+    if (!this.captureQueues.has(decl))
+      this.captureQueues.set(decl, this.freshName('__holds'));
+    return true;
+  }
+
+  private prepareParameters(fn: Node): void {
+    // Parameter defaults cannot see body var declarations. Only parameters
+    // need queues here; outer bindings retain their own capture scope.
+    const queued =
+      (fn.parameters as Node[] | undefined)?.filter(p =>
+        this.prepareQueue(p),
+      ) ?? [];
+    if (queued.length) {
+      this.parameterQueues.set(fn, queued);
+      // Defaults that can enqueue a later parameter must run after the
+      // body prologue declares the queues, even without other temporaries.
+      this.movingDefaults.add(fn);
+    }
+  }
+
+  private queueDeclaration(decl: Node): Ir {
+    return raw(`\nlet ${this.captureQueues.get(decl)!} = [];`);
+  }
+
+  private finishCapture(decl: Node): Ir[] {
+    const queue = this.captureQueues.get(decl);
+    if (!queue) return [];
+    const fn = this.freshName('__closure');
+    return [
+      gen(Prec.Primary, [
+        `\nif (${queue} !== null) for (const ${fn} of ${queue}) `,
+        exprStatement(this.call('__capture', raw(fn), this.name(decl.name))),
+        `\n${queue} = null;`,
+      ]),
+    ];
+  }
+
+  private holdClosure(
+    fn: Ir,
+    captures: Node[],
+    initialized = new Set<Node>(),
+  ): Ir {
+    const pending = captures.filter(
+      d => this.captureQueues.has(d) && !initialized.has(d),
+    );
+    const ready = captures.filter(d => !pending.includes(d));
+    const result = ready.length
+      ? this.call('__capture', fn, ...ready.map(d => this.name(d.name)))
+      : fn;
+    if (!pending.length) return result;
+    const temp = tempRef(this.newTemp());
+    const parts = [this.assign(temp, result)];
+    for (const decl of pending) {
+      const queue = this.captureQueues.get(decl)!;
+      parts.push(
+        cond(
+          binary(raw(queue), '===', raw('null')),
+          this.call('__capture', temp, this.name(decl.name)),
+          call(raw(`${queue}.push`, Prec.Member), [temp]),
+        ),
+      );
+    }
+    parts.push(temp);
+    return paren(comma(parts));
+  }
+
+  private symbolId(name: Node): number {
+    const host = this.r.c.host;
+    const symbol = isDeclarationName(name)
+      ? host.symbolOfDeclaration(name.parent as Node)
+      : host.resolvedSymbol(name);
+    return symbol ? host.symbolId(symbol) : -1;
+  }
+
+  private lexicalOwner(name: Node): Temp | undefined {
+    if (name.kind !== K.Identifier) return undefined;
+    const owner = this.lexicalOwners.get(this.symbolId(name));
+    return owner?.fn === getContainingFunction(name) ? owner?.temp : undefined;
+  }
+
+  private prepareVars(body: Node): Node[] {
+    const cached = this.functionVars.get(body);
+    if (cached) return cached;
+    const vars: Node[] = [];
+    const queues: Node[] = [];
+    // A var redeclaration of a parameter replaces the parameter's value,
+    // using the count acquired and released by the parameter prologue.
+    const symbols = new Set<number>(
+      (((body.parent as Node).parameters as Node[] | undefined) ?? [])
+        .filter(param => {
+          const local = this.r.local(param);
+          return local === Local.Owned || local === Local.OwnedMoved;
+        })
+        .map(param => this.symbolId(param.name)),
+    );
+    const visit = (node: Node): void => {
+      if (isErased(node) || isFunctionLike(node) || isClassLike(node)) return;
+      if (
+        node.kind === K.VariableDeclarationList &&
+        !(node.flags & (NodeFlags.Let | NodeFlags.Const))
+      ) {
+        for (const decl of node.declarations as Node[]) {
+          this.functionScopedVars.add(decl);
+          if (this.forwardCaptures.has(decl)) queues.push(decl);
+          const local = this.r.local(decl);
+          if (local !== Local.Owned && local !== Local.OwnedMoved) continue;
+          this.hoistedVars.add(decl);
+          const id = this.symbolId(decl.name);
+          if (!symbols.has(id)) {
+            symbols.add(id);
+            vars.push(decl);
+          }
+        }
+      }
+      forEachChild(node, visit);
+    };
+    forEachChild(body, visit);
+    this.functionVars.set(body, vars);
+    this.functionQueueVars.set(body, queues);
+    return vars;
   }
 
   private releases(owned: Node[]): Ir[] {
@@ -1531,6 +2206,18 @@ class Lowering {
     ]);
   }
 
+  private tryFinallyTemps(list: Ir[], owners: Temp[]): Ir {
+    return gen(Prec.Primary, [
+      '\ntry {',
+      ...list,
+      '\n} finally {',
+      ...[...owners]
+        .reverse()
+        .map(t => exprStatement(this.call('__release', tempRef(t)))),
+      '\n}',
+    ]);
+  }
+
   // The owned locals a `for` statement declares in its head.
   private ownedLocalsOfFor(node: Node): Node[] {
     const init = node.initializer as Node | undefined;
@@ -1538,11 +2225,24 @@ class Lowering {
     return this.ownedLocalsOfList(init);
   }
 
-  // `for (init; cond; update) body`. Owned locals declared in the head move
-  // out of the loop, which is wrapped in `try { ... } finally { ... }`.
-  // label: the outermost of the loop's labels.
+  // Keep the original for head so JavaScript creates per-iteration let
+  // environments. Owners outside it track counts, including on abrupt exits.
   private visitForStatement(node: Node, label: Node | undefined): Ir {
+    const queues: Node[] = [];
+    if (node.initializer?.kind === K.VariableDeclarationList)
+      for (const decl of node.initializer.declarations as Node[])
+        // Hoisted vars already have their queue in the function body.
+        if (!this.functionScopedVars.has(decl) && this.prepareQueue(decl))
+          queues.push(decl);
     const owned = this.ownedLocalsOfFor(node);
+    const owners = owned.map(name => {
+      const temp = this.newTemp();
+      this.lexicalOwners.set(this.symbolId(name), {
+        temp,
+        fn: getContainingFunction(node),
+      });
+      return temp;
+    });
     const init = node.initializer as Node | undefined;
     const initializer =
       init && init.kind === K.VariableDeclarationList
@@ -1551,38 +2251,29 @@ class Lowering {
     const condition = this.fullExpression(node.condition, Ctx.AtOnce);
     const incrementor = this.fullExpression(node.incrementor, Ctx.Discard);
     const body = this.visitLoopBody(node.statement, node);
-    if (owned.length === 0)
-      return this.update(node, [
-        [init, initializer],
-        [node.condition, condition],
-        [node.incrementor, incrementor],
-        [node.statement, body],
-      ]);
-    // the loop without its initializer
-    const loopEdits: Edit[] = [
-      {start: this.startOf(init!), end: init!.end, ir: raw('')},
-    ];
-    for (const [child, ir] of [
+    for (const name of owned) this.lexicalOwners.delete(this.symbolId(name));
+    let loop = this.update(node, [
+      [init, initializer],
       [node.condition, condition],
       [node.incrementor, incrementor],
       [node.statement, body],
-    ] as [Node | undefined, Ir | undefined][]) {
-      if (child && ir && !isIdentity(ir, child))
-        loopEdits.push(this.editOf(child, ir));
-    }
-    let loop: Ir = this.src(node, loopEdits);
-    if (label)
-      loop = this.src(label, [
-        {start: this.startOf(node), end: node.end, ir: loop},
-      ]);
-    // the declarations, copied ahead of the loop
-    const declarations = gen(Prec.Primary, ['\n', copyOf(initializer!), ';']);
-    return block([declarations, this.tryFinally([loop], owned)]);
+    ]);
+    if (label) loop = this.src(label, [this.editOf(node, loop)]);
+    if (owners.length === 0)
+      return queues.length
+        ? block([...queues.map(d => this.queueDeclaration(d)), loop])
+        : loop;
+    return block([
+      ...queues.map(d => this.queueDeclaration(d)),
+      ...owners.map(t => exprStatement(this.assign(tempRef(t), num(0)))),
+      this.tryFinallyTemps([loop], owners),
+    ]);
   }
 
-  // A loop's body. A for-of variable that owns each value (received from a
-  // channel) is released when the iteration ends, and the iteration ends at
-  // a quiescent point if the loop reads or stores a reference field.
+  // Lexical receive bindings are released when their iteration ends.
+  // ownedLocalsOfList excludes hoisted var bindings: replacement releases
+  // their previous receive, and the function cleanup releases the last one.
+  // A loop that reads/stores references ends iterations at a quiescent point.
   private visitLoopBody(body: Node, loop: Node): Ir {
     let visited = embedded(this.visit(body))!;
     if (
@@ -1647,6 +2338,7 @@ class Lowering {
   private visitClosure(node: Node): Ir {
     this.pushFrame(null);
     const scope = this.pushScope();
+    this.prepareParameters(node);
     let result = this.visitEachChild(node) as Src;
     this.popScope();
     this.popFrame();
@@ -1657,9 +2349,7 @@ class Lowering {
     }
     const captures = this.r.captures(node);
     if (captures.length === 0) return result;
-    const args: Ir[] = [result];
-    for (const decl of captures) args.push(this.name(decl.name));
-    return this.call('__capture', ...args);
+    return this.holdClosure(result, captures);
   }
 
   // An arrow function whose concise body becomes `{ var _a; return E; }`
@@ -1672,8 +2362,15 @@ class Lowering {
     const visited = at >= 0 ? result.edits[at]!.ir : this.src(body);
     let replacement: Ir;
     if (isGen(visited) && visited.tag?.t === 'block')
-      replacement = block([varsStatement(scope), ...visited.tag.list]);
-    else replacement = block([varsStatement(scope), returnStatement(visited)]);
+      replacement = block([
+        varsStatement(scope),
+        ...this.guardReceiverTemps(visited.tag.list, scope),
+      ]);
+    else
+      replacement = block([
+        varsStatement(scope),
+        ...this.guardReceiverTemps([returnStatement(visited)], scope),
+      ]);
     const edits = result.edits.filter((_, i) => i !== at);
     edits.push({start: this.startOf(body), end: body.end, ir: replacement});
     return this.src(node, edits);
@@ -1798,7 +2495,7 @@ class Lowering {
     const temps: Ir[] = [];
     let index: Ir;
     if (atomic.field >= 0) {
-      const object = this.visitIn(args[0], objectContext)!;
+      const object = this.receiver(args[0]!, objectContext, rest);
       index = binary(
         paren(binary(object, '>>', num(2))),
         '+',
@@ -1933,19 +2630,11 @@ class Lowering {
   }
 
   // `x = E` for an owned local: the new value is retained before the old is
-  // released, `_t = x, x = E', __release(_t)`. `x ||= E` is `x || (x = E')`.
+  // released. Logical assignments use the same replacement on their taken branch.
   private lowerLocalAssignment(node: Node, x: Node, ctx: Ctx): Ir | undefined {
     const operator = node.operatorToken.kind;
-    const replace = (value: Ir, keepValue: boolean): Ir => {
-      const old = this.newTemp();
-      const list = [
-        this.assign(tempRef(old), this.name(x)),
-        this.assign(this.name(x), value),
-        this.call('__release', tempRef(old)),
-      ];
-      if (keepValue) list.push(this.name(x));
-      return comma(list);
-    };
+    const replace = (value: Ir, keepValue: boolean): Ir =>
+      this.replaceLocal(x, value, keepValue);
     switch (operator) {
       case K.EqualsToken: {
         let result = replace(
@@ -1960,11 +2649,7 @@ class Lowering {
         this.conditional++;
         const value = this.visitIn(node.right, Ctx.Take)!;
         this.conditional--;
-        return binary(
-          this.name(x),
-          '||',
-          paren(this.assign(this.name(x), value)),
-        );
+        return binary(this.name(x), '||', paren(replace(value, true)));
       }
       case K.AmpersandAmpersandEqualsToken: {
         this.conditional++;
@@ -1974,6 +2659,26 @@ class Lowering {
       }
     }
     return undefined;
+  }
+
+  private replaceLocal(x: Node, value: Ir, keepValue: boolean): Ir {
+    // The right side can assign x too. Acquire its result before reading
+    // the current count to replace, so an inner assignment cannot release
+    // the same saved address twice.
+    const staged = this.newTemp();
+    const old = this.newTemp();
+    const owner = this.lexicalOwner(x);
+    const next = owner
+      ? this.assign(tempRef(owner), tempRef(staged))
+      : tempRef(staged);
+    const list = [
+      this.assign(tempRef(staged), value),
+      this.assign(tempRef(old), this.name(x)),
+      this.assign(this.name(x), next),
+      this.call('__release', tempRef(old)),
+    ];
+    if (keepValue) list.push(this.name(x));
+    return comma(list);
   }
 
   // An assignment to a string field or element, or a channel field, whose
@@ -2143,7 +2848,11 @@ class Lowering {
       if (cell.kind === CellKind.Struct) {
         const k = cell.fields.indexOf(name);
         if (k < 0) return undefined;
-        let object = this.visitIn(node.expression, objectContext)!;
+        let object = this.receiver(
+          node.expression,
+          objectContext,
+          value ? [value] : [],
+        );
         if (isGen(object) && object.tag?.t === 'binary') object = paren(object);
         const word = () =>
           binary(paren(binary(object, '>>', num(2))), '+', num(2 + 2 * k));
@@ -2205,13 +2914,20 @@ class Lowering {
     const {view, at} = access;
     const read = isRead ? access.read : (e: Ir) => e;
     if (this.r.isElementAccessInBounds(node)) {
-      const a = this.visitIn(node.expression, objectContext)!;
+      const a = this.receiver(
+        node.expression,
+        objectContext,
+        value ? [value] : [],
+      );
       const i = this.visit(node.argumentExpression);
       return read(view(at(a, i)));
     }
     const temps: Ir[] = [];
     const a = this.copiable(
-      this.receiver(node.expression, objectContext, [node.argumentExpression]),
+      this.receiver(node.expression, objectContext, [
+        node.argumentExpression,
+        ...(value ? [value] : []),
+      ]),
       temps,
     );
     const i = this.copiable(this.visit(node.argumentExpression), temps);
@@ -2288,26 +3004,43 @@ class Lowering {
     return found;
   }
 
-  // The array an element access (or an atomic operation) reads, visited. A
-  // variable that what comes after it assigns (`a[(a = b, 0)]`) is read
-  // before, into a temporary that holds a count until the full expression
-  // ends, as JavaScript reads the array first (the fork reads it again,
-  // after the index).
+  // A receiver can be derived from an owner (`a[i]`, `p.next`) that
+  // later evaluation replaces. Hold the evaluated address through writes
+  // to counted bindings or fields, including cleanup when evaluation throws.
   private receiver(object: Node, ctx: Ctx, after: Node[]): Ir {
-    const ir = this.visitIn(object, ctx)!;
-    const id = skipParentheses(object);
-    if (
-      id.kind !== K.Identifier ||
-      !isSimpleCopiable(ir) ||
-      !after.some(n => this.r.assignsIn(n, id))
-    )
-      return ir;
+    const replacesOwner = (node: Node): boolean => {
+      if (isErased(node)) return false;
+      // Class evaluation executes computed names, decorators, static field
+      // initializers and static blocks. Method bodies and instance field
+      // initializers run later, but their names/decorators run now.
+      if (
+        isFunctionLike(node) ||
+        (node.kind === K.PropertyDeclaration &&
+          !node.modifiers?.some((m: Node) => m.kind === K.StaticKeyword))
+      ) {
+        return !!forEachChild(node, child =>
+          child.kind === K.ComputedPropertyName || child.kind === K.Decorator
+            ? replacesOwner(child)
+            : false,
+        );
+      }
+      if (
+        node.kind === K.BinaryExpression &&
+        isAssignmentOperator(node.operatorToken.kind) &&
+        this.r.cellType(node.left).kind !== CellKind.None
+      )
+        return true;
+      return !!forEachChild(node, replacesOwner);
+    };
+    const hold = after.some(replacesOwner);
+    const ir = this.visitIn(object, hold ? Ctx.AtOnce : ctx)!;
+    if (!hold) return ir;
     // no full expression around to release it after: a plain copy
     if (!this.frames[this.frames.length - 1]) {
       const temp = this.newTemp();
       return paren(this.assign(tempRef(temp), ir));
     }
-    return this.temporary(this.call('__retain', ir));
+    return this.temporary(this.call('__retain', ir), true);
   }
 
   // An expression that can be repeated: the expression itself if it is

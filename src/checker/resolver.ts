@@ -32,6 +32,7 @@ import {
   declaringFunction,
   isAmbientHandle,
   isChannelReceiveLoop,
+  isVarReinitialization,
   referencedVariable,
 } from './refcount.ts';
 import {
@@ -408,20 +409,35 @@ export class Resolver {
     const list = decl.parent as Node | undefined;
     if (!list || list.kind !== K.VariableDeclarationList) return Local.None;
     const statement = list.parent as Node;
-    if (
+    const iteration =
       statement.kind === K.ForInStatement ||
-      statement.kind === K.ForOfStatement
-    ) {
-      if (isChannelReceiveLoop(c, statement))
-        return this.ownedLocal(decl, symbol); // owns each received value
-      return Local.Borrowed; // an error (checkRefCounts)
-    }
+      statement.kind === K.ForOfStatement;
+    // Only channel receives transfer an owned count. Unsupported counted
+    // iteration is diagnosed by checkRefCounts and must remain borrowed,
+    // including var bindings whose scope is the module.
+    if (iteration && !isChannelReceiveLoop(c, statement)) return Local.Borrowed;
     if (
       statement.kind === K.VariableStatement &&
       (statement.parent?.kind === K.SourceFile ||
         statement.parent?.kind === K.ModuleBlock)
     )
       return Local.Module;
+    // A var nested in a top-level block, loop, or switch still belongs to
+    // the source file (or namespace), rather than that lexical block.
+    if (!(list.flags & (NodeFlags.Let | NodeFlags.Const))) {
+      let scope = statement.parent as Node | undefined;
+      while (scope) {
+        if (scope.kind === K.SourceFile || scope.kind === K.ModuleBlock)
+          return Local.Module;
+        if (
+          isFunctionLike(scope) ||
+          scope.kind === K.ClassStaticBlockDeclaration
+        )
+          break;
+        scope = scope.parent as Node | undefined;
+      }
+    }
+    if (iteration) return this.ownedLocal(decl, symbol); // owns each channel receive
     if (!this.isAssigned(symbol)) {
       if (!decl.initializer || this.isBorrowable(decl.initializer))
         return Local.Borrowed; // (always 0 without an initializer)
@@ -544,6 +560,12 @@ export class Resolver {
     if (!node) return false;
     const visit = (n: Node): boolean => {
       if (isTypeNode(n)) return false;
+      if (
+        n.kind === K.VariableDeclaration &&
+        isVarReinitialization(this.c, n) &&
+        this.c.host.symbolOfDeclaration(n) === symbol
+      )
+        return true;
       if (n.kind === K.Identifier)
         return (
           isAssignmentTarget(n) && this.c.host.resolvedSymbol(n) === symbol
