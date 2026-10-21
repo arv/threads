@@ -2495,7 +2495,7 @@ class Lowering {
     const temps: Ir[] = [];
     let index: Ir;
     if (atomic.field >= 0) {
-      const object = this.visitIn(args[0], objectContext)!;
+      const object = this.receiver(args[0]!, objectContext, rest);
       index = binary(
         paren(binary(object, '>>', num(2))),
         '+',

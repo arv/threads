@@ -698,6 +698,21 @@ describe('counting lowering review regressions', () => {
       expected: '269',
     },
     {
+      name: 'holds atomic struct receivers through replacing operands',
+      source: `const A = struct({n: i32});
+      function f() {
+        let p = new A(); p.n = 7;
+        let q = new A(); q.n = 3;
+        const old = atomic.add(p, 'n', (p = new A(), q = new A(), q.n = 99, 1));
+        return [old, p.n, q.n];
+      }
+      export function main() {
+        const before = heapStats(); const result = f(); const after = heapStats();
+        log(JSON.stringify([result, after.allocated - before.allocated - (after.freed - before.freed)]));
+      }`,
+      expected: '[[7,0,99],0]',
+    },
+    {
       name: 'allows a module closure before its counted binding initializes',
       source: `const get = () => p.x; const p = new P(); p.x = 251;
       export function main() { log(get()); }`,
@@ -1320,7 +1335,7 @@ describe('counting lowering review regressions', () => {
     ({source, expected}) => {
       const dir = project(
         {
-          'app.ts': `import {Channel, collectCycles, f64, heapStats, log, ref, SharedArray, struct, type Struct} from '@arv/threads';
+          'app.ts': `import {atomic, Channel, collectCycles, f64, i32, heapStats, log, ref, SharedArray, struct, type Struct} from '@arv/threads';
         const P = struct({x: f64});
         type P = Struct<typeof P>;
         ${source}`,
